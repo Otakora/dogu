@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.otakora.dogu</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+  <name>Dogu</name>
+  <summary>Gestor personal de ROMs con explorador grafico</summary>
+  <description>
+    <p>Dogu es una aplicacion de escritorio para explorar carpetas de ROMs, buscar archivos, extraer comprimidos y ejecutar conversiones asistidas usando chdman.</p>
+  </description>
+  <launchable type="desktop-id">io.github.otakora.dogu.desktop</launchable>
+  <developer id="io.github.otakora">
+    <name>Otakora</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <url type="homepage">https://github.com/Otakora/dogu</url>
+</component>

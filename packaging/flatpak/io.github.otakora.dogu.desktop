@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Dogu
+Exec=dogu
+Type=Application
+Categories=Game;Utility;FileTools;
+Icon=io.github.otakora.dogu
+Terminal=false
+StartupNotify=true
+Comment=Gestor personal de ROMs con utilidades de exploracion, extraccion y conversion.

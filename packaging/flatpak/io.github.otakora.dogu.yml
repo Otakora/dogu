@@ -1,0 +1,25 @@
+id: io.github.otakora.dogu
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: dogu
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --filesystem=host
+  - --device=dri
+modules:
+  - name: dogu
+    buildsystem: simple
+    build-commands:
+      - install -d /app/lib/dogu
+      - install -Dm755 build/flatpak-input/dogu /app/lib/dogu/dogu
+      - cp -a build/flatpak-input/third_party /app/lib/dogu/third_party
+      - install -Dm755 packaging/flatpak/dogu.sh /app/bin/dogu
+      - install -Dm644 packaging/flatpak/io.github.otakora.dogu.desktop /app/share/applications/io.github.otakora.dogu.desktop
+      - install -Dm644 packaging/flatpak/io.github.otakora.dogu.metainfo.xml /app/share/metainfo/io.github.otakora.dogu.metainfo.xml
+      - install -Dm644 packaging/assets/io.github.otakora.dogu.svg /app/share/icons/hicolor/scalable/apps/io.github.otakora.dogu.svg
+    sources:
+      - type: dir
+        path: ../..

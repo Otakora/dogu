@@ -1,0 +1,98 @@
+name: Build Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build Windows artifact
+        run: python tools/release.py build-windows
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dogu-windows-x64
+          path: dist/dogu-windows-x64-setup.exe
+
+  linux-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            build-essential \
+            curl \
+            wget \
+            file \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+      - name: Build Linux native artifacts
+        run: python3 tools/release.py build-linux-native
+      - name: Upload Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: dogu-linux-appimage
+          path: dist/dogu-linux-x86_64.AppImage
+      - name: Upload Linux DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: dogu-linux-deb
+          path: dist/dogu-linux-x86_64.deb
+
+  linux-flatpak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native and Flatpak dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            build-essential \
+            curl \
+            wget \
+            file \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            flatpak \
+            flatpak-builder
+      - name: Build Linux Flatpak artifact
+        run: python3 tools/release.py build-linux-flatpak
+      - name: Upload Linux Flatpak
+        uses: actions/upload-artifact@v4
+        with:
+          name: dogu-linux-flatpak
+          path: dist/dogu-linux-x86_64.flatpak

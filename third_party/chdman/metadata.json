@@ -1,0 +1,27 @@
+{
+  "tool": "chdman",
+  "version": "0.288",
+  "release_tag": "mame0288",
+  "source": "Lanzamiento oficial de MAME",
+  "author": "MAMEdev and contributors",
+  "copyright": "Copyright (c) 1997-2026 MAMEdev and contributors",
+  "license_file_windows": "third_party/chdman/windows/COPYING",
+  "license_file_common": "third_party/chdman/windows/COPYING",
+  "urls": {
+    "docs": "https://docs.mamedev.org/tools/chdman.html",
+    "release": "https://www.mamedev.org/release.html",
+    "github": "https://github.com/mamedev/mame",
+    "windows_binary": "https://github.com/mamedev/mame/releases/download/mame0288/mame0288b_x64.exe",
+    "source_release": "https://github.com/mamedev/mame/releases/download/mame0288/mame0288s.exe"
+  },
+  "windows": {
+    "path": "third_party/chdman/windows/chdman.exe",
+    "bundled": true,
+    "status": "Binario oficial de Windows integrado y verificado en este proyecto el 2026-06-25."
+  },
+  "linux": {
+    "path": "third_party/chdman/linux/chdman",
+    "bundled": true,
+    "status": "Binario compilado desde la fuente oficial de MAME 0.288 y verificado ejecutandose dentro de Ubuntu WSL el 2026-06-25."
+  }
+}

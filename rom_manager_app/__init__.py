@@ -1,0 +1,1 @@
+"""ROM manager desktop application."""

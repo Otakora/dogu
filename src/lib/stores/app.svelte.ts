@@ -1,3 +1,4 @@
+import { untrack } from "svelte";
 import type {
   AppSettings,
   ThemeMode,
@@ -125,12 +126,14 @@ function createAppState() {
   // Content panel
   let entries = $state<EntryDto[]>([]);
   let selectedPaths = $state<Set<string>>(new Set());
-  let viewMode = $state<ViewMode>(settings.defaultViewMode);
-  let sortKey = $state<ContentSortKey>(settings.contentSortKey);
-  let sortDir = $state<SortDirection>(settings.contentSortDirection);
-  let columnWidths = $state<ContentColumnWidths>({ ...settings.contentColumnWidths });
-  let contentZoom = $state(settings.defaultContentZoom);
-  let treeZoom = $state(settings.defaultTreeZoom);
+  // untrack() prevents Svelte 5 from treating `settings` as a reactive dependency
+  // of these initializers — we intentionally capture the value once at startup.
+  let viewMode = $state<ViewMode>(untrack(() => settings.defaultViewMode));
+  let sortKey = $state<ContentSortKey>(untrack(() => settings.contentSortKey));
+  let sortDir = $state<SortDirection>(untrack(() => settings.contentSortDirection));
+  let columnWidths = $state<ContentColumnWidths>(untrack(() => ({ ...settings.contentColumnWidths })));
+  let contentZoom = $state(untrack(() => settings.defaultContentZoom));
+  let treeZoom = $state(untrack(() => settings.defaultTreeZoom));
   let isLoading = $state(false);
 
   // Search

@@ -37,27 +37,49 @@ Aplicacion de escritorio para gestionar colecciones de ROMs. Combina un explorad
 | Capa | Tecnologia |
 |------|-----------|
 | Backend | Rust + Tauri v2 |
-| Frontend | TypeScript + Vite (vanilla, sin framework UI) |
+| Frontend | Svelte 5 (runes) + TypeScript + Tailwind CSS v4 + Vite 8 |
 | Remoto | `remotefs` — SMB / SSH / FTP / FTPS |
 | Sidecars | chdman v0.288, 7-Zip |
 | Empaquetado | NSIS (Windows), AppImage / DEB / Flatpak (Linux) |
+
+## Desarrollo
+
+Requisitos: Node.js 20+, Rust stable
+
+```powershell
+npm install
+npm run tauri:dev
+```
+
+`tauri:dev` arranca el backend Rust y el servidor Vite juntos. La ventana de la app se abre automaticamente con hot-reload en el frontend.
+
+Para verificar tipos sin lanzar la app:
+
+```powershell
+npm run check          # svelte-check (TypeScript + Svelte)
+cargo check            # Rust (desde src-tauri/)
+```
+
+> `npm run dev` arranca **solo el frontend** en el navegador — los `invoke()` de Tauri no funcionan. Util unicamente para iterar en estilos o componentes puros sin recompilar Rust.
 
 ## Compilacion
 
 Requisitos: Node.js 20+, Rust stable, Python 3.12+
 
 ```powershell
-# Windows
-python .\tools\release.py build-windows
+# Windows (ejecutar en Windows)
+python tools/release.py build-windows
 ```
 
 ```bash
-# Linux
+# Linux — AppImage + DEB (ejecutar en Linux)
 python3 tools/release.py build-linux-native
+
+# Linux — Flatpak (incluye el build nativo previo)
 python3 tools/release.py build-linux-flatpak
 ```
 
-Guia completa con dependencias de sistema: [docs/building.md](docs/building.md)
+Los artefactos se generan en `dist/`. Guia completa con dependencias de sistema: [docs/building.md](docs/building.md)
 
 ## Herramientas de terceros integradas
 

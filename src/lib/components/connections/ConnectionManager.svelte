@@ -71,7 +71,7 @@
     isSaving = true;
     testResult = null;
     try {
-      await invoke("save_connection_profile", { payload });
+      await invoke("save_connection_profile", { profile: payload });
       await loadAll();
       cancelForm();
       app.notify("success", payload.id ? "Profile saved." : "Profile added.");
@@ -86,7 +86,7 @@
     isTesting = true;
     testResult = null;
     try {
-      const result = await invoke<ConnectionOpenResultDto>("test_connection_profile_payload", { payload });
+      const result = await invoke<ConnectionOpenResultDto>("test_connection_profile_payload", { profile: payload, trustCurrentFingerprint: false });
       testResult = result.connected
         ? { ok: true, message: "Connection successful." }
         : { ok: false, message: result.message ?? "Connection failed." };
@@ -100,7 +100,7 @@
   async function deleteProfile(id: string) {
     deleteConfirmId = null;
     try {
-      await invoke("delete_connection_profile", { id });
+      await invoke("delete_connection_profile", { profileId: id });
       await loadAll();
       if (editingProfile?.id === id) cancelForm();
     } catch (e) {
@@ -114,7 +114,7 @@
     try {
       const result = await invoke<ConnectionOpenResultDto>("connect_connection_profile", {
         profileId,
-        trustFingerprint: false,
+        trustCurrentFingerprint: false,
       });
 
       if (result.requiresTrust && result.fingerprint) {
@@ -127,12 +127,14 @@
           // Retry with trust granted
           const retryResult = await invoke<ConnectionOpenResultDto>("connect_connection_profile", {
             profileId,
-            trustFingerprint: true,
+            trustCurrentFingerprint: true,
           });
           if (retryResult.connected && retryResult.connection) {
             sessions = [...sessions.filter((s) => s.profileId !== profileId), retryResult.connection];
             app.setActiveConnections(sessions);
             app.notify("success", `Connected to ${retryResult.connection.label}.`);
+            app.navigate(retryResult.connection.rootPath);
+            app.closeConnectionManager();
           } else {
             app.notify("error", retryResult.message ?? "Connection failed after trusting fingerprint.");
           }
@@ -144,6 +146,8 @@
         sessions = [...sessions.filter((s) => s.profileId !== profileId), result.connection];
         app.setActiveConnections(sessions);
         app.notify("success", `Connected to ${result.connection.label}.`);
+        app.navigate(result.connection.rootPath);
+        app.closeConnectionManager();
       } else {
         app.notify("error", result.message ?? "Could not connect.");
       }

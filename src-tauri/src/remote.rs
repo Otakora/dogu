@@ -1043,16 +1043,11 @@ impl RemoteSession {
 
     fn entry_from_remote_file(&mut self, file: RemoteFile, logical_path: &str) -> Result<EntryDto> {
         let is_dir = file.is_dir();
-        let provider_path = self.resolve_provider_path(logical_path);
+        let _provider_path = self.resolve_provider_path(logical_path);
         let (size, size_label, has_children, has_directory_children) = if is_dir {
-            let children = self.fs.list_dir(Path::new(&provider_path)).unwrap_or_default();
-            let count = children.len();
-            let label = match count {
-                0 => "Vacia".to_string(),
-                1 => "1 elemento".to_string(),
-                n => format!("{n} elementos"),
-            };
-            (0, label, count > 0, children.iter().any(|child| child.is_dir()))
+            // Avoid N+1: don't list_dir for every directory in a listing.
+            // Remote dirs lazy-load their contents when navigated into.
+            (0u64, String::new(), true, true)
         } else {
             let size = file.metadata().size;
             (size, ops::format_size(size), false, false)

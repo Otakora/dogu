@@ -23,41 +23,62 @@ fn parse_paths(paths: Vec<String>) -> Vec<PathBuf> {
 }
 
 #[tauri::command]
-pub fn list_children(remote_state: State<'_, remote::RemoteState>, path: String) -> Result<Vec<EntryDto>, String> {
+pub async fn list_children(remote_state: State<'_, remote::RemoteState>, path: String) -> Result<Vec<EntryDto>, String> {
     if remote::RemoteManager::is_remote_path(&path) {
-        return remote_state
-            .inner
-            .list_children(&path)
-            .map_err(|error| error.to_string());
+        let rm = remote_state.inner.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            rm.list_children(&path).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
-    ops::list_children(&PathBuf::from(path)).map_err(|error| error.to_string())
+    let path_buf = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || {
+        ops::list_children(&path_buf).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn inspect_path(remote_state: State<'_, remote::RemoteState>, path: String) -> Result<EntryDto, String> {
+pub async fn inspect_path(remote_state: State<'_, remote::RemoteState>, path: String) -> Result<EntryDto, String> {
     if remote::RemoteManager::is_remote_path(&path) {
-        return remote_state
-            .inner
-            .inspect_path(&path)
-            .map_err(|error| error.to_string());
+        let rm = remote_state.inner.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            rm.inspect_path(&path).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
-    ops::entry_from_path(&PathBuf::from(path)).map_err(|error| error.to_string())
+    let path_buf = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || {
+        ops::entry_from_path(&path_buf).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn search_entries(
+pub async fn search_entries(
     remote_state: State<'_, remote::RemoteState>,
     path: String,
     query: String,
     recursive: bool,
 ) -> Result<Vec<EntryDto>, String> {
     if remote::RemoteManager::is_remote_path(&path) {
-        return remote_state
-            .inner
-            .search_entries(&path, &query, recursive)
-            .map_err(|error| error.to_string());
+        let rm = remote_state.inner.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            rm.search_entries(&path, &query, recursive).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
-    ops::search_entries(&PathBuf::from(path), &query, recursive).map_err(|error| error.to_string())
+    let path_buf = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || {
+        ops::search_entries(&path_buf, &query, recursive).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

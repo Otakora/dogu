@@ -15,6 +15,20 @@ import type {
   ActiveConnectionDto,
 } from "../types/index.js";
 
+// ─── Local types ───────────────────────────────────────────
+type ConfirmDialogState = {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+};
+
+type StartJobOpts = {
+  showDialog?: boolean;
+  statusMessageOnSuccess?: string;
+  statusMessageOnFailure?: string;
+};
+
 // ─── Default settings ─────────────────────────────────────
 const DEFAULT_COLUMN_WIDTHS: ContentColumnWidths = {
   name: 280,
@@ -58,6 +72,36 @@ function persistSettings(s: AppSettings) {
   }
 }
 
+// ─── Path helpers ──────────────────────────────────────────
+function parentPath(path: string): string | null {
+  // Remote: remote://session/a/b/c → remote://session/a/b
+  const remoteMatch = path.match(/^(remote:\/\/[^/]+)(\/.*)?$/);
+  if (remoteMatch) {
+    const rest = (remoteMatch[2] ?? "").split("/").filter(Boolean);
+    if (rest.length === 0) return null; // already at remote root
+    rest.pop();
+    return rest.length === 0
+      ? remoteMatch[1]
+      : `${remoteMatch[1]}/${rest.join("/")}`;
+  }
+  // Windows: C:\foo\bar → C:\foo
+  const winMatch = path.match(/^([A-Za-z]:\\)(.*)$/);
+  if (winMatch) {
+    const parts = winMatch[2].split("\\").filter(Boolean);
+    if (parts.length === 0) return null;
+    parts.pop();
+    return parts.length === 0 ? winMatch[1] : `${winMatch[1]}${parts.join("\\")}`;
+  }
+  // Unix: /a/b/c → /a/b
+  if (path.startsWith("/")) {
+    const parts = path.split("/").filter(Boolean);
+    if (parts.length === 0) return null;
+    parts.pop();
+    return parts.length === 0 ? "/" : `/${parts.join("/")}`;
+  }
+  return null;
+}
+
 // ─── Notification helpers ──────────────────────────────────
 let _notifCounter = 0;
 
@@ -89,6 +133,10 @@ function createAppState() {
   let treeZoom = $state(settings.defaultTreeZoom);
   let isLoading = $state(false);
 
+  // Search
+  let searchQuery = $state<string | null>(null);
+  let isSearching = $state(false);
+
   // Connections
   let connectionProfiles = $state<ConnectionProfileDto[]>([]);
   let activeConnections = $state<ActiveConnectionDto[]>([]);
@@ -108,8 +156,14 @@ function createAppState() {
   // Busy overlay
   let busyCount = $state(0);
 
-  // Connection manager visibility (inline panel, not separate window)
+  // Connection manager visibility (inline panel)
   let connectionManagerOpen = $state(false);
+
+  // Settings dialog
+  let settingsOpen = $state(false);
+
+  // Confirm dialog
+  let confirmDialog = $state<ConfirmDialogState | null>(null);
 
   // SSH fingerprint trust dialog
   let fingerprintPrompt = $state<{
@@ -150,22 +204,42 @@ function createAppState() {
         historyIndex = navigationHistory.length - 1;
       }
       currentPath = path;
+      searchQuery = null;
+      isSearching = false;
     },
 
     navigateBack() {
       if (historyIndex < 0) return;
       currentPath = navigationHistory[historyIndex];
       historyIndex -= 1;
+      searchQuery = null;
+      isSearching = false;
     },
 
     navigateForward() {
       if (historyIndex >= navigationHistory.length - 1) return;
       historyIndex += 1;
       currentPath = navigationHistory[historyIndex];
+      searchQuery = null;
+      isSearching = false;
+    },
+
+    navigateUp() {
+      if (!currentPath) return;
+      const parent = parentPath(currentPath);
+      if (parent !== null) this.navigate(parent);
     },
 
     get canGoBack() { return historyIndex >= 0; },
     get canGoForward() { return historyIndex < navigationHistory.length - 1; },
+
+    // ── Search ───────────────────────────────────────────────
+    get searchQuery() { return searchQuery; },
+    get isSearching() { return isSearching; },
+    setSearch(q: string) { searchQuery = q; isSearching = true; },
+    setIsSearching(v: boolean) { isSearching = v; },
+    setSearchQuery(q: string | null) { searchQuery = q; },
+    clearSearch() { searchQuery = null; isSearching = false; },
 
     // ── Content ──────────────────────────────────────────────
     get entries() { return entries; },
@@ -179,6 +253,24 @@ function createAppState() {
       if (next.has(path)) next.delete(path);
       else next.add(path);
       selectedPaths = next;
+    },
+    rangeSelect(fromPath: string, toPath: string) {
+      // Mirror ContentPanel's sort to find the correct visual range
+      const sorted = [...entries].sort((a, b) => {
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        let cmp = 0;
+        if (sortKey === "name") cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+        else if (sortKey === "type") cmp = a.extension.localeCompare(b.extension);
+        else if (sortKey === "size") cmp = a.size - b.size;
+        else if (sortKey === "modified") cmp = a.modifiedTs - b.modifiedTs;
+        return sortDir === "asc" ? cmp : -cmp;
+      });
+      const paths = sorted.map(e => e.path);
+      const fromIdx = paths.indexOf(fromPath);
+      const toIdx = paths.indexOf(toPath);
+      if (fromIdx === -1 || toIdx === -1) return;
+      const [start, end] = fromIdx < toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+      selectedPaths = new Set(paths.slice(start, end + 1));
     },
 
     get viewMode() { return viewMode; },
@@ -212,17 +304,43 @@ function createAppState() {
     get isLoading() { return isLoading; },
     setLoading(v: boolean) { isLoading = v; },
 
+    // ── Local locations ──────────────────────────────────────
+    addLocalLocation(path: string) {
+      if (settings.localLocations.includes(path)) return;
+      const locs = [...settings.localLocations, path];
+      settings = { ...settings, localLocations: locs };
+      persistSettings(settings);
+    },
+    removeLocalLocation(path: string) {
+      const locs = settings.localLocations.filter(l => l !== path);
+      settings = { ...settings, localLocations: locs };
+      persistSettings(settings);
+    },
+
     // ── Connections ──────────────────────────────────────────
     get connectionProfiles() { return connectionProfiles; },
     setConnectionProfiles(p: ConnectionProfileDto[]) { connectionProfiles = p; },
 
     get activeConnections() { return activeConnections; },
     setActiveConnections(c: ActiveConnectionDto[]) { activeConnections = c; },
+    removeActiveConnection(sessionId: string) {
+      activeConnections = activeConnections.filter(c => c.sessionId !== sessionId);
+    },
 
     // ── Connection manager ───────────────────────────────────
     get connectionManagerOpen() { return connectionManagerOpen; },
     openConnectionManager() { connectionManagerOpen = true; },
     closeConnectionManager() { connectionManagerOpen = false; },
+
+    // ── Settings dialog ──────────────────────────────────────
+    get settingsOpen() { return settingsOpen; },
+    openSettings() { settingsOpen = true; },
+    closeSettings() { settingsOpen = false; },
+
+    // ── Confirm dialog ───────────────────────────────────────
+    get confirmDialog() { return confirmDialog; },
+    openConfirm(dialog: ConfirmDialogState) { confirmDialog = dialog; },
+    closeConfirm() { confirmDialog = null; },
 
     // ── Fingerprint prompt ───────────────────────────────────
     get fingerprintPrompt() { return fingerprintPrompt; },
@@ -245,9 +363,51 @@ function createAppState() {
     startRename(path: string, value: string) { renaming = { path, value }; },
     cancelRename() { renaming = null; },
 
-    // ── Progress ─────────────────────────────────────────────
+    // ── Progress / job tracking ───────────────────────────────
     get progress() { return progress; },
-    setProgress(p: ProgressState | null) { progress = p; },
+
+    startJob(jobId: string, title: string, opts?: StartJobOpts) {
+      progress = {
+        jobId,
+        title,
+        progress: 0,
+        message: "",
+        logs: [],
+        done: false,
+        success: false,
+        resultMessage: "",
+        showDialog: opts?.showDialog ?? true,
+        statusMessageOnSuccess: opts?.statusMessageOnSuccess ?? null,
+        statusMessageOnFailure: opts?.statusMessageOnFailure ?? null,
+      };
+    },
+
+    updateJobProgress(jobId: string, pct: number, message: string) {
+      if (!progress || progress.jobId !== jobId) return;
+      progress = { ...progress, progress: pct, message };
+    },
+
+    appendJobLog(jobId: string, line: string) {
+      if (!progress || progress.jobId !== jobId) return;
+      progress = { ...progress, logs: [...progress.logs, line] };
+    },
+
+    finishJob(jobId: string, success: boolean, message: string) {
+      if (!progress || progress.jobId !== jobId) return;
+      progress = {
+        ...progress,
+        progress: 100,
+        done: true,
+        success,
+        resultMessage: message,
+      };
+      if (!progress.showDialog) {
+        // Auto-dismiss after short delay
+        setTimeout(() => { if (progress?.jobId === jobId) progress = null; }, 2000);
+      }
+    },
+
+    clearProgress() { progress = null; },
 
     // ── Notifications ─────────────────────────────────────────
     get notifications() { return notifications; },

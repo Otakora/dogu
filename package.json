@@ -10,9 +10,14 @@
     "tauri:build": "node ./node_modules/@tauri-apps/cli/tauri.js build"
   },
   "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tailwindcss/vite": "^4.3.2",
     "@tauri-apps/cli": "^2",
+    "svelte": "^5.56.4",
+    "svelte-check": "^4.7.1",
+    "tailwindcss": "^4.3.2",
     "typescript": "^5.8.3",
-    "vite": "^6.3.5"
+    "vite": "^8.1.0"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

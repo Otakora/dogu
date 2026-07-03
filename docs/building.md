@@ -89,6 +89,7 @@ sudo apt install -y \
   pkg-config \
   libtirpc-dev \
   libgnutls28-dev \
+  libldap2-dev \
   libgtk-3-dev \
   libwebkit2gtk-4.1-dev \
   libsoup-3.0-dev \
@@ -97,7 +98,7 @@ sudo apt install -y \
   patchelf
 ```
 
-`libtirpc-dev` y `libgnutls28-dev` son necesarios aqui porque el backend SMB actual (`remotefs-smb` con `vendored`) compila componentes de Samba durante el build en Linux.
+`libtirpc-dev`, `libgnutls28-dev` y `libldap2-dev` son necesarios aqui porque el backend SMB actual (`remotefs-smb` con `vendored`) compila componentes de Samba durante el build en Linux.
 
 ---
 

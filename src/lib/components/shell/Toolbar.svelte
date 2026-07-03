@@ -1,9 +1,13 @@
 <script lang="ts">
+  import { getContext } from "svelte";
   import { app } from "../../stores/app.svelte.js";
+  import type { PaneView } from "../../stores/app.svelte.js";
   import { t } from "../../i18n/index.js";
   import { openTerminalAt } from "../../utils/terminal.js";
   import ContextMenu from "../ui/ContextMenu.svelte";
   import type { MenuItem } from "../ui/ContextMenu.svelte";
+
+  const pane = getContext<PaneView>("pane");
 
   type Props = {
     onRefresh: () => void;
@@ -23,15 +27,15 @@
   let editPathValue = $state("");
 
   function enterPathEdit() {
-    if (!app.currentPath) return;
-    editPathValue = app.currentPath;
+    if (!pane.currentPath) return;
+    editPathValue = pane.currentPath;
     editingPath = true;
   }
 
   function commitPathEdit() {
     const val = editPathValue.trim();
     editingPath = false;
-    if (val && val !== app.currentPath) app.navigate(val);
+    if (val && val !== pane.currentPath) pane.navigate(val);
   }
 
   function cancelPathEdit() {
@@ -50,7 +54,7 @@
 
   function handleBreadcrumbAreaClick(e: MouseEvent) {
     if ((e.target as HTMLElement).closest(".tb-crumb, .tb-sep")) return;
-    if (!editingPath && app.currentPath) enterPathEdit();
+    if (!editingPath && pane.currentPath) enterPathEdit();
   }
 
   // ── Context menu ─────────────────────────────────────────
@@ -65,25 +69,36 @@
         kind: "action",
         label: t("sidebar.open"),
         icon: ICON_FOLDER,
-        onclick: () => app.navigate(crumb.path),
+        onclick: () => pane.navigate(crumb.path),
       },
       {
         kind: "action",
         label: t("tabs.openInNewTab"),
         icon: ICON_NEW_TAB,
-        onclick: () => app.addTab(crumb.path),
-      },
-      { kind: "separator" },
-      {
-        kind: "action",
-        label: t("tabs.copyPath"),
-        icon: ICON_COPY,
-        onclick: () => {
-          navigator.clipboard.writeText(crumb.path);
-          app.notify("info", t("sidebar.pathCopied"));
-        },
+        onclick: () => pane.addTab(crumb.path),
       },
     ];
+
+    if (app.isSplit) {
+      const otherPane = app.getPaneView(pane.paneIdx === 0 ? 1 : 0);
+      items.push({
+        kind: "action",
+        label: t("tabs.openInOtherPane"),
+        icon: ICON_SPLIT,
+        onclick: () => otherPane.navigate(crumb.path),
+      });
+    }
+
+    items.push({ kind: "separator" });
+    items.push({
+      kind: "action",
+      label: t("tabs.copyPath"),
+      icon: ICON_COPY,
+      onclick: () => {
+        navigator.clipboard.writeText(crumb.path);
+        app.notify("info", t("sidebar.pathCopied"));
+      },
+    });
 
     if (!isRemote) {
       items.push({ kind: "separator" });
@@ -108,7 +123,7 @@
   }
 
   // ── Breadcrumb ───────────────────────────────────────────
-  const breadcrumbs = $derived(buildBreadcrumbs(app.currentPath));
+  const breadcrumbs = $derived(buildBreadcrumbs(pane.currentPath));
 
   function buildBreadcrumbs(path: string | null): { label: string; path: string }[] {
     if (!path) return [];
@@ -158,10 +173,9 @@
   }
 
   // ── Search ────────────────────────────────────────────────
-  // Sync toolbar input when search is cleared from ContentPanel
   $effect(() => {
-    if (!app.isSearching) searchInput = "";
-    else if (app.searchQuery && searchInput !== app.searchQuery) searchInput = app.searchQuery;
+    if (!pane.isSearching) searchInput = "";
+    else if (pane.searchQuery && searchInput !== pane.searchQuery) searchInput = pane.searchQuery;
   });
 
   function submitSearch() {
@@ -170,7 +184,7 @@
 
   function clearSearch() {
     searchInput = "";
-    app.clearSearch();
+    pane.clearSearch();
     onClearSearch?.();
   }
 
@@ -181,13 +195,13 @@
 
   // ── Favorite state for current path ──────────────────────
   const isFavorited = $derived(
-    !!app.currentPath &&
-    !app.currentPath.startsWith("remote://") &&
-    app.isFavorite(app.currentPath)
+    !!pane.currentPath &&
+    !pane.currentPath.startsWith("remote://") &&
+    app.isFavorite(pane.currentPath)
   );
 
   const canFavorite = $derived(
-    !!app.currentPath && !app.currentPath.startsWith("remote://")
+    !!pane.currentPath && !pane.currentPath.startsWith("remote://")
   );
 
   // ── Icon strings ─────────────────────────────────────────
@@ -196,6 +210,7 @@
   const ICON_COPY      = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
   const ICON_STAR      = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
   const ICON_STAR_FILLED = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
+  const ICON_SPLIT     = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>`;
 </script>
 
 <div class="toolbar">
@@ -203,8 +218,8 @@
   <div class="tb-nav">
     <button
       class="tb-btn"
-      onclick={() => app.navigateBack()}
-      disabled={!app.canGoBack}
+      onclick={() => pane.navigateBack()}
+      disabled={!pane.canGoBack}
       title={t("toolbar.back")}
       aria-label={t("toolbar.back")}
     >
@@ -214,8 +229,8 @@
     </button>
     <button
       class="tb-btn"
-      onclick={() => app.navigateForward()}
-      disabled={!app.canGoForward}
+      onclick={() => pane.navigateForward()}
+      disabled={!pane.canGoForward}
       title={t("toolbar.forward")}
       aria-label={t("toolbar.forward")}
     >
@@ -225,8 +240,8 @@
     </button>
     <button
       class="tb-btn"
-      onclick={() => app.navigateUp()}
-      disabled={!app.currentPath}
+      onclick={() => pane.navigateUp()}
+      disabled={!pane.currentPath}
       title={t("toolbar.up")}
       aria-label={t("toolbar.up")}
     >
@@ -237,7 +252,7 @@
     <button
       class="tb-btn"
       onclick={onRefresh}
-      disabled={!app.currentPath}
+      disabled={!pane.currentPath}
       title={t("toolbar.refresh")}
       aria-label={t("menu.refresh")}
     >
@@ -257,7 +272,7 @@
     tabindex={editingPath ? -1 : 0}
     aria-readonly={!editingPath}
     onclick={handleBreadcrumbAreaClick}
-    onkeydown={(e) => { if (e.key === "Enter" && !editingPath && app.currentPath) enterPathEdit(); }}
+    onkeydown={(e) => { if (e.key === "Enter" && !editingPath && pane.currentPath) enterPathEdit(); }}
   >
     {#if editingPath}
       <input
@@ -280,13 +295,13 @@
         <button
           class="tb-crumb"
           class:tb-crumb--last={i === breadcrumbs.length - 1}
-          onclick={(e) => { e.stopPropagation(); app.navigate(crumb.path); }}
+          onclick={(e) => { e.stopPropagation(); pane.navigate(crumb.path); }}
           oncontextmenu={(e) => openCrumbMenu(e, crumb)}
         >
           {crumb.label}
         </button>
       {/each}
-      {#if !app.currentPath}
+      {#if !pane.currentPath}
         <span class="tb-crumb-placeholder">{t("toolbar.noLocationSelected")}</span>
       {/if}
     {/if}
@@ -297,7 +312,7 @@
     <button
       class="tb-btn"
       class:tb-btn--starred={isFavorited}
-      onclick={() => app.currentPath && app.toggleFavorite(app.currentPath)}
+      onclick={() => pane.currentPath && app.toggleFavorite(pane.currentPath)}
       title={isFavorited ? t("toolbar.removeFromFavorites") : t("toolbar.addToFavorites")}
       aria-label={isFavorited ? t("toolbar.removeFromFavorites") : t("toolbar.addToFavorites")}
       aria-pressed={isFavorited}
@@ -321,7 +336,7 @@
     <button
       class="tb-btn"
       onclick={onNewFolder}
-      disabled={!app.currentPath}
+      disabled={!pane.currentPath}
       title={t("toolbar.newFolder")}
       aria-label={t("toolbar.newFolder")}
     >
@@ -334,7 +349,7 @@
     <button
       class="tb-btn"
       onclick={onNewFile}
-      disabled={!app.currentPath}
+      disabled={!pane.currentPath}
       title={t("toolbar.newFile")}
       aria-label={t("toolbar.newFile")}
     >
@@ -350,11 +365,11 @@
     <div class="tb-view-toggle" role="group" aria-label={t("toolbar.viewMode")}>
       <button
         class="tb-btn tb-btn--toggle"
-        class:tb-btn--toggle-active={app.viewMode === "list"}
-        onclick={() => app.setViewMode("list")}
+        class:tb-btn--toggle-active={pane.viewMode === "list"}
+        onclick={() => pane.setViewMode("list")}
         title={t("toolbar.listView")}
         aria-label={t("toolbar.listView")}
-        aria-pressed={app.viewMode === "list"}
+        aria-pressed={pane.viewMode === "list"}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="8" y1="6" x2="21" y2="6"/>
@@ -367,11 +382,11 @@
       </button>
       <button
         class="tb-btn tb-btn--toggle"
-        class:tb-btn--toggle-active={app.viewMode === "grid"}
-        onclick={() => app.setViewMode("grid")}
+        class:tb-btn--toggle-active={pane.viewMode === "grid"}
+        onclick={() => pane.setViewMode("grid")}
         title={t("toolbar.gridView")}
         aria-label={t("toolbar.gridView")}
-        aria-pressed={app.viewMode === "grid"}
+        aria-pressed={pane.viewMode === "grid"}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
@@ -379,6 +394,20 @@
         </svg>
       </button>
     </div>
+
+    <!-- Split pane button (only shown for pane 0) -->
+    {#if pane.paneIdx === 0}
+      <button
+        class="tb-btn"
+        class:tb-btn--active={app.isSplit}
+        onclick={() => app.isSplit ? app.closeSecondPane() : app.addPane()}
+        title={app.isSplit ? t("toolbar.closeSplit") : t("toolbar.splitView")}
+        aria-label={app.isSplit ? t("toolbar.closeSplit") : t("toolbar.splitView")}
+        aria-pressed={app.isSplit}
+      >
+        {@html ICON_SPLIT}
+      </button>
+    {/if}
   </div>
 
   <!-- ── Search ── -->
@@ -401,51 +430,52 @@
     {/if}
   </div>
 
-  <!-- ── Queue mode toggle ── -->
-  <button
-    class="tb-btn"
-    class:tb-btn--active={app.queueMode}
-    onclick={() => app.toggleQueueMode()}
-    title={t("toolbar.queueMode")}
-    aria-label={t("toolbar.queueMode")}
-    aria-pressed={app.queueMode}
-  >
-    <!-- Stack of lines with play arrow -->
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <line x1="3" y1="6" x2="15" y2="6"/>
-      <line x1="3" y1="12" x2="15" y2="12"/>
-      <line x1="3" y1="18" x2="15" y2="18"/>
-      <polyline points="18 9 21 12 18 15"/>
-    </svg>
-  </button>
+  <!-- ── Queue mode toggle (only pane 0) ── -->
+  {#if pane.paneIdx === 0}
+    <button
+      class="tb-btn"
+      class:tb-btn--active={app.queueMode}
+      onclick={() => app.toggleQueueMode()}
+      title={t("toolbar.queueMode")}
+      aria-label={t("toolbar.queueMode")}
+      aria-pressed={app.queueMode}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="3" y1="6" x2="15" y2="6"/>
+        <line x1="3" y1="12" x2="15" y2="12"/>
+        <line x1="3" y1="18" x2="15" y2="18"/>
+        <polyline points="18 9 21 12 18 15"/>
+      </svg>
+    </button>
 
-  <!-- ── Terminal toggle ── -->
-  <button
-    class="tb-btn"
-    class:tb-btn--active={app.terminalPanelOpen}
-    onclick={() => {
-      if (!app.terminalPanelOpen && app.terminalTabs.length === 0 && app.currentPath) {
-        openTerminalAt(app.currentPath);
-      } else {
-        app.toggleTerminalPanel();
-      }
-    }}
-    title={t("terminal.openTerminal") + " (Ctrl+`)"}
-    aria-label={t("terminal.openTerminal")}
-    aria-pressed={app.terminalPanelOpen}
-  >
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
-    </svg>
-  </button>
+    <!-- ── Terminal toggle ── -->
+    <button
+      class="tb-btn"
+      class:tb-btn--active={app.terminalPanelOpen}
+      onclick={() => {
+        if (!app.terminalPanelOpen && app.terminalTabs.length === 0 && pane.currentPath) {
+          openTerminalAt(pane.currentPath);
+        } else {
+          app.toggleTerminalPanel();
+        }
+      }}
+      title={t("terminal.openTerminal") + " (Ctrl+`)"}
+      aria-label={t("terminal.openTerminal")}
+      aria-pressed={app.terminalPanelOpen}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+      </svg>
+    </button>
 
-  <!-- ── Settings ── -->
-  <button class="tb-btn" onclick={() => app.openSettings()} title={t("toolbar.settings")} aria-label={t("toolbar.settings")}>
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <circle cx="12" cy="12" r="3"/>
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-    </svg>
-  </button>
+    <!-- ── Settings ── -->
+    <button class="tb-btn" onclick={() => app.openSettings()} title={t("toolbar.settings")} aria-label={t("toolbar.settings")}>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+  {/if}
 </div>
 
 {#if contextMenu}
@@ -470,7 +500,6 @@
     overflow: hidden;
   }
 
-  /* ── Nav buttons ── */
   .tb-nav {
     display: flex;
     gap: 1px;
@@ -501,14 +530,12 @@
 
   .tb-btn--starred {
     color: #f59e0b;
-
     &:hover:not(:disabled) { color: #d97706; }
   }
 
   .tb-btn--active {
     background: var(--accent-soft);
     color: var(--accent);
-
     &:hover:not(:disabled) {
       background: color-mix(in srgb, var(--accent) 20%, transparent);
       color: var(--accent);
@@ -537,14 +564,12 @@
   .tb-btn--toggle-active {
     background: var(--accent-soft);
     color: var(--accent);
-
     &:hover:not(:disabled) {
       background: var(--accent-soft);
       color: var(--accent);
     }
   }
 
-  /* ── Breadcrumb ── */
   .tb-breadcrumb {
     flex: 1;
     display: flex;
@@ -605,7 +630,6 @@
     cursor: text;
   }
 
-  /* ── Path edit input ── */
   .tb-path-input {
     flex: 1;
     background: none;
@@ -620,14 +644,12 @@
     &::placeholder { color: var(--text-subtle); }
   }
 
-  /* ── Action buttons ── */
   .tb-actions {
     display: flex;
     gap: 2px;
     flex-shrink: 0;
   }
 
-  /* ── Search ── */
   .tb-search {
     display: flex;
     align-items: center;

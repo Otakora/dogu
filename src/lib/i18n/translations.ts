@@ -35,6 +35,8 @@ const en = {
   "toolbar.addToFavorites": "Add to favorites",
   "toolbar.removeFromFavorites": "Remove from favorites",
   "toolbar.editPath": "Type a path…",
+  "toolbar.splitView": "Split view",
+  "toolbar.closeSplit": "Close split",
 
   // ── Sidebar ─────────────────────────────────────────────
   "sidebar.locations": "Locations",
@@ -65,6 +67,7 @@ const en = {
   "sidebar.addToFavorites": "Add to favorites",
   "sidebar.noConnections": "No active connections.",
   "sidebar.freeOf": "{free} free of {total}",
+  "sidebar.openInOtherPane": "Open in other pane",
 
   // ── TreeNode ────────────────────────────────────────────
   "treeNode.collapse": "Collapse",
@@ -375,6 +378,7 @@ const en = {
   "tabs.addTab": "New tab",
   "tabs.duplicateTab": "Duplicate tab",
   "tabs.openInNewTab": "Open in new tab",
+  "tabs.openInOtherPane": "Open in other pane",
   "tabs.closeOthers": "Close other tabs",
   "tabs.copyPath": "Copy path",
 
@@ -524,6 +528,8 @@ const es: Record<TranslationKey, string> = {
   "toolbar.addToFavorites": "Añadir a favoritos",
   "toolbar.removeFromFavorites": "Quitar de favoritos",
   "toolbar.editPath": "Escribe una ruta…",
+  "toolbar.splitView": "Vista dividida",
+  "toolbar.closeSplit": "Cerrar división",
 
   // ── Sidebar ─────────────────────────────────────────────
   "sidebar.locations": "Ubicaciones",
@@ -554,6 +560,7 @@ const es: Record<TranslationKey, string> = {
   "sidebar.addToFavorites": "Añadir a favoritos",
   "sidebar.noConnections": "Sin conexiones activas.",
   "sidebar.freeOf": "{free} libre de {total}",
+  "sidebar.openInOtherPane": "Abrir en el otro panel",
 
   // ── TreeNode ────────────────────────────────────────────
   "treeNode.collapse": "Contraer",
@@ -864,6 +871,7 @@ const es: Record<TranslationKey, string> = {
   "tabs.addTab": "Nueva pestaña",
   "tabs.duplicateTab": "Duplicar pestaña",
   "tabs.openInNewTab": "Abrir en nueva pestaña",
+  "tabs.openInOtherPane": "Abrir en el otro panel",
   "tabs.closeOthers": "Cerrar las demás pestañas",
   "tabs.copyPath": "Copiar ruta",
 

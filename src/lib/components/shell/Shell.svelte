@@ -21,9 +21,7 @@
   } from "../../types/index.js";
 
   import Sidebar from "./Sidebar.svelte";
-  import TabBar from "./TabBar.svelte";
-  import Toolbar from "./Toolbar.svelte";
-  import ContentPanel from "../content/ContentPanel.svelte";
+  import Pane from "./Pane.svelte";
   import TerminalPanel from "../terminal/TerminalPanel.svelte";
   import ConnectionManager from "../connections/ConnectionManager.svelte";
   import JobsPanel from "../dialogs/JobsPanel.svelte";
@@ -36,8 +34,13 @@
   import M3uDialog from "../dialogs/M3uDialog.svelte";
   import { t, tn } from "../../i18n/index.js";
 
-  // ── ContentPanel ref for imperative calls ────────────────
-  let contentPanel = $state<ReturnType<typeof ContentPanel> | undefined>(undefined);
+  // ── Pane refs for imperative calls ──────────────────────
+  let pane0 = $state<ReturnType<typeof Pane> | undefined>(undefined);
+  let pane1 = $state<ReturnType<typeof Pane> | undefined>(undefined);
+
+  function focusedPane() {
+    return app.focusedPaneIdx === 1 ? pane1 : pane0;
+  }
 
   // ── Sidebar resize ────────────────────────────────────────
   let sidebarWidth = $state(220);
@@ -61,7 +64,33 @@
     window.addEventListener("mouseup", onUp);
   }
 
-  // ── Dialog state (local to Shell) ───────────────────────
+  // ── Pane splitter resize ──────────────────────────────────
+  let splitPercent = $state(50);
+  let paneAreaEl = $state<HTMLElement | undefined>(undefined);
+
+  function startPaneSplitResize(e: MouseEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startPct = splitPercent;
+    const areaW = paneAreaEl?.getBoundingClientRect().width ?? 800;
+
+    function onMove(ev: MouseEvent) {
+      const delta = ev.clientX - startX;
+      const deltaPct = (delta / areaW) * 100;
+      splitPercent = Math.max(20, Math.min(80, startPct + deltaPct));
+    }
+
+    function onUp() {
+      localStorage.setItem("dogu-split-percent", String(Math.round(splitPercent)));
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  // ── Dialog state ─────────────────────────────────────────
   let propertiesState = $state<{ paths: string[] } | null>(null);
   let extractionState = $state<{ archives: string[] } | null>(null);
   let compressionState = $state<{ sources: string[] } | null>(null);
@@ -77,7 +106,6 @@
   function newQueueId() { return `qop-${Date.now()}-${++_queueSeq}`; }
 
   function parentDir(p: string): string {
-    // Works for Windows paths (C:\foo\bar) and POSIX paths (/foo/bar)
     return p.replace(/[/\\][^/\\]+[/\\]?$/, "") || p;
   }
 
@@ -97,7 +125,9 @@
     const stored = localStorage.getItem("dogu-sidebar-width");
     if (stored) sidebarWidth = Math.max(140, Math.min(500, parseInt(stored, 10)));
 
-    // Load system volumes, known folders, compression capabilities, and app metadata (non-critical)
+    const storedSplit = localStorage.getItem("dogu-split-percent");
+    if (storedSplit) splitPercent = Math.max(20, Math.min(80, parseInt(storedSplit, 10)));
+
     try {
       const [vols, kf, caps, meta] = await Promise.all([
         invoke<VolumeDto[]>("list_volumes"),
@@ -109,7 +139,6 @@
       app.setKnownFolders(kf);
       compressionCapabilities = caps;
 
-      // On Linux, warn the user if the bundled chdman cannot be executed.
       if (meta.platform === "linux" && !meta.chdmanRuntime.available) {
         const msg = meta.chdmanRuntime.error
           ? t("startup.chdmanUnavailable", { error: meta.chdmanRuntime.error })
@@ -117,11 +146,10 @@
         app.notify("warn", msg);
       }
     } catch {
-      // System info unavailable — sidebar will show without drives/known folders
+      // System info unavailable
     }
 
     unlisten.push(await listen<JobProgressDto>("job-progress", ({ payload }) => {
-      // Backend emits 0.0–1.0; store/UI expects 0–100.
       app.updateJobProgress(payload.jobId, payload.progress * 100, payload.message);
     }));
     unlisten.push(await listen<JobLogDto>("job-log", ({ payload }) => {
@@ -135,7 +163,6 @@
       app.pauseJob(payload);
     }));
 
-    // Custom events from ContentPanel / FileRow
     document.addEventListener("dogu:rename-commit", handleRenameCommitRaw);
   });
 
@@ -146,12 +173,12 @@
 
   // ── Refresh helper ────────────────────────────────────────
   function refreshContent() {
-    contentPanel?.refresh();
+    focusedPane()?.refresh();
   }
 
-  // ── Keyboard shortcuts (app-level) ───────────────────────
+  // ── Keyboard shortcuts ────────────────────────────────────
   function handleAppKey(e: KeyboardEvent) {
-    if (e.key === "F5") { e.preventDefault(); refreshContent(); return; }
+    if (e.key === "F5") { e.preventDefault(); focusedPane()?.refresh(); return; }
 
     if (e.key === "Escape") {
       if (app.connectionManagerOpen) app.closeConnectionManager();
@@ -159,14 +186,21 @@
       return;
     }
 
-    // Terminal toggle
     if (e.ctrlKey && e.key === "`") {
       e.preventDefault();
       app.toggleTerminalPanel();
       return;
     }
 
-    // Tab management shortcuts
+    // Switch pane focus with Alt+Left/Right or F6
+    if (app.isSplit) {
+      if (e.key === "F6" || (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight"))) {
+        e.preventDefault();
+        app.focusPane(app.focusedPaneIdx === 0 ? 1 : 0);
+        return;
+      }
+    }
+
     if (e.ctrlKey && !e.altKey) {
       if (e.key === "t" || e.key === "T") { e.preventDefault(); app.addTab(app.currentPath ?? undefined); return; }
       if (e.key === "w" || e.key === "W") { e.preventDefault(); app.closeTab(app.activeTabId); return; }
@@ -175,7 +209,6 @@
         if (e.shiftKey) app.prevTab(); else app.nextTab();
         return;
       }
-      // Ctrl+1-9 jump to tab
       const num = parseInt(e.key);
       if (!isNaN(num) && num >= 1 && num <= 9) {
         e.preventDefault();
@@ -190,13 +223,9 @@
     const { path, newName } = (e as CustomEvent<{ path: string; newName: string }>).detail;
     app.cancelRename();
     invoke("rename_path", { path, newName })
-      .then(() => refreshContent())
+      .then(() => focusedPane()?.refresh())
       .catch(err => app.notify("error", t("shell.renameFailed", { error: String(err) })));
   }
-
-  // ── New folder / file ────────────────────────────────────
-  function triggerNewFolder() { contentPanel?.createFolder(); }
-  function triggerNewFile()   { contentPanel?.createFile(); }
 
   // ── Delete ────────────────────────────────────────────────
   function handleDelete(paths: string[]) {
@@ -356,7 +385,7 @@
 
   // ── M3U ───────────────────────────────────────────────────
   export function openM3uDialog(paths: string[]) {
-    const dirs = paths.filter((p) => p !== ""); // caller provides dirs
+    const dirs = paths.filter((p) => p !== "");
     if (dirs.length === 0) return;
     m3uDirs = dirs;
   }
@@ -497,18 +526,25 @@
     invoke("open_with_dialog", { path }).catch(e => app.notify("error", String(e)));
   }
 
-  // ── Search ────────────────────────────────────────────────
-  function handleSearch(q: string) {
-    contentPanel?.search(q);
-  }
-
-  function handleClearSearch() {
-    contentPanel?.clearSearch();
-  }
+  // Shared handlers object to pass to both panes
+  const paneHandlers = {
+    onDelete: handleDelete,
+    onCopy: handleCopy,
+    onCut: handleCut,
+    onPaste: handlePaste,
+    onExtractHere: handleExtractHere,
+    onExtractToFolder: handleExtractToFolder,
+    onExtractTo: handleExtractTo,
+    onCompressQuick: handleCompressQuick,
+    onCompress: handleCompress,
+    onChd: openChdDialog,
+    onM3u: openM3uDialog,
+    onProperties: handleProperties,
+    onOpenWith: handleOpenWith,
+  };
 </script>
 
 <svelte:window onkeydown={handleAppKey} />
-<!-- Prevent the webview's built-in context menu from showing anywhere in the app -->
 <svelte:document oncontextmenu={(e) => e.preventDefault()} />
 
 <div class="shell" style="--sidebar-width: {sidebarWidth}px">
@@ -521,39 +557,40 @@
 
   <!-- ── Main column ── -->
   <div class="shell-main">
-    <TabBar />
-
-    <Toolbar
-      onRefresh={refreshContent}
-      onNewFolder={triggerNewFolder}
-      onNewFile={triggerNewFile}
-      onSearch={handleSearch}
-      onClearSearch={handleClearSearch}
-    />
-
-    <div class="shell-content">
-      <!-- Connection Manager side panel (slides in from left over content) -->
+    <!-- ── Pane area ── -->
+    <div class="shell-content" bind:this={paneAreaEl}>
+      <!-- Connection Manager side panel -->
       {#if app.connectionManagerOpen}
         <ConnectionManager />
       {/if}
 
-      <!-- File list -->
-      <ContentPanel
-        bind:this={contentPanel}
-        onDelete={handleDelete}
-        onCopy={handleCopy}
-        onCut={handleCut}
-        onPaste={handlePaste}
-        onExtractHere={handleExtractHere}
-        onExtractToFolder={handleExtractToFolder}
-        onExtractTo={handleExtractTo}
-        onCompressQuick={handleCompressQuick}
-        onCompress={handleCompress}
-        onChd={openChdDialog}
-        onM3u={openM3uDialog}
-        onProperties={handleProperties}
-        onOpenWith={handleOpenWith}
-      />
+      <!-- Primary pane (always shown) -->
+      <div class="pane-wrap" style="flex: {app.isSplit ? splitPercent : 100};">
+        <Pane
+          bind:this={pane0}
+          paneIdx={0}
+          {...paneHandlers}
+        />
+      </div>
+
+      <!-- Pane splitter + secondary pane (only when split) -->
+      {#if app.isSplit}
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div
+          class="pane-splitter"
+          role="separator"
+          aria-label="Resize panes"
+          onmousedown={startPaneSplitResize}
+        ></div>
+
+        <div class="pane-wrap" style="flex: {100 - splitPercent};">
+          <Pane
+            bind:this={pane1}
+            paneIdx={1}
+            {...paneHandlers}
+          />
+        </div>
+      {/if}
     </div>
 
     <TerminalPanel />
@@ -615,7 +652,6 @@
 <style>
   .shell {
     display: flex;
-    /* zoom scales everything; compensate height so content still fills the viewport */
     height: calc(100vh / var(--app-font-scale, 1));
     overflow: hidden;
     background: var(--bg);
@@ -628,7 +664,7 @@
     cursor: col-resize;
     flex-shrink: 0;
     background: transparent;
-    margin-left: -1px; /* sit on top of sidebar border */
+    margin-left: -1px;
     z-index: 20;
     transition: background 0.15s;
 
@@ -648,5 +684,42 @@
     display: flex;
     overflow: hidden;
     min-height: 0;
+    position: relative;
+  }
+
+  .pane-wrap {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .pane-splitter {
+    flex-shrink: 0;
+    width: 5px;
+    height: 100%;
+    cursor: col-resize;
+    background: var(--line);
+    z-index: 5;
+    transition: background 0.15s;
+    position: relative;
+
+    &:hover,
+    &:active { background: var(--accent); }
+
+    &::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 3px;
+      height: 40px;
+      border-radius: 2px;
+      background: color-mix(in srgb, var(--line-strong) 60%, transparent);
+      pointer-events: none;
+    }
+
+    &:hover::after { background: color-mix(in srgb, var(--accent) 60%, transparent); }
   }
 </style>

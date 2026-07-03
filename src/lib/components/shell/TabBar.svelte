@@ -1,17 +1,20 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { getContext, onDestroy } from "svelte";
   import { app } from "../../stores/app.svelte.js";
+  import type { PaneView } from "../../stores/app.svelte.js";
   import { t } from "../../i18n/index.js";
   import ContextMenu from "../ui/ContextMenu.svelte";
   import type { MenuItem } from "../ui/ContextMenu.svelte";
 
+  const pane = getContext<PaneView>("pane");
+
   let contextMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
-  // ── Drag-to-reorder (mouse events — reliable in Tauri WebView) ───
+  // ── Drag-to-reorder ──────────────────────────────────────
   type DragState = { fromIdx: number; startX: number; active: boolean };
-  let drag: DragState | null = null;           // non-reactive: updated on every mousemove
-  let draggedIdx    = $state<number | null>(null); // reactive: drives .dragging class
-  let dropInsertIdx = $state<number | null>(null); // reactive: drives indicator
+  let drag: DragState | null = null;
+  let draggedIdx    = $state<number | null>(null);
+  let dropInsertIdx = $state<number | null>(null);
 
   let tabListEl = $state<HTMLElement | undefined>();
 
@@ -42,7 +45,7 @@
 
   function onWindowMouseUp() {
     if (drag?.active && dropInsertIdx !== null) {
-      app.reorderTabs(drag.fromIdx, dropInsertIdx);
+      pane.reorderTabs(drag.fromIdx, dropInsertIdx);
     }
     drag = null;
     draggedIdx = null;
@@ -66,32 +69,32 @@
 
   function closeTab(e: MouseEvent, id: string) {
     e.stopPropagation();
-    app.closeTab(id);
+    pane.closeTab(id);
   }
 
   function openTabMenu(e: MouseEvent, tabId: string, idx: number) {
     e.preventDefault();
     e.stopPropagation();
-    const tab = app.tabs[idx];
+    const tab = pane.tabs[idx];
     if (!tab) return;
 
     const items: MenuItem[] = [];
 
-    if (app.tabs.length > 1) {
+    if (pane.tabs.length > 1) {
       items.push({
         kind: "action",
         label: t("tabs.close"),
         icon: ICON_CLOSE,
-        onclick: () => app.closeTab(tabId),
+        onclick: () => pane.closeTab(tabId),
       });
       items.push({
         kind: "action",
         label: t("tabs.closeOthers"),
         icon: ICON_CLOSE_OTHERS,
         onclick: () => {
-          const toClose = app.tabs.filter(t => t.id !== tabId).map(t => t.id);
-          app.setActiveTab(tabId);
-          for (const id of toClose) app.closeTab(id);
+          const toClose = pane.tabs.filter(t => t.id !== tabId).map(t => t.id);
+          pane.setActiveTab(tabId);
+          for (const id of toClose) pane.closeTab(id);
         },
       });
       items.push({ kind: "separator" });
@@ -102,8 +105,8 @@
       label: t("tabs.duplicateTab"),
       icon: ICON_DUPLICATE,
       onclick: () => {
-        app.setActiveTabByIndex(idx);
-        app.duplicateTab();
+        pane.setActiveTabByIndex(idx);
+        pane.duplicateTab();
       },
     });
 
@@ -112,8 +115,21 @@
         kind: "action",
         label: t("tabs.addTab"),
         icon: ICON_NEW_TAB,
-        onclick: () => app.addTab(tab.currentPath ?? undefined),
+        onclick: () => pane.addTab(tab.currentPath ?? undefined),
       });
+
+      // "Open in other pane" when split
+      if (app.isSplit) {
+        const otherPane = app.getPaneView(pane.paneIdx === 0 ? 1 : 0);
+        items.push({ kind: "separator" });
+        items.push({
+          kind: "action",
+          label: t("tabs.openInOtherPane"),
+          icon: ICON_SPLIT,
+          onclick: () => otherPane.addTab(tab.currentPath ?? undefined),
+        });
+      }
+
       items.push({ kind: "separator" });
       items.push({
         kind: "action",
@@ -134,6 +150,7 @@
   const ICON_DUPLICATE    = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
   const ICON_NEW_TAB      = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h6"/></svg>`;
   const ICON_COPY         = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+  const ICON_SPLIT        = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>`;
 </script>
 
 <div class="tab-bar" role="tablist" aria-label="File browser tabs">
@@ -142,24 +159,24 @@
       <div class="drop-indicator" aria-hidden="true"></div>
     {/if}
 
-    {#each app.tabs as tab, i (tab.id)}
+    {#each pane.tabs as tab, i (tab.id)}
       <!-- svelte-ignore a11y_interactive_supports_focus -->
       <div
         class="tab"
-        class:active={i === app.activeTabIdx}
+        class:active={i === pane.activeTabIdx}
         class:dragging={draggedIdx === i}
         role="tab"
-        aria-selected={i === app.activeTabIdx}
+        aria-selected={i === pane.activeTabIdx}
         title={tab.currentPath ?? t("tabs.newTab")}
         style:--tab-color={tab.color}
         onmousedown={(e) => onTabMouseDown(e, i)}
-        onclick={() => { if (!drag?.active) app.setActiveTabByIndex(i); }}
-        onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") app.setActiveTabByIndex(i); }}
+        onclick={() => { if (!drag?.active) pane.setActiveTabByIndex(i); }}
+        onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") pane.setActiveTabByIndex(i); }}
         oncontextmenu={(e) => openTabMenu(e, tab.id, i)}
       >
         <span class="tab-dot" aria-hidden="true"></span>
         <span class="tab-title">{tabTitle(tab.currentPath)}</span>
-        {#if app.tabs.length > 1}
+        {#if pane.tabs.length > 1}
           <button
             class="tab-close"
             aria-label={t("tabs.close")}
@@ -185,7 +202,7 @@
     class="tab-add"
     aria-label={t("tabs.addTab")}
     title={t("tabs.addTab")}
-    onclick={() => app.addTab()}
+    onclick={() => pane.addTab()}
   >
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
       <path d="M7 1.5V12.5M1.5 7H12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>

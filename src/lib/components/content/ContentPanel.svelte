@@ -1,13 +1,16 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onDestroy, untrack } from "svelte";
+  import { getContext, onDestroy, untrack } from "svelte";
   import { app } from "../../stores/app.svelte.js";
+  import type { PaneView } from "../../stores/app.svelte.js";
   import type { EntryDto, ContentSortKey } from "../../types/index.js";
   import FileRow from "./FileRow.svelte";
   import ContextMenu from "../ui/ContextMenu.svelte";
   import type { MenuItem } from "../ui/ContextMenu.svelte";
   import { t, tn } from "../../i18n/index.js";
   import { openTerminalAt, openRemoteTerminalAt } from "../../utils/terminal.js";
+
+  const pane = getContext<PaneView>("pane");
 
   type Props = {
     onDelete: (paths: string[]) => void;
@@ -40,7 +43,7 @@
   function startColResize(e: MouseEvent, key: "name" | "type" | "size" | "modified") {
     e.preventDefault();
     e.stopPropagation();
-    resizingCol = { key, startX: e.clientX, startW: app.columnWidths[key] };
+    resizingCol = { key, startX: e.clientX, startW: pane.columnWidths[key] };
     window.addEventListener("mousemove", onColResizeMove);
     window.addEventListener("mouseup", onColResizeEnd);
   }
@@ -49,7 +52,7 @@
     if (!resizingCol) return;
     const delta = e.clientX - resizingCol.startX;
     const newW = Math.max(50, Math.round(resizingCol.startW + delta));
-    app.setColumnWidth(resizingCol.key, newW);
+    pane.setColumnWidth(resizingCol.key, newW);
   }
 
   function onColResizeEnd() {
@@ -63,17 +66,13 @@
     if (!e.ctrlKey) return;
     e.preventDefault();
     const delta = e.deltaY < 0 ? 0.1 : -0.1;
-    const next = Math.max(0.6, Math.min(2.0, Math.round((app.contentZoom + delta) * 10) / 10));
-    app.setContentZoom(next);
+    const next = Math.max(0.6, Math.min(2.0, Math.round((pane.contentZoom + delta) * 10) / 10));
+    pane.setContentZoom(next);
   }
 
-  // ── Rubber-band selection ────────────────────────────────────────────────────
-  // rbDiv lives in panelEl (overflow:hidden) → never extends contentBodyEl's scroll area.
-  // rbSX/rbSY are stored in SCROLL-SPACE (relative to contentBodyEl content origin) so the
-  // selection anchor stays attached to its content position as auto-scroll moves the viewport.
-  // The visual rect is re-derived from scroll-space on every frame, compensating scroll offset.
+  // ── Rubber-band selection ─────────────────────────────────
   let rbDiv: HTMLDivElement | null = null;
-  let rbSX = 0, rbSY = 0;   // drag-start in scroll-space (contentBodyEl coords)
+  let rbSX = 0, rbSY = 0;
   let rbActive = false;
   let consumeNextPanelClick = false;
   let lastMouse = { x: 0, y: 0 };
@@ -89,32 +88,21 @@
     }
   }
 
-  // mx, my — current mouse position in VIEWPORT coords.
-  // Converts scroll-space start + viewport end into panel-local rect for display.
   function setRubberBandRect(mx: number, my: number) {
     if (!rbDiv || !contentBodyEl || !panelEl) return;
-
     const bodyRect  = contentBodyEl.getBoundingClientRect();
     const panelRect = panelEl.getBoundingClientRect();
-
-    // Current mouse in scroll-space
     const ex = mx - bodyRect.left + contentBodyEl.scrollLeft;
     const ey = my - bodyRect.top  + contentBodyEl.scrollTop;
-
     const dw = Math.abs(ex - rbSX);
     const dh = Math.abs(ey - rbSY);
     if (dw < 3 && dh < 3) { rbDiv.style.display = "none"; return; }
-
-    // Convert scroll-space corners to panel-local for CSS positioning.
-    // body offset inside panel is constant; scroll offset shifts the anchor visually.
     const bLeft = bodyRect.left - panelRect.left;
     const bTop  = bodyRect.top  - panelRect.top;
-
     const startPX = rbSX - contentBodyEl.scrollLeft + bLeft;
     const startPY = rbSY - contentBodyEl.scrollTop  + bTop;
-    const endPX   = mx - panelRect.left;   // == ex - scrollLeft + bLeft
+    const endPX   = mx - panelRect.left;
     const endPY   = my - panelRect.top;
-
     rbDiv.style.display = "block";
     rbDiv.style.left   = `${Math.min(startPX, endPX)}px`;
     rbDiv.style.top    = `${Math.min(startPY, endPY)}px`;
@@ -122,19 +110,15 @@
     rbDiv.style.height = `${Math.abs(endPY - startPY)}px`;
   }
 
-  // Selection comparison also uses scroll-space so items stay selected through auto-scroll.
   function updateRubberBandSelection(mx: number, my: number) {
     if (!contentBodyEl) return;
     const bodyRect = contentBodyEl.getBoundingClientRect();
-
     const ex = mx - bodyRect.left + contentBodyEl.scrollLeft;
     const ey = my - bodyRect.top  + contentBodyEl.scrollTop;
-
     const selL = Math.min(rbSX, ex);
     const selT = Math.min(rbSY, ey);
     const selR = Math.max(rbSX, ex);
     const selB = Math.max(rbSY, ey);
-
     const selected: string[] = [];
     contentBodyEl.querySelectorAll<HTMLElement>("[data-path]").forEach((row) => {
       const r  = row.getBoundingClientRect();
@@ -145,24 +129,21 @@
         if (p) selected.push(p);
       }
     });
-    app.setSelection(selected);
+    pane.setSelection(selected);
   }
 
   function handleBodyMousedown(e: MouseEvent) {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest("[data-path]")) return;
     if (!contentBodyEl) return;
-
     ensureRubberBand();
     const bodyRect = contentBodyEl.getBoundingClientRect();
-    // Store start in scroll-space so anchor is content-relative
     rbSX = e.clientX - bodyRect.left + contentBodyEl.scrollLeft;
     rbSY = e.clientY - bodyRect.top  + contentBodyEl.scrollTop;
     rbActive = true;
     lastMouse = { x: e.clientX, y: e.clientY };
     if (rbDiv) rbDiv.style.display = "none";
-    app.clearSelection();
-
+    pane.clearSelection();
     window.addEventListener("mousemove", onDragMove);
     window.addEventListener("mouseup", onDragEnd);
     autoScrollRaf = requestAnimationFrame(autoScrollTick);
@@ -185,7 +166,6 @@
       const maxScroll = contentBodyEl.scrollHeight - contentBodyEl.clientHeight;
       if (contentBodyEl.scrollTop < maxScroll) contentBodyEl.scrollTop += SPEED;
     }
-    // Redraw with same mouse position — scroll changed so anchor shifts in panel-local space
     setRubberBandRect(lastMouse.x, lastMouse.y);
     updateRubberBandSelection(lastMouse.x, lastMouse.y);
     autoScrollRaf = requestAnimationFrame(autoScrollTick);
@@ -212,9 +192,9 @@
   });
 
   // ── Sorted entries ───────────────────────────────────────
-  const sorted = $derived(sortEntries(app.entries, app.sortKey, app.sortDir));
+  const sorted = $derived(sortEntries(pane.entries, pane.sortKey, pane.sortDir));
 
-  // ── Quick filter (Ctrl+F or type-ahead) ──────────────────
+  // ── Quick filter ──────────────────────────────────────────
   let quickFilter = $state("");
   let quickFilterOpen = $state(false);
   let quickFilterInputEl = $state<HTMLInputElement | undefined>(undefined);
@@ -225,7 +205,6 @@
       : sorted
   );
 
-  // Type-ahead buffer
   let typeaheadBuffer = "";
   let typeaheadTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -236,7 +215,7 @@
     const query = typeaheadBuffer.toLowerCase();
     const match = displayed.find(e => e.name.toLowerCase().startsWith(query));
     if (match) {
-      app.setSelection([match.path]);
+      pane.setSelection([match.path]);
       lastClickedPath = match.path;
       const el = panelEl?.querySelector<HTMLElement>(`[data-path="${CSS.escape(match.path)}"]`);
       el?.scrollIntoView({ block: "nearest" });
@@ -251,9 +230,7 @@
 
   function sortEntries(entries: EntryDto[], key: ContentSortKey, dir: "asc" | "desc"): EntryDto[] {
     return [...entries].sort((a, b) => {
-      // Directories always first
       if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-
       let cmp = 0;
       switch (key) {
         case "name":     cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" }); break;
@@ -265,35 +242,33 @@
     });
   }
 
-  // ── Load on path / tab change (tab-aware) ────────────────
+  // ── Load on path / tab change ────────────────────────────
   let lastLoadKey = "";
-
-  // Debounced scroll save
   let scrollSaveTimer: ReturnType<typeof setTimeout> | undefined;
+
   function saveScrollPosition() {
     clearTimeout(scrollSaveTimer);
     scrollSaveTimer = setTimeout(() => {
-      if (contentBodyEl) app.setTabScrollTop(app.activeTabIdx, contentBodyEl.scrollTop);
+      if (contentBodyEl) pane.setTabScrollTop(pane.activeTabIdx, contentBodyEl.scrollTop);
     }, 100);
   }
 
   $effect(() => {
-    const path = app.currentPath;
-    const tabId = app.activeTabId;
+    const path = pane.currentPath;
+    const tabId = pane.activeTabId;
     if (!path) return;
     const key = `${tabId}::${path}`;
     if (key === lastLoadKey) return;
     lastLoadKey = key;
 
     untrack(() => {
-      const loadedPath = app.activeTab?.loadedPath;
+      const loadedPath = pane.activeTab?.loadedPath;
       if (loadedPath === path) {
-        // Tab already has this path loaded — just restore scroll
         requestAnimationFrame(() => {
-          if (contentBodyEl) contentBodyEl.scrollTop = app.activeTab?.scrollTop ?? 0;
+          if (contentBodyEl) contentBodyEl.scrollTop = pane.activeTab?.scrollTop ?? 0;
         });
-      } else if (app.isSearching && app.searchQuery) {
-        doSearch(path, app.searchQuery);
+      } else if (pane.isSearching && pane.searchQuery) {
+        doSearch(path, pane.searchQuery);
       } else {
         loadPath(path);
       }
@@ -301,62 +276,61 @@
   });
 
   async function loadPath(path: string) {
-    app.setLoading(true);
-    app.clearSelection();
+    pane.setLoading(true);
+    pane.clearSelection();
     try {
       const entries = await invoke<EntryDto[]>("list_children", { path });
-      app.setEntries(entries);
-      app.setTabLoadedPath(path);
+      pane.setEntries(entries);
+      pane.setTabLoadedPath(path);
       requestAnimationFrame(() => {
-        if (contentBodyEl) contentBodyEl.scrollTop = app.activeTab?.scrollTop ?? 0;
+        if (contentBodyEl) contentBodyEl.scrollTop = pane.activeTab?.scrollTop ?? 0;
       });
     } catch (e) {
       app.notify("error", t("contentPanel.couldNotLoad", { error: String(e) }));
-      app.setEntries([]);
+      pane.setEntries([]);
     } finally {
-      app.setLoading(false);
+      pane.setLoading(false);
       panelEl?.focus();
     }
   }
 
   async function doSearch(path: string, query: string) {
-    app.setLoading(true);
-    app.clearSelection();
-    app.setIsSearching(true);
+    pane.setLoading(true);
+    pane.clearSelection();
+    pane.setIsSearching(true);
     try {
       const entries = await invoke<EntryDto[]>("search_entries", { path, query, recursive: true });
-      app.setEntries(entries);
+      pane.setEntries(entries);
     } catch (e) {
       app.notify("error", t("contentPanel.searchFailed", { error: String(e) }));
-      app.setEntries([]);
+      pane.setEntries([]);
     } finally {
-      app.setLoading(false);
+      pane.setLoading(false);
       panelEl?.focus();
     }
   }
 
   export function refresh() {
-    if (app.currentPath) {
-      lastLoadKey = ""; // force reload
-      loadPath(app.currentPath);
+    if (pane.currentPath) {
+      lastLoadKey = "";
+      loadPath(pane.currentPath);
     }
   }
 
   export function search(q: string) {
-    if (!app.currentPath) return;
-    app.setSearch(q);
-    doSearch(app.currentPath, q);
+    if (!pane.currentPath) return;
+    pane.setSearch(q);
+    doSearch(pane.currentPath, q);
   }
 
   export function clearSearch() {
-    app.clearSearch();
-    if (app.currentPath) { lastLoadKey = ""; loadPath(app.currentPath); }
+    pane.clearSearch();
+    if (pane.currentPath) { lastLoadKey = ""; loadPath(pane.currentPath); }
   }
 
   // ── Inline create helpers ─────────────────────────────────
-
   function findUniqueName(base: string): string {
-    const existing = new Set(app.entries.map(e => e.name.toLowerCase()));
+    const existing = new Set(pane.entries.map(e => e.name.toLowerCase()));
     if (!existing.has(base.toLowerCase())) return base;
     const dot = base.lastIndexOf(".");
     const [stem, ext] = dot > 0 ? [base.slice(0, dot), base.slice(dot)] : [base, ""];
@@ -368,31 +342,29 @@
   }
 
   export async function createFolder() {
-    if (!app.currentPath) return;
+    if (!pane.currentPath) return;
     const name = findUniqueName(t("contentPanel.newFolderName"));
     try {
-      await invoke("create_folder", { parent: app.currentPath, name });
-      await loadPath(app.currentPath);
-      const entry = app.entries.find(e => e.name === name);
-      if (entry) { app.setSelection([entry.path]); app.startRename(entry.path, entry.name); }
+      await invoke("create_folder", { parent: pane.currentPath, name });
+      await loadPath(pane.currentPath);
+      const entry = pane.entries.find(e => e.name === name);
+      if (entry) { pane.setSelection([entry.path]); pane.startRename(entry.path, entry.name); }
     } catch (e) { app.notify("error", t("contentPanel.couldNotCreateFolder", { error: String(e) })); }
   }
 
   export async function createFile() {
-    if (!app.currentPath) return;
+    if (!pane.currentPath) return;
     const name = findUniqueName(t("contentPanel.newFileName"));
     try {
-      await invoke("create_file", { parent: app.currentPath, name });
-      await loadPath(app.currentPath);
-      const entry = app.entries.find(e => e.name === name);
-      if (entry) { app.setSelection([entry.path]); app.startRename(entry.path, entry.name); }
+      await invoke("create_file", { parent: pane.currentPath, name });
+      await loadPath(pane.currentPath);
+      const entry = pane.entries.find(e => e.name === name);
+      if (entry) { pane.setSelection([entry.path]); pane.startRename(entry.path, entry.name); }
     } catch (e) { app.notify("error", t("contentPanel.couldNotCreateFile", { error: String(e) })); }
   }
 
-  // Svelte action for grid rename — runs once on mount, no reactive reads.
-  // Uncontrolled input: the DOM owns the value while editing.
   function initGridRenameInput(node: HTMLInputElement, entry: EntryDto) {
-    const initial = app.renaming?.value ?? entry.name;
+    const initial = pane.renaming?.value ?? entry.name;
     node.value = initial;
     node.focus();
     const dot = initial.lastIndexOf(".");
@@ -400,9 +372,9 @@
   }
 
   function commitGridRename(e: Event, entry: EntryDto) {
-    if (!app.renaming) return; // already cancelled
+    if (!pane.renaming) return;
     const val = (e.currentTarget as HTMLInputElement).value.trim();
-    if (!val || val === entry.name) { app.cancelRename(); return; }
+    if (!val || val === entry.name) { pane.cancelRename(); return; }
     document.dispatchEvent(new CustomEvent("dogu:rename-commit", { detail: { path: entry.path, newName: val } }));
   }
 
@@ -413,28 +385,27 @@
     if (e.button !== 0 && e.button !== 2) return;
 
     if (e.button === 2) {
-      // Right-click: select if not already
-      if (!app.selectedPaths.has(entry.path)) {
-        app.setSelection([entry.path]);
+      if (!pane.selectedPaths.has(entry.path)) {
+        pane.setSelection([entry.path]);
         lastClickedPath = entry.path;
       }
       return;
     }
 
     if (e.shiftKey && lastClickedPath) {
-      app.rangeSelect(lastClickedPath, entry.path);
+      pane.rangeSelect(lastClickedPath, entry.path);
     } else if (e.ctrlKey || e.metaKey) {
-      app.toggleSelection(entry.path);
+      pane.toggleSelection(entry.path);
       lastClickedPath = entry.path;
     } else {
-      app.setSelection([entry.path]);
+      pane.setSelection([entry.path]);
       lastClickedPath = entry.path;
     }
   }
 
   function handleActivate(entry: EntryDto) {
     if (entry.isDir) {
-      app.navigate(entry.path);
+      pane.navigate(entry.path);
     } else {
       invoke("open_path", { path: entry.path }).catch(e => app.notify("error", String(e)));
     }
@@ -442,9 +413,8 @@
 
   // ── Keyboard shortcuts ────────────────────────────────────
   function handleKeyDown(e: KeyboardEvent) {
-    const sel = [...app.selectedPaths];
+    const sel = [...pane.selectedPaths];
 
-    // Ctrl+F: open quick filter
     if ((e.ctrlKey || e.metaKey) && e.key === "f") {
       e.preventDefault();
       quickFilterOpen = true;
@@ -452,12 +422,11 @@
       return;
     }
 
-    // Escape priority: quick filter → search → selection
     if (e.key === "Escape") {
       if (quickFilterOpen) { closeQuickFilter(); return; }
-      if (app.isSearching) { clearSearch(); return; }
-      app.clearSelection();
-      app.cancelRename();
+      if (pane.isSearching) { clearSearch(); return; }
+      pane.clearSelection();
+      pane.cancelRename();
       contextMenu = null;
       return;
     }
@@ -467,28 +436,19 @@
     }
 
     if (e.key === "F2" && sel.length === 1) {
-      const entry = app.entries.find(en => en.path === sel[0]);
-      if (entry) app.startRename(entry.path, entry.name);
+      const entry = pane.entries.find(en => en.path === sel[0]);
+      if (entry) pane.startRename(entry.path, entry.name);
     }
 
-    if ((e.ctrlKey || e.metaKey) && e.key === "c" && sel.length > 0) {
-      e.preventDefault(); onCopy(sel);
-    }
-
-    if ((e.ctrlKey || e.metaKey) && e.key === "x" && sel.length > 0) {
-      e.preventDefault(); onCut(sel);
-    }
-
-    if ((e.ctrlKey || e.metaKey) && e.key === "v") {
-      e.preventDefault(); onPaste();
-    }
+    if ((e.ctrlKey || e.metaKey) && e.key === "c" && sel.length > 0) { e.preventDefault(); onCopy(sel); }
+    if ((e.ctrlKey || e.metaKey) && e.key === "x" && sel.length > 0) { e.preventDefault(); onCut(sel); }
+    if ((e.ctrlKey || e.metaKey) && e.key === "v") { e.preventDefault(); onPaste(); }
 
     if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
-      app.setSelection(app.entries.map(en => en.path));
+      pane.setSelection(pane.entries.map(en => en.path));
     }
 
-    // Arrow key navigation
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       const paths = displayed.map(en => en.path);
@@ -499,58 +459,65 @@
         : Math.max(idx - 1, 0);
       if (newIdx >= 0) {
         if (e.shiftKey) {
-          app.rangeSelect(lastClickedPath ?? paths[0], paths[newIdx]);
+          pane.rangeSelect(lastClickedPath ?? paths[0], paths[newIdx]);
         } else {
-          app.setSelection([paths[newIdx]]);
+          pane.setSelection([paths[newIdx]]);
           lastClickedPath = paths[newIdx];
         }
       }
     }
 
     if (e.key === "Enter" && sel.length === 1) {
-      const entry = app.entries.find(en => en.path === sel[0]);
+      const entry = pane.entries.find(en => en.path === sel[0]);
       if (entry) handleActivate(entry);
     }
 
-    // Type-ahead: printable single char, no modifiers, not renaming
-    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1 && !app.renaming) {
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1 && !pane.renaming) {
       handleTypeahead(e.key);
     }
   }
 
   // ── Context menu ─────────────────────────────────────────
   function openContextMenu(e: MouseEvent, entry: EntryDto) {
-    const sel = app.selectedPaths.has(entry.path) ? [...app.selectedPaths] : [entry.path];
-    if (!app.selectedPaths.has(entry.path)) app.setSelection([entry.path]);
+    const sel = pane.selectedPaths.has(entry.path) ? [...pane.selectedPaths] : [entry.path];
+    if (!pane.selectedPaths.has(entry.path)) pane.setSelection([entry.path]);
 
     const isMulti = sel.length > 1;
     const isRemote = sel.some(p => p.startsWith("remote://"));
-    const allFiles = sel.every(p => !app.entries.find(en => en.path === p)?.isDir);
-    const isSingleDir = !isMulti && !!app.entries.find(en => en.path === sel[0])?.isDir;
-    const hasM3uDirs = sel.some(p => !!app.entries.find(en => en.path === p)?.isDir);
+    const allFiles = sel.every(p => !pane.entries.find(en => en.path === p)?.isDir);
+    const isSingleDir = !isMulti && !!pane.entries.find(en => en.path === sel[0])?.isDir;
+    const hasM3uDirs = sel.some(p => !!pane.entries.find(en => en.path === p)?.isDir);
     const archivePaths = allFiles
-      ? sel.filter(p => [".zip", ".7z", ".rar"].includes(app.entries.find(en => en.path === p)?.extension ?? ""))
+      ? sel.filter(p => [".zip", ".7z", ".rar"].includes(pane.entries.find(en => en.path === p)?.extension ?? ""))
       : [];
     const hasArchives = archivePaths.length > 0;
     const canCompress = true;
     const hasChdSources = allFiles && sel.some(p => {
-      const ext = app.entries.find(en => en.path === p)?.extension ?? "";
+      const ext = pane.entries.find(en => en.path === p)?.extension ?? "";
       return [".cue", ".gdi", ".toc", ".iso"].includes(ext);
     });
     const hasChdFiles = allFiles && sel.some(p => {
-      const ext = app.entries.find(en => en.path === p)?.extension ?? "";
+      const ext = pane.entries.find(en => en.path === p)?.extension ?? "";
       return ext === ".chd";
     });
-    const hasChdDirs = sel.some(p => !!app.entries.find(en => en.path === p)?.isDir);
+    const hasChdDirs = sel.some(p => !!pane.entries.find(en => en.path === p)?.isDir);
 
     const newTabIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h6"/></svg>`;
+    const splitPaneIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>`;
 
     const items: MenuItem[] = [
       { kind: "action", label: isMulti ? t("menu.openCount", { count: sel.length }) : t("menu.open"), icon: openIcon, onclick: () => sel.forEach(p => invoke("open_path", { path: p })) },
     ];
 
     if (isSingleDir) {
-      items.push({ kind: "action", label: t("tabs.openInNewTab"), icon: newTabIcon, onclick: () => app.addTab(sel[0]) });
+      items.push({ kind: "action", label: t("tabs.openInNewTab"), icon: newTabIcon, onclick: () => pane.addTab(sel[0]) });
+
+      // Open in other pane when split
+      if (app.isSplit) {
+        const otherPane = app.getPaneView(pane.paneIdx === 0 ? 1 : 0);
+        items.push({ kind: "action", label: t("tabs.openInOtherPane"), icon: splitPaneIcon, onclick: () => otherPane.navigate(sel[0]) });
+      }
+
       if (!isRemote) {
         items.push({ kind: "action", label: t("terminal.openTerminal"), icon: terminalIcon, onclick: () => openTerminalAt(sel[0]) });
       } else {
@@ -565,7 +532,7 @@
 
     if (!isMulti) {
       items.push({ kind: "action", label: t("menu.openWith"), icon: openWithIcon, onclick: () => onOpenWith(sel[0]) });
-      items.push({ kind: "action", label: t("menu.rename"), shortcut: "F2", icon: renameIcon, onclick: () => app.startRename(entry.path, entry.name) });
+      items.push({ kind: "action", label: t("menu.rename"), shortcut: "F2", icon: renameIcon, onclick: () => pane.startRename(entry.path, entry.name) });
     }
 
     items.push({ kind: "separator" });
@@ -611,7 +578,7 @@
         kind: "action",
         label: t("m3u.menuItem"),
         icon: m3uIcon,
-        onclick: () => onM3u(sel.filter(p => !!app.entries.find(en => en.path === p)?.isDir)),
+        onclick: () => onM3u(sel.filter(p => !!pane.entries.find(en => en.path === p)?.isDir)),
       });
     }
 
@@ -625,10 +592,10 @@
 
   // ── Sort header click ────────────────────────────────────
   function clickSort(key: ContentSortKey) {
-    if (app.sortKey === key) {
-      app.setSort(key, app.sortDir === "asc" ? "desc" : "asc");
+    if (pane.sortKey === key) {
+      pane.setSort(key, pane.sortDir === "asc" ? "desc" : "asc");
     } else {
-      app.setSort(key, "asc");
+      pane.setSort(key, "asc");
     }
   }
 
@@ -636,7 +603,7 @@
   function handlePanelClick(e: MouseEvent) {
     if ((e.target as HTMLElement).closest("[data-path]")) return;
     if (consumeNextPanelClick) { consumeNextPanelClick = false; return; }
-    app.clearSelection();
+    pane.clearSelection();
     contextMenu = null;
   }
 
@@ -648,14 +615,13 @@
     items.push({ kind: "action", label: t("menu.newFolder"), icon: newFolderIcon, onclick: () => createFolder() });
     items.push({ kind: "action", label: t("menu.newFile"), icon: newFileIcon, onclick: () => createFile() });
     items.push({ kind: "action", label: t("menu.refresh"), shortcut: "F5", icon: refreshIcon, onclick: () => refresh() });
-    if (app.currentPath && !app.currentPath.startsWith("remote://")) {
+    if (pane.currentPath && !pane.currentPath.startsWith("remote://")) {
       items.push({ kind: "separator" });
-      items.push({ kind: "action", label: t("terminal.openTerminal"), icon: terminalIcon, onclick: () => openTerminalAt(app.currentPath!) });
+      items.push({ kind: "action", label: t("terminal.openTerminal"), icon: terminalIcon, onclick: () => openTerminalAt(pane.currentPath!) });
     }
     if (items.length > 0) contextMenu = { x: e.clientX, y: e.clientY, items };
   }
 
-  // Inline SVG icons for context menu
   const openIcon     = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
   const openWithIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33"/></svg>`;
   const renameIcon   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
@@ -666,7 +632,7 @@
   const extractIcon  = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>`;
   const extractToIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><polyline points="12 11 12 17"/><polyline points="9 14 12 17 15 14"/></svg>`;
   const extractToFolderIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>`;
-  const chdIcon       = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="3" x2="12" y2="9"/><line x1="12" y1="15" x2="12" y2="21"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>`;
+  const chdIcon      = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="3" x2="12" y2="9"/><line x1="12" y1="15" x2="12" y2="21"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>`;
   const propsIcon    = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
   const deleteIcon   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4h6v2"/></svg>`;
   const newFolderIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>`;
@@ -684,37 +650,37 @@
   role="grid"
   aria-label={t("contentPanel.fileList")}
   tabindex="0"
-  style="--col-name:{app.columnWidths.name}px; --col-type:{app.columnWidths.type}px; --col-size:{app.columnWidths.size}px; --col-modified:{app.columnWidths.modified}px;"
+  style="--col-name:{pane.columnWidths.name}px; --col-type:{pane.columnWidths.type}px; --col-size:{pane.columnWidths.size}px; --col-modified:{pane.columnWidths.modified}px;"
   onkeydown={handleKeyDown}
   onclick={handlePanelClick}
   oncontextmenu={handlePanelContextMenu}
   onwheel={handleContentWheel}
 >
   <!-- ── Column headers (list view only) ── -->
-  {#if app.viewMode === "list"}
+  {#if pane.viewMode === "list"}
   <div class="content-header" role="row">
     <div class="col-gutter"></div>
     <button class="col-hdr col-hdr--name" onclick={() => clickSort("name")} role="columnheader">
       {t("contentPanel.name")}
-      {#if app.sortKey === "name"}<span class="sort-arrow">{app.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
+      {#if pane.sortKey === "name"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
     </button>
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "name")}></div>
     <button class="col-hdr col-hdr--type" onclick={() => clickSort("type")} role="columnheader">
       {t("contentPanel.type")}
-      {#if app.sortKey === "type"}<span class="sort-arrow">{app.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
+      {#if pane.sortKey === "type"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
     </button>
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "type")}></div>
     <button class="col-hdr col-hdr--size" onclick={() => clickSort("size")} role="columnheader">
       {t("contentPanel.size")}
-      {#if app.sortKey === "size"}<span class="sort-arrow">{app.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
+      {#if pane.sortKey === "size"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
     </button>
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "size")}></div>
     <button class="col-hdr col-hdr--modified" onclick={() => clickSort("modified")} role="columnheader">
       {t("contentPanel.modified")}
-      {#if app.sortKey === "modified"}<span class="sort-arrow">{app.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
+      {#if pane.sortKey === "modified"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
     </button>
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "modified")}></div>
@@ -746,7 +712,7 @@
     </div>
   {/if}
 
-  <!-- ── Content area (rubber-band div injected imperatively into this element) ── -->
+  <!-- ── Content body ── -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
     class="content-body scrollbar-thin"
@@ -755,13 +721,13 @@
     onscroll={saveScrollPosition}
     role="presentation"
   >
-    {#if app.isLoading}
+    {#if pane.isLoading}
       <div class="content-state">
         <span class="loading-spinner"></span>
         <span>{t("contentPanel.loading")}</span>
       </div>
 
-    {:else if !app.currentPath}
+    {:else if !pane.currentPath}
       <div class="content-state">
         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -774,16 +740,16 @@
         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
         </svg>
-        <span>{app.isSearching ? t("contentPanel.noResults") : t("contentPanel.folderEmpty")}</span>
+        <span>{pane.isSearching ? t("contentPanel.noResults") : t("contentPanel.folderEmpty")}</span>
       </div>
 
     {:else}
-      {#if app.viewMode === "list"}
+      {#if pane.viewMode === "list"}
         <div class="file-list" role="rowgroup">
           {#each displayed as entry (entry.path)}
             <FileRow
               {entry}
-              isSelected={app.selectedPaths.has(entry.path)}
+              isSelected={pane.selectedPaths.has(entry.path)}
               onActivate={handleActivate}
               onContextMenu={openContextMenu}
               onMousedown={handleMousedown}
@@ -792,18 +758,17 @@
         </div>
 
       {:else}
-        <!-- Grid view -->
         <div class="file-grid" role="rowgroup">
           {#each displayed as entry (entry.path)}
             <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <div
               class="grid-item"
-              class:grid-item--selected={app.selectedPaths.has(entry.path)}
+              class:grid-item--selected={pane.selectedPaths.has(entry.path)}
               data-path={entry.path}
               role="gridcell"
               tabindex="0"
               onmousedown={(e) => handleMousedown(e, entry)}
-              ondblclick={() => { if (app.renaming?.path !== entry.path) handleActivate(entry); }}
+              ondblclick={() => { if (pane.renaming?.path !== entry.path) handleActivate(entry); }}
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, entry); }}
             >
               <div class="grid-icon" aria-hidden="true">
@@ -818,7 +783,7 @@
                   </svg>
                 {/if}
               </div>
-              {#if app.renaming?.path === entry.path}
+              {#if pane.renaming?.path === entry.path}
                 <input
                   class="grid-rename-input"
                   type="text"
@@ -826,7 +791,7 @@
                   onblur={(e) => commitGridRename(e, entry)}
                   onkeydown={(e) => {
                     if (e.key === "Enter") { e.preventDefault(); commitGridRename(e, entry); }
-                    if (e.key === "Escape") { e.preventDefault(); app.cancelRename(); }
+                    if (e.key === "Escape") { e.preventDefault(); pane.cancelRename(); }
                     e.stopPropagation();
                   }}
                   onclick={(e) => e.stopPropagation()}
@@ -846,15 +811,15 @@
   <!-- ── Status bar ── -->
   <div class="status-bar">
     <span class="status-count">
-      {#if app.selectedPaths.size > 0}
-        {t("contentPanel.itemsSelected", { selected: app.selectedPaths.size, total: displayed.length })}
+      {#if pane.selectedPaths.size > 0}
+        {t("contentPanel.itemsSelected", { selected: pane.selectedPaths.size, total: displayed.length })}
       {:else}
         {tn("contentPanel.itemCount", "contentPanel.itemCountPlural", displayed.length)}
       {/if}
     </span>
-    {#if app.isSearching}
+    {#if pane.isSearching}
       <span class="status-search">
-        {t("contentPanel.searchLabel", { query: app.searchQuery ?? "" })}
+        {t("contentPanel.searchLabel", { query: pane.searchQuery ?? "" })}
         <button class="status-clear-search" onclick={clearSearch}>
           {t("contentPanel.clearSearchAction")}
         </button>
@@ -891,12 +856,11 @@
     overflow: hidden;
     outline: none;
     background: var(--bg);
-    position: relative; /* contains the rubber-band absolute div */
+    position: relative;
   }
 
   .content-panel.col-resizing { cursor: col-resize; user-select: none; }
 
-  /* ── Column headers ── */
   .content-header {
     display: flex;
     align-items: center;
@@ -932,7 +896,6 @@
 
   .sort-arrow { color: var(--accent); font-size: 11px; }
 
-  /* ── Column resize handle ── */
   .col-resize-handle {
     flex-shrink: 0;
     width: 5px;
@@ -954,17 +917,15 @@
     &:hover::after { opacity: 1; background: var(--accent); }
   }
 
-  /* ── Content body ── */
   .content-body {
     flex: 1;
     overflow-y: auto;
     padding: 4px;
-    padding-bottom: 60px; /* always leave empty space below items for rubber-band start */
+    padding-bottom: 60px;
     position: relative;
     user-select: none;
   }
 
-  /* ── Rubber-band selection rect (div injected imperatively — needs :global) ── */
   :global(.rubber-band) {
     position: absolute;
     pointer-events: none;
@@ -974,7 +935,6 @@
     border-radius: 2px;
   }
 
-  /* ── Empty / loading states ── */
   .content-state {
     display: flex;
     flex-direction: column;
@@ -995,16 +955,14 @@
     animation: spin 0.7s linear infinite;
   }
 
-  /* ── File list view ── */
   .file-list {
     display: flex;
     flex-direction: column;
     gap: 1px;
-    padding-left: 16px;   /* left gutter — clickable empty space for rubber-band */
-    align-items: flex-start; /* rows shrink to their column widths, leaving right-side space */
+    padding-left: 16px;
+    align-items: flex-start;
   }
 
-  /* ── Grid view ── */
   .file-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
@@ -1064,7 +1022,6 @@
     box-sizing: border-box;
   }
 
-  /* ── Quick filter bar ── */
   .quick-filter-bar {
     display: flex;
     align-items: center;
@@ -1076,10 +1033,7 @@
     height: 28px;
   }
 
-  .qf-icon {
-    color: var(--accent);
-    flex-shrink: 0;
-  }
+  .qf-icon { color: var(--accent); flex-shrink: 0; }
 
   .qf-input {
     flex: 1;
@@ -1093,11 +1047,7 @@
     &::placeholder { color: var(--text-subtle); }
   }
 
-  .qf-count {
-    font-size: 11px;
-    color: var(--text-muted);
-    flex-shrink: 0;
-  }
+  .qf-count { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
 
   .qf-close {
     background: none;
@@ -1112,7 +1062,6 @@
     &:hover { color: var(--text); }
   }
 
-  /* ── Status bar ── */
   .status-bar {
     display: flex;
     align-items: center;

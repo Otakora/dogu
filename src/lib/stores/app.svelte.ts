@@ -31,7 +31,7 @@ type ConfirmDialogState = {
   onConfirm: () => void;
 };
 
-type TabState = {
+export type TabState = {
   id: string;
   color: string;
   currentPath: string | null;
@@ -47,6 +47,85 @@ type TabState = {
   loadedPath: string | null;
 };
 
+export type PaneState = {
+  id: string;
+  tabs: TabState[];
+  activeTabIdx: number;
+  viewMode: ViewMode;
+  sortKey: ContentSortKey;
+  sortDir: SortDirection;
+  columnWidths: ContentColumnWidths;
+  contentZoom: number;
+};
+
+export type TabHighlight = {
+  path: string | null;
+  color: string;
+  isActive: boolean;
+};
+
+// PaneView: pane-scoped interface used by Toolbar, TabBar, ContentPanel via Svelte context
+export type PaneView = {
+  readonly paneIdx: number;
+  readonly isFocused: boolean;
+  focus(): void;
+  // Tabs
+  readonly tabs: TabState[];
+  readonly activeTabIdx: number;
+  readonly activeTabId: string;
+  readonly activeTab: TabState | undefined;
+  addTab(path?: string): void;
+  closeTab(id: string): void;
+  setActiveTab(id: string): void;
+  setActiveTabByIndex(idx: number): void;
+  nextTab(): void;
+  prevTab(): void;
+  duplicateTab(): void;
+  reorderTabs(fromIdx: number, insertIdx: number): void;
+  setTabScrollTop(tabIdx: number, scrollTop: number): void;
+  setTabLoadedPath(path: string): void;
+  // Navigation
+  readonly currentPath: string | null;
+  navigate(path: string, pushHistory?: boolean): void;
+  navigateBack(): void;
+  navigateForward(): void;
+  navigateUp(): void;
+  readonly canGoBack: boolean;
+  readonly canGoForward: boolean;
+  // Search
+  readonly searchQuery: string | null;
+  readonly isSearching: boolean;
+  setSearch(q: string): void;
+  setIsSearching(v: boolean): void;
+  setSearchQuery(q: string | null): void;
+  clearSearch(): void;
+  // Content
+  readonly entries: EntryDto[];
+  setEntries(e: EntryDto[]): void;
+  readonly selectedPaths: Set<string>;
+  setSelection(paths: string[]): void;
+  clearSelection(): void;
+  toggleSelection(path: string): void;
+  rangeSelect(fromPath: string, toPath: string): void;
+  // Display prefs
+  readonly viewMode: ViewMode;
+  setViewMode(v: ViewMode): void;
+  readonly sortKey: ContentSortKey;
+  readonly sortDir: SortDirection;
+  setSort(key: ContentSortKey, dir: SortDirection): void;
+  readonly columnWidths: ContentColumnWidths;
+  setColumnWidth(key: ContentSortKey, w: number): void;
+  readonly contentZoom: number;
+  setContentZoom(z: number): void;
+  // Loading
+  readonly isLoading: boolean;
+  setLoading(v: boolean): void;
+  // Rename
+  readonly renaming: RenameState | null;
+  startRename(path: string, value: string): void;
+  cancelRename(): void;
+};
+
 type JobEntry = {
   id: string;
   title: string;
@@ -59,7 +138,6 @@ type JobEntry = {
   statusMessageOnSuccess?: string | null;
   statusMessageOnFailure?: string | null;
   createdAt: number;
-  // Pause state — set when the backend emits job-paused
   paused: boolean;
   pauseError: string | null;
   pauseFileName: string | null;
@@ -67,7 +145,7 @@ type JobEntry = {
 };
 
 type StartJobOpts = {
-  showDialog?: boolean; // kept for API compat, ignored — all jobs appear in the panel
+  showDialog?: boolean;
   statusMessageOnSuccess?: string;
   statusMessageOnFailure?: string;
 };
@@ -111,7 +189,6 @@ function loadSettings(): AppSettings {
     const raw = localStorage.getItem("dogu-settings");
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    // Migrate: localLocations → favoriteLocations
     if (Array.isArray(parsed.localLocations) && !parsed.favoriteLocations) {
       parsed.favoriteLocations = parsed.localLocations;
     }
@@ -125,21 +202,13 @@ function loadSettings(): AppSettings {
 function persistSettings(s: AppSettings) {
   try {
     localStorage.setItem("dogu-settings", JSON.stringify(s));
-  } catch {
-    // storage unavailable — ignore
-  }
+  } catch {}
 }
 
 // ─── Tab helpers ───────────────────────────────────────────
 const TAB_COLORS = [
-  "#3b82f6", // blue
-  "#a855f7", // purple
-  "#f59e0b", // amber
-  "#ef4444", // red
-  "#06b6d4", // cyan
-  "#ec4899", // pink
-  "#f97316", // orange
-  "#84cc16", // lime
+  "#3b82f6", "#a855f7", "#f59e0b", "#ef4444",
+  "#06b6d4", "#ec4899", "#f97316", "#84cc16",
 ];
 let _tabSeq = 0;
 let _tabColorIdx = 0;
@@ -162,34 +231,82 @@ function makeTab(path?: string): TabState {
   };
 }
 
-function persistTabs(ts: TabState[], idx: number) {
+// ─── Pane helpers ──────────────────────────────────────────
+let _paneSeq = 0;
+
+function makePaneState(
+  settings: AppSettings,
+  initialTabs?: TabState[],
+  initialActiveIdx?: number,
+): PaneState {
+  return {
+    id: `pane-${Date.now()}-${++_paneSeq}`,
+    tabs: initialTabs ?? [makeTab()],
+    activeTabIdx: initialActiveIdx ?? 0,
+    viewMode: settings.defaultViewMode,
+    sortKey: settings.contentSortKey,
+    sortDir: settings.contentSortDirection,
+    columnWidths: { ...settings.contentColumnWidths },
+    contentZoom: settings.defaultContentZoom,
+  };
+}
+
+function persistPanes(ps: PaneState[], focusedIdx: number) {
   try {
-    localStorage.setItem("dogu-tabs", JSON.stringify({
-      paths: ts.map(t => t.currentPath),
-      active: idx,
+    localStorage.setItem("dogu-panes", JSON.stringify({
+      panes: ps.map(p => ({
+        paths: p.tabs.map(t => t.currentPath),
+        active: p.activeTabIdx,
+      })),
+      focused: focusedIdx,
+      split: ps.length > 1,
     }));
   } catch {}
 }
 
-function loadSavedTabs(): { initialTabs: TabState[]; initialActiveIdx: number } {
+function loadSavedPanes(settings: AppSettings): { initialPanes: PaneState[]; initialFocusedIdx: number } {
   try {
-    const raw = localStorage.getItem("dogu-tabs");
-    if (!raw) return { initialTabs: [makeTab()], initialActiveIdx: 0 };
-    const parsed = JSON.parse(raw) as { paths?: unknown[]; active?: unknown };
-    const { paths, active } = parsed;
-    if (!Array.isArray(paths) || paths.length === 0) {
-      return { initialTabs: [makeTab()], initialActiveIdx: 0 };
+    // Try new multi-pane format first
+    const newRaw = localStorage.getItem("dogu-panes");
+    if (newRaw) {
+      const parsed = JSON.parse(newRaw) as { panes?: unknown[]; focused?: unknown; split?: unknown };
+      if (Array.isArray(parsed.panes) && parsed.panes.length > 0) {
+        const paneList = (parsed.panes as Array<{ paths?: unknown[]; active?: unknown }>).map(p => {
+          const paths = Array.isArray(p.paths) ? p.paths : [];
+          const active = typeof p.active === "number" ? p.active : 0;
+          const tabs = paths.length > 0
+            ? paths.map((path: unknown) =>
+                makeTab(typeof path === "string" && !path.startsWith("remote://") ? path : undefined)
+              )
+            : [makeTab()];
+          const activeIdx = Math.max(0, Math.min(active, tabs.length - 1));
+          return makePaneState(settings, tabs, activeIdx);
+        });
+        const focused = typeof parsed.focused === "number"
+          ? Math.max(0, Math.min(parsed.focused, paneList.length - 1))
+          : 0;
+        return { initialPanes: paneList, initialFocusedIdx: focused };
+      }
     }
-    const savedTabs = paths.map((p: unknown) =>
-      makeTab(typeof p === "string" && !p.startsWith("remote://") ? p : undefined)
-    );
-    const activeIdx = typeof active === "number"
-      ? Math.max(0, Math.min(active, savedTabs.length - 1))
-      : 0;
-    return { initialTabs: savedTabs, initialActiveIdx: activeIdx };
-  } catch {
-    return { initialTabs: [makeTab()], initialActiveIdx: 0 };
-  }
+
+    // Fall back to old single-pane "dogu-tabs" format
+    const oldRaw = localStorage.getItem("dogu-tabs");
+    if (oldRaw) {
+      const parsed = JSON.parse(oldRaw) as { paths?: unknown[]; active?: unknown };
+      const { paths, active } = parsed;
+      if (Array.isArray(paths) && paths.length > 0) {
+        const tabs = paths.map((p: unknown) =>
+          makeTab(typeof p === "string" && !p.startsWith("remote://") ? p : undefined)
+        );
+        const activeIdx = typeof active === "number"
+          ? Math.max(0, Math.min(active, tabs.length - 1))
+          : 0;
+        return { initialPanes: [makePaneState(settings, tabs, activeIdx)], initialFocusedIdx: 0 };
+      }
+    }
+  } catch {}
+
+  return { initialPanes: [makePaneState(settings)], initialFocusedIdx: 0 };
 }
 
 // ─── Path helpers ──────────────────────────────────────────
@@ -248,30 +365,22 @@ function detectConflicts(ops: QueuedOp[]): QueueConflict[] {
 
   for (let i = 0; i < ops.length; i++) {
     for (let j = i + 1; j < ops.length; j++) {
-      const a = ops[i], b = ops[j]; // a runs BEFORE b in sequential mode
+      const a = ops[i], b = ops[j];
 
-      // Destination collision: simultaneous writes to same location are a race condition.
-      // In sequential order a writes first, then b — no race, but possible overwrite.
-      // → parallel-only (the queue order makes sequential safe enough)
       for (const wa of a.destinations) {
         for (const wb of b.destinations) {
-          if (pathsOverlap(wa, wb)) push(a.id, b.id, 'dest-collision', 'parallel-only', wa, wb);
+          if (pathsOverlap(wa, wb)) push(a.id, b.id, "dest-collision", "parallel-only", wa, wb);
         }
       }
 
-      // a (earlier in queue) deletes something b (later) needs.
-      // Sequential: a runs first → destroys what b needs → BLOCKING in both modes.
       for (const d of a.deletes) {
-        for (const s of b.sources)      { if (pathsOverlap(d, s)) push(a.id, b.id, 'source-deleted', 'blocking',      d, s); }
-        for (const w of b.destinations) { if (pathsOverlap(d, w)) push(a.id, b.id, 'dest-deleted',   'blocking',      d, w); }
+        for (const s of b.sources)      { if (pathsOverlap(d, s)) push(a.id, b.id, "source-deleted", "blocking",      d, s); }
+        for (const w of b.destinations) { if (pathsOverlap(d, w)) push(a.id, b.id, "dest-deleted",   "blocking",      d, w); }
       }
 
-      // b (later in queue) deletes something a (earlier) needs.
-      // Sequential: a finishes before b starts → a is already done when b deletes → safe.
-      // Parallel: both run at the same time → b may delete while a still needs it → PARALLEL-ONLY.
       for (const d of b.deletes) {
-        for (const s of a.sources)      { if (pathsOverlap(d, s)) push(b.id, a.id, 'source-deleted', 'parallel-only', d, s); }
-        for (const w of a.destinations) { if (pathsOverlap(d, w)) push(b.id, a.id, 'dest-deleted',   'parallel-only', d, w); }
+        for (const s of a.sources)      { if (pathsOverlap(d, s)) push(b.id, a.id, "source-deleted", "parallel-only", d, s); }
+        for (const w of a.destinations) { if (pathsOverlap(d, w)) push(b.id, a.id, "dest-deleted",   "parallel-only", d, w); }
       }
     }
   }
@@ -284,35 +393,28 @@ function createAppState() {
   // Settings
   let settings = $state<AppSettings>(loadSettings());
 
-  // Tabs
-  const { initialTabs, initialActiveIdx } = untrack(() => loadSavedTabs());
-  let tabs = $state<TabState[]>(initialTabs);
-  let activeTabIdx = $state(initialActiveIdx);
+  // Panes (replaces flat tabs + activeTabIdx + display prefs)
+  const { initialPanes, initialFocusedIdx } = untrack(() => loadSavedPanes(loadSettings()));
+  let panes = $state<PaneState[]>(initialPanes);
+  let focusedPaneIdx = $state(initialFocusedIdx);
 
-  // Global display prefs
-  let viewMode = $state<ViewMode>(untrack(() => settings.defaultViewMode));
-  let sortKey = $state<ContentSortKey>(untrack(() => settings.contentSortKey));
-  let sortDir = $state<SortDirection>(untrack(() => settings.contentSortDirection));
-  let columnWidths = $state<ContentColumnWidths>(untrack(() => ({ ...settings.contentColumnWidths })));
-  let contentZoom = $state(untrack(() => settings.defaultContentZoom));
+  // Global display pref: tree zoom (sidebar only, one sidebar)
   let treeZoom = $state(untrack(() => settings.defaultTreeZoom));
 
   // Connections
   let connectionProfiles = $state<ConnectionProfileDto[]>([]);
   let activeConnections = $state<ActiveConnectionDto[]>([]);
 
-  // System volumes and known folders (loaded from backend on mount)
+  // System volumes and known folders
   let volumes = $state<VolumeDto[]>([]);
   let knownFolders = $state<KnownFoldersDto | null>(null);
 
-  // Clipboard (shared across tabs)
+  // Clipboard (shared across panes/tabs)
   let clipboard = $state<ClipboardState | null>(null);
 
-  // Jobs (replaces single progress)
+  // Jobs
   let jobs = $state<JobEntry[]>([]);
   let jobsPanelOpen = $state(false);
-
-  // Job completion waiters (non-reactive — plain Map)
   const jobWaiters = new Map<string, Array<() => void>>();
 
   // Operation queue
@@ -352,6 +454,271 @@ function createAppState() {
   const theme = $derived(settings.theme);
   const isBusy = $derived(busyCount > 0);
 
+  // ── Pane helper shorthand ───────────────────────────────
+  function fp(): PaneState { return panes[focusedPaneIdx] ?? panes[0]; }
+  function ft(): TabState  { const p = fp(); return p.tabs[p.activeTabIdx] ?? p.tabs[0]; }
+
+  // ── PaneView factory ────────────────────────────────────
+  function getPaneView(idx: number): PaneView {
+    function p(): PaneState { return panes[idx] ?? panes[0]; }
+    function t(): TabState  { const pn = p(); return pn.tabs[pn.activeTabIdx] ?? pn.tabs[0]; }
+
+    return {
+      get paneIdx() { return idx; },
+      get isFocused() { return focusedPaneIdx === idx; },
+      focus() { focusedPaneIdx = idx; },
+
+      // Tabs
+      get tabs() { return p()?.tabs ?? []; },
+      get activeTabIdx() { return p()?.activeTabIdx ?? 0; },
+      get activeTabId() { return t()?.id ?? ""; },
+      get activeTab() { return t(); },
+
+      addTab(path?: string) {
+        const pn = p();
+        const newTab = makeTab(path);
+        pn.tabs = [...pn.tabs, newTab];
+        pn.activeTabIdx = pn.tabs.length - 1;
+        persistPanes(panes, focusedPaneIdx);
+      },
+
+      closeTab(id: string) {
+        const pn = p();
+        if (pn.tabs.length <= 1) return;
+        const i = pn.tabs.findIndex(tab => tab.id === id);
+        if (i === -1) return;
+        const newTabs = pn.tabs.filter(tab => tab.id !== id);
+        pn.tabs = newTabs;
+        if (pn.activeTabIdx >= newTabs.length) {
+          pn.activeTabIdx = newTabs.length - 1;
+        } else if (pn.activeTabIdx > i) {
+          pn.activeTabIdx -= 1;
+        }
+        persistPanes(panes, focusedPaneIdx);
+      },
+
+      setActiveTab(id: string) {
+        const pn = p();
+        const i = pn.tabs.findIndex(tab => tab.id === id);
+        if (i !== -1) pn.activeTabIdx = i;
+      },
+
+      setActiveTabByIndex(i: number) {
+        const pn = p();
+        if (i >= 0 && i < pn.tabs.length) pn.activeTabIdx = i;
+      },
+
+      nextTab() {
+        const pn = p();
+        pn.activeTabIdx = (pn.activeTabIdx + 1) % pn.tabs.length;
+      },
+
+      prevTab() {
+        const pn = p();
+        pn.activeTabIdx = (pn.activeTabIdx - 1 + pn.tabs.length) % pn.tabs.length;
+      },
+
+      duplicateTab() {
+        const pn = p();
+        const cur = pn.tabs[pn.activeTabIdx];
+        if (!cur) return;
+        const newTab = makeTab(cur.currentPath ?? undefined);
+        pn.tabs = [...pn.tabs.slice(0, pn.activeTabIdx + 1), newTab, ...pn.tabs.slice(pn.activeTabIdx + 1)];
+        pn.activeTabIdx = pn.activeTabIdx + 1;
+        persistPanes(panes, focusedPaneIdx);
+      },
+
+      reorderTabs(fromIdx: number, insertIdx: number) {
+        if (fromIdx === insertIdx || fromIdx + 1 === insertIdx) return;
+        const pn = p();
+        const activeId = pn.tabs[pn.activeTabIdx]?.id;
+        const next = [...pn.tabs];
+        const [moved] = next.splice(fromIdx, 1);
+        next.splice(fromIdx < insertIdx ? insertIdx - 1 : insertIdx, 0, moved);
+        pn.tabs = next;
+        pn.activeTabIdx = activeId ? next.findIndex(tab => tab.id === activeId) : 0;
+        persistPanes(panes, focusedPaneIdx);
+      },
+
+      setTabScrollTop(tabIdx: number, scrollTop: number) {
+        const pn = p();
+        if (pn.tabs[tabIdx]) pn.tabs[tabIdx].scrollTop = scrollTop;
+      },
+
+      setTabLoadedPath(path: string) {
+        const tab = t();
+        if (tab) tab.loadedPath = path;
+      },
+
+      // Navigation
+      get currentPath() { return t()?.currentPath ?? null; },
+      get canGoBack()    { return (t()?.historyIdx ?? -1) >= 0; },
+      get canGoForward() {
+        const tab = t();
+        return tab ? tab.historyIdx < tab.history.length - 1 : false;
+      },
+
+      navigate(path: string, pushHistory = true) {
+        const tab = t();
+        if (!tab) return;
+        if (pushHistory && tab.currentPath !== null) {
+          tab.history = [...tab.history.slice(0, tab.historyIdx + 1), tab.currentPath];
+          tab.historyIdx = tab.history.length - 1;
+        }
+        tab.currentPath = path;
+        tab.searchQuery = null;
+        tab.isSearching = false;
+        tab.scrollTop = 0;
+        persistPanes(panes, focusedPaneIdx);
+      },
+
+      navigateBack() {
+        const tab = t();
+        if (!tab || tab.historyIdx < 0) return;
+        tab.currentPath = tab.history[tab.historyIdx];
+        tab.historyIdx -= 1;
+        tab.searchQuery = null;
+        tab.isSearching = false;
+        tab.scrollTop = 0;
+      },
+
+      navigateForward() {
+        const tab = t();
+        if (!tab || tab.historyIdx >= tab.history.length - 1) return;
+        tab.historyIdx += 1;
+        tab.currentPath = tab.history[tab.historyIdx];
+        tab.searchQuery = null;
+        tab.isSearching = false;
+        tab.scrollTop = 0;
+      },
+
+      navigateUp() {
+        const path = t()?.currentPath;
+        if (path) {
+          const parent = parentPath(path);
+          if (parent !== null) getPaneView(idx).navigate(parent);
+        }
+      },
+
+      // Search
+      get searchQuery() { return t()?.searchQuery ?? null; },
+      get isSearching()  { return t()?.isSearching ?? false; },
+
+      setSearch(q: string) {
+        const tab = t();
+        if (tab) { tab.searchQuery = q; tab.isSearching = true; }
+      },
+      setIsSearching(v: boolean) {
+        const tab = t();
+        if (tab) tab.isSearching = v;
+      },
+      setSearchQuery(q: string | null) {
+        const tab = t();
+        if (tab) tab.searchQuery = q;
+      },
+      clearSearch() {
+        const tab = t();
+        if (tab) { tab.searchQuery = null; tab.isSearching = false; }
+      },
+
+      // Content
+      get entries() { return t()?.entries ?? []; },
+      setEntries(e: EntryDto[]) {
+        const tab = t();
+        if (tab) tab.entries = e;
+      },
+
+      get selectedPaths() { return t()?.selectedPaths ?? new Set<string>(); },
+      setSelection(paths: string[]) {
+        const tab = t();
+        if (tab) tab.selectedPaths = new Set(paths);
+      },
+      clearSelection() {
+        const tab = t();
+        if (tab) tab.selectedPaths = new Set();
+      },
+      toggleSelection(path: string) {
+        const tab = t();
+        if (!tab) return;
+        const next = new Set(tab.selectedPaths);
+        if (next.has(path)) next.delete(path); else next.add(path);
+        tab.selectedPaths = next;
+      },
+      rangeSelect(fromPath: string, toPath: string) {
+        const pn = p();
+        const tab = t();
+        if (!tab) return;
+        const sorted = [...tab.entries].sort((a, b) => {
+          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+          let cmp = 0;
+          if (pn.sortKey === "name") cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+          else if (pn.sortKey === "type") cmp = a.extension.localeCompare(b.extension);
+          else if (pn.sortKey === "size") cmp = a.size - b.size;
+          else if (pn.sortKey === "modified") cmp = a.modifiedTs - b.modifiedTs;
+          return pn.sortDir === "asc" ? cmp : -cmp;
+        });
+        const paths = sorted.map(e => e.path);
+        const fromIdx = paths.indexOf(fromPath);
+        const toIdx   = paths.indexOf(toPath);
+        if (fromIdx === -1 || toIdx === -1) return;
+        const [start, end] = fromIdx < toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+        tab.selectedPaths = new Set(paths.slice(start, end + 1));
+      },
+
+      // Display prefs
+      get viewMode() { return p()?.viewMode ?? "list"; },
+      setViewMode(v: ViewMode) {
+        const pn = p();
+        if (pn) pn.viewMode = v;
+        settings = { ...settings, defaultViewMode: v };
+        persistSettings(settings);
+      },
+
+      get sortKey() { return p()?.sortKey ?? "name"; },
+      get sortDir()  { return p()?.sortDir ?? "asc"; },
+      setSort(key: ContentSortKey, dir: SortDirection) {
+        const pn = p();
+        if (pn) { pn.sortKey = key; pn.sortDir = dir; }
+        settings = { ...settings, contentSortKey: key, contentSortDirection: dir };
+        persistSettings(settings);
+      },
+
+      get columnWidths() { return p()?.columnWidths ?? { ...DEFAULT_COLUMN_WIDTHS }; },
+      setColumnWidth(key: ContentSortKey, w: number) {
+        const pn = p();
+        if (pn) pn.columnWidths = { ...pn.columnWidths, [key]: w };
+        settings = { ...settings, contentColumnWidths: { ...(p()?.columnWidths ?? DEFAULT_COLUMN_WIDTHS) } };
+        persistSettings(settings);
+      },
+
+      get contentZoom() { return p()?.contentZoom ?? 1; },
+      setContentZoom(z: number) {
+        const pn = p();
+        if (pn) pn.contentZoom = z;
+        settings = { ...settings, defaultContentZoom: z };
+        persistSettings(settings);
+      },
+
+      // Loading
+      get isLoading() { return t()?.isLoading ?? false; },
+      setLoading(v: boolean) {
+        const tab = t();
+        if (tab) tab.isLoading = v;
+      },
+
+      // Rename
+      get renaming() { return t()?.renaming ?? null; },
+      startRename(path: string, value: string) {
+        const tab = t();
+        if (tab) tab.renaming = { path, value };
+      },
+      cancelRename() {
+        const tab = t();
+        if (tab) tab.renaming = null;
+      },
+    };
+  }
+
   return {
     // ── Settings ────────────────────────────────────────────
     get settings() { return settings; },
@@ -369,240 +736,116 @@ function createAppState() {
       applyTheme(t);
     },
 
-    // ── Tabs ─────────────────────────────────────────────────
-    get tabs() { return tabs; },
-    get activeTabIdx() { return activeTabIdx; },
-    get activeTabId() { return tabs[activeTabIdx]?.id ?? ""; },
-    get activeTab() { return tabs[activeTabIdx]; },
+    // ── Panes ────────────────────────────────────────────────
+    get panes() { return panes; },
+    get focusedPaneIdx() { return focusedPaneIdx; },
+    get isSplit() { return panes.length > 1; },
 
-    addTab(path?: string) {
-      const newTab = makeTab(path);
-      tabs = [...tabs, newTab];
-      activeTabIdx = tabs.length - 1;
-      persistTabs(tabs, activeTabIdx);
+    focusPane(idx: number) {
+      if (idx >= 0 && idx < panes.length) focusedPaneIdx = idx;
     },
 
-    closeTab(id: string) {
-      if (tabs.length <= 1) return;
-      const idx = tabs.findIndex(t => t.id === id);
-      if (idx === -1) return;
-      const newTabs = tabs.filter(t => t.id !== id);
-      tabs = newTabs;
-      if (activeTabIdx >= newTabs.length) {
-        activeTabIdx = newTabs.length - 1;
-      } else if (activeTabIdx > idx) {
-        activeTabIdx -= 1;
+    addPane(path?: string) {
+      if (panes.length >= 2) return;
+      const currentPath = path ?? fp().tabs[fp().activeTabIdx]?.currentPath ?? undefined;
+      const newPane = makePaneState(settings, [makeTab(currentPath)], 0);
+      panes = [...panes, newPane];
+      focusedPaneIdx = 1;
+      persistPanes(panes, focusedPaneIdx);
+    },
+
+    removePane(idx: number) {
+      if (panes.length <= 1) return;
+      panes = panes.filter((_, i) => i !== idx);
+      focusedPaneIdx = Math.min(focusedPaneIdx, panes.length - 1);
+      persistPanes(panes, focusedPaneIdx);
+    },
+
+    closeSecondPane() {
+      if (panes.length <= 1) return;
+      panes = [panes[0]];
+      focusedPaneIdx = 0;
+      persistPanes(panes, focusedPaneIdx);
+    },
+
+    getPaneView,
+
+    // ── Tabs (focused pane) ──────────────────────────────────
+    get tabs() { return fp().tabs; },
+    get activeTabIdx() { return fp().activeTabIdx; },
+    get activeTabId() { return ft()?.id ?? ""; },
+    get activeTab() { return ft(); },
+
+    addTab(path?: string) { getPaneView(focusedPaneIdx).addTab(path); },
+    closeTab(id: string) { getPaneView(focusedPaneIdx).closeTab(id); },
+    setActiveTab(id: string) { getPaneView(focusedPaneIdx).setActiveTab(id); },
+    setActiveTabByIndex(idx: number) { getPaneView(focusedPaneIdx).setActiveTabByIndex(idx); },
+    nextTab() { getPaneView(focusedPaneIdx).nextTab(); },
+    prevTab() { getPaneView(focusedPaneIdx).prevTab(); },
+    duplicateTab() { getPaneView(focusedPaneIdx).duplicateTab(); },
+    reorderTabs(fromIdx: number, insertIdx: number) { getPaneView(focusedPaneIdx).reorderTabs(fromIdx, insertIdx); },
+    setTabScrollTop(tabIdx: number, scrollTop: number) { getPaneView(focusedPaneIdx).setTabScrollTop(tabIdx, scrollTop); },
+    setTabLoadedPath(path: string) { getPaneView(focusedPaneIdx).setTabLoadedPath(path); },
+
+    // ── Navigation (focused pane) ────────────────────────────
+    get currentPath() { return ft()?.currentPath ?? null; },
+    get canGoBack()    { return getPaneView(focusedPaneIdx).canGoBack; },
+    get canGoForward() { return getPaneView(focusedPaneIdx).canGoForward; },
+    navigate(path: string, pushHistory = true) { getPaneView(focusedPaneIdx).navigate(path, pushHistory); },
+    navigateBack()    { getPaneView(focusedPaneIdx).navigateBack(); },
+    navigateForward() { getPaneView(focusedPaneIdx).navigateForward(); },
+    navigateUp()      { getPaneView(focusedPaneIdx).navigateUp(); },
+
+    // ── Search (focused pane) ─────────────────────────────────
+    get searchQuery() { return ft()?.searchQuery ?? null; },
+    get isSearching()  { return ft()?.isSearching ?? false; },
+    setSearch(q: string)          { getPaneView(focusedPaneIdx).setSearch(q); },
+    setIsSearching(v: boolean)    { getPaneView(focusedPaneIdx).setIsSearching(v); },
+    setSearchQuery(q: string | null) { getPaneView(focusedPaneIdx).setSearchQuery(q); },
+    clearSearch()                 { getPaneView(focusedPaneIdx).clearSearch(); },
+
+    // ── Content (focused pane) ───────────────────────────────
+    get entries() { return ft()?.entries ?? []; },
+    setEntries(e: EntryDto[]) { getPaneView(focusedPaneIdx).setEntries(e); },
+    get selectedPaths() { return ft()?.selectedPaths ?? new Set<string>(); },
+    setSelection(paths: string[]) { getPaneView(focusedPaneIdx).setSelection(paths); },
+    clearSelection()              { getPaneView(focusedPaneIdx).clearSelection(); },
+    toggleSelection(path: string) { getPaneView(focusedPaneIdx).toggleSelection(path); },
+    rangeSelect(fromPath: string, toPath: string) { getPaneView(focusedPaneIdx).rangeSelect(fromPath, toPath); },
+
+    get viewMode()    { return fp()?.viewMode ?? "list"; },
+    setViewMode(v: ViewMode) { getPaneView(focusedPaneIdx).setViewMode(v); },
+    get sortKey()  { return fp()?.sortKey ?? "name"; },
+    get sortDir()  { return fp()?.sortDir ?? "asc"; },
+    setSort(key: ContentSortKey, dir: SortDirection) { getPaneView(focusedPaneIdx).setSort(key, dir); },
+    get columnWidths() { return fp()?.columnWidths ?? { ...DEFAULT_COLUMN_WIDTHS }; },
+    setColumnWidth(key: ContentSortKey, w: number) { getPaneView(focusedPaneIdx).setColumnWidth(key, w); },
+    get contentZoom() { return fp()?.contentZoom ?? 1; },
+    setContentZoom(z: number) { getPaneView(focusedPaneIdx).setContentZoom(z); },
+    get isLoading()  { return ft()?.isLoading ?? false; },
+    setLoading(v: boolean) { getPaneView(focusedPaneIdx).setLoading(v); },
+    get renaming()   { return ft()?.renaming ?? null; },
+    startRename(path: string, value: string) { getPaneView(focusedPaneIdx).startRename(path, value); },
+    cancelRename()   { getPaneView(focusedPaneIdx).cancelRename(); },
+
+    // ── Sidebar: all tabs from all panes (for highlights) ────
+    get allTabHighlights(): TabHighlight[] {
+      const result: TabHighlight[] = [];
+      for (let pIdx = 0; pIdx < panes.length; pIdx++) {
+        const pn = panes[pIdx];
+        for (let tIdx = 0; tIdx < pn.tabs.length; tIdx++) {
+          const tab = pn.tabs[tIdx];
+          result.push({
+            path: tab.currentPath,
+            color: tab.color,
+            isActive: pIdx === focusedPaneIdx && tIdx === pn.activeTabIdx,
+          });
+        }
       }
-      persistTabs(tabs, activeTabIdx);
+      return result;
     },
 
-    setActiveTab(id: string) {
-      const idx = tabs.findIndex(t => t.id === id);
-      if (idx !== -1) activeTabIdx = idx;
-    },
-
-    setActiveTabByIndex(idx: number) {
-      if (idx >= 0 && idx < tabs.length) activeTabIdx = idx;
-    },
-
-    nextTab() {
-      activeTabIdx = (activeTabIdx + 1) % tabs.length;
-    },
-
-    prevTab() {
-      activeTabIdx = (activeTabIdx - 1 + tabs.length) % tabs.length;
-    },
-
-    duplicateTab() {
-      const current = tabs[activeTabIdx];
-      if (!current) return;
-      const newTab = makeTab(current.currentPath ?? undefined);
-      tabs = [...tabs.slice(0, activeTabIdx + 1), newTab, ...tabs.slice(activeTabIdx + 1)];
-      activeTabIdx = activeTabIdx + 1;
-      persistTabs(tabs, activeTabIdx);
-    },
-
-    reorderTabs(fromIdx: number, insertIdx: number) {
-      if (fromIdx === insertIdx || fromIdx + 1 === insertIdx) return;
-      const activeId = tabs[activeTabIdx]?.id;
-      const next = [...tabs];
-      const [moved] = next.splice(fromIdx, 1);
-      next.splice(fromIdx < insertIdx ? insertIdx - 1 : insertIdx, 0, moved);
-      tabs = next;
-      activeTabIdx = activeId ? next.findIndex(t => t.id === activeId) : 0;
-      persistTabs(tabs, activeTabIdx);
-    },
-
-    setTabScrollTop(tabIdx: number, scrollTop: number) {
-      if (tabs[tabIdx]) tabs[tabIdx].scrollTop = scrollTop;
-    },
-
-    setTabLoadedPath(path: string) {
-      const tab = tabs[activeTabIdx];
-      if (tab) tab.loadedPath = path;
-    },
-
-    // ── Navigation (per active tab) ──────────────────────────
-    get currentPath() { return tabs[activeTabIdx]?.currentPath ?? null; },
-    get navigationHistory() { return tabs[activeTabIdx]?.history ?? []; },
-    get historyIndex() { return tabs[activeTabIdx]?.historyIdx ?? -1; },
-
-    navigate(path: string, pushHistory = true) {
-      const tab = tabs[activeTabIdx];
-      if (!tab) return;
-      if (pushHistory && tab.currentPath !== null) {
-        tab.history = [...tab.history.slice(0, tab.historyIdx + 1), tab.currentPath];
-        tab.historyIdx = tab.history.length - 1;
-      }
-      tab.currentPath = path;
-      tab.searchQuery = null;
-      tab.isSearching = false;
-      tab.scrollTop = 0;
-      persistTabs(tabs, activeTabIdx);
-    },
-
-    navigateBack() {
-      const tab = tabs[activeTabIdx];
-      if (!tab || tab.historyIdx < 0) return;
-      tab.currentPath = tab.history[tab.historyIdx];
-      tab.historyIdx -= 1;
-      tab.searchQuery = null;
-      tab.isSearching = false;
-      tab.scrollTop = 0;
-    },
-
-    navigateForward() {
-      const tab = tabs[activeTabIdx];
-      if (!tab || tab.historyIdx >= tab.history.length - 1) return;
-      tab.historyIdx += 1;
-      tab.currentPath = tab.history[tab.historyIdx];
-      tab.searchQuery = null;
-      tab.isSearching = false;
-      tab.scrollTop = 0;
-    },
-
-    navigateUp() {
-      const p = tabs[activeTabIdx]?.currentPath;
-      if (p) {
-        const parent = parentPath(p);
-        if (parent !== null) this.navigate(parent);
-      }
-    },
-
-    get canGoBack() { return (tabs[activeTabIdx]?.historyIdx ?? -1) >= 0; },
-    get canGoForward() {
-      const tab = tabs[activeTabIdx];
-      return tab ? tab.historyIdx < tab.history.length - 1 : false;
-    },
-
-    // ── Search (per active tab) ───────────────────────────────
-    get searchQuery() { return tabs[activeTabIdx]?.searchQuery ?? null; },
-    get isSearching() { return tabs[activeTabIdx]?.isSearching ?? false; },
-    setSearch(q: string) {
-      const tab = tabs[activeTabIdx];
-      if (tab) { tab.searchQuery = q; tab.isSearching = true; }
-    },
-    setIsSearching(v: boolean) {
-      const tab = tabs[activeTabIdx];
-      if (tab) tab.isSearching = v;
-    },
-    setSearchQuery(q: string | null) {
-      const tab = tabs[activeTabIdx];
-      if (tab) tab.searchQuery = q;
-    },
-    clearSearch() {
-      const tab = tabs[activeTabIdx];
-      if (tab) { tab.searchQuery = null; tab.isSearching = false; }
-    },
-
-    // ── Content (per active tab) ─────────────────────────────
-    get entries() { return tabs[activeTabIdx]?.entries ?? []; },
-    setEntries(e: EntryDto[]) {
-      const tab = tabs[activeTabIdx];
-      if (tab) tab.entries = e;
-    },
-
-    get selectedPaths() { return tabs[activeTabIdx]?.selectedPaths ?? new Set<string>(); },
-    setSelection(paths: string[]) {
-      const tab = tabs[activeTabIdx];
-      if (tab) tab.selectedPaths = new Set(paths);
-    },
-    clearSelection() {
-      const tab = tabs[activeTabIdx];
-      if (tab) tab.selectedPaths = new Set();
-    },
-    toggleSelection(path: string) {
-      const tab = tabs[activeTabIdx];
-      if (!tab) return;
-      const next = new Set(tab.selectedPaths);
-      if (next.has(path)) next.delete(path); else next.add(path);
-      tab.selectedPaths = next;
-    },
-    rangeSelect(fromPath: string, toPath: string) {
-      const tab = tabs[activeTabIdx];
-      if (!tab) return;
-      const sorted = [...tab.entries].sort((a, b) => {
-        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-        let cmp = 0;
-        if (sortKey === "name") cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-        else if (sortKey === "type") cmp = a.extension.localeCompare(b.extension);
-        else if (sortKey === "size") cmp = a.size - b.size;
-        else if (sortKey === "modified") cmp = a.modifiedTs - b.modifiedTs;
-        return sortDir === "asc" ? cmp : -cmp;
-      });
-      const paths = sorted.map(e => e.path);
-      const fromIdx = paths.indexOf(fromPath);
-      const toIdx = paths.indexOf(toPath);
-      if (fromIdx === -1 || toIdx === -1) return;
-      const [start, end] = fromIdx < toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
-      tab.selectedPaths = new Set(paths.slice(start, end + 1));
-    },
-
-    get viewMode() { return viewMode; },
-    setViewMode(v: ViewMode) {
-      viewMode = v;
-      settings = { ...settings, defaultViewMode: v };
-      persistSettings(settings);
-    },
-
-    get sortKey() { return sortKey; },
-    get sortDir() { return sortDir; },
-    setSort(key: ContentSortKey, dir: SortDirection) {
-      sortKey = key; sortDir = dir;
-      settings = { ...settings, contentSortKey: key, contentSortDirection: dir };
-      persistSettings(settings);
-    },
-
-    get columnWidths() { return columnWidths; },
-    setColumnWidth(key: ContentSortKey, w: number) {
-      columnWidths = { ...columnWidths, [key]: w };
-      settings = { ...settings, contentColumnWidths: { ...columnWidths } };
-      persistSettings(settings);
-    },
-
-    get contentZoom() { return contentZoom; },
-    setContentZoom(z: number) {
-      contentZoom = z;
-      settings = { ...settings, defaultContentZoom: z };
-      persistSettings(settings);
-      document.documentElement.style.setProperty("--content-scale", String(z));
-    },
-
-    get treeZoom() { return treeZoom; },
-    setTreeZoom(z: number) {
-      treeZoom = z;
-      settings = { ...settings, defaultTreeZoom: z };
-      persistSettings(settings);
-      document.documentElement.style.setProperty("--tree-scale", String(z));
-    },
-
-    get isLoading() { return tabs[activeTabIdx]?.isLoading ?? false; },
-    setLoading(v: boolean) {
-      const tab = tabs[activeTabIdx];
-      if (tab) tab.isLoading = v;
-    },
-
-    // ── Favorite locations (replaces localLocations) ─────────
+    // ── Favorite locations ────────────────────────────────────
     get favoriteLocations() { return settings.favoriteLocations; },
     addFavorite(path: string) {
       if (settings.favoriteLocations.includes(path)) return;
@@ -628,15 +871,23 @@ function createAppState() {
     },
 
     // ── System volumes / known folders ───────────────────────
-    get volumes() { return volumes; },
+    get volumes()      { return volumes; },
     get knownFolders() { return knownFolders; },
     setVolumes(v: VolumeDto[]) { volumes = v; },
     setKnownFolders(k: KnownFoldersDto) { knownFolders = k; },
 
+    // ── Tree zoom (global — sidebar only) ───────────────────
+    get treeZoom() { return treeZoom; },
+    setTreeZoom(z: number) {
+      treeZoom = z;
+      settings = { ...settings, defaultTreeZoom: z };
+      persistSettings(settings);
+      document.documentElement.style.setProperty("--tree-scale", String(z));
+    },
+
     // ── Connections ──────────────────────────────────────────
     get connectionProfiles() { return connectionProfiles; },
     setConnectionProfiles(p: ConnectionProfileDto[]) { connectionProfiles = p; },
-
     get activeConnections() { return activeConnections; },
     setActiveConnections(c: ActiveConnectionDto[]) { activeConnections = c; },
     removeActiveConnection(sessionId: string) {
@@ -645,12 +896,12 @@ function createAppState() {
 
     // ── Connection manager ───────────────────────────────────
     get connectionManagerOpen() { return connectionManagerOpen; },
-    openConnectionManager() { connectionManagerOpen = true; },
+    openConnectionManager()  { connectionManagerOpen = true; },
     closeConnectionManager() { connectionManagerOpen = false; },
 
     // ── Settings dialog ──────────────────────────────────────
     get settingsOpen() { return settingsOpen; },
-    openSettings() { settingsOpen = true; },
+    openSettings()  { settingsOpen = true; },
     closeSettings() { settingsOpen = false; },
 
     // ── Confirm dialog ───────────────────────────────────────
@@ -674,22 +925,11 @@ function createAppState() {
     get clipboard() { return clipboard; },
     setClipboard(c: ClipboardState | null) { clipboard = c; },
 
-    // ── Rename (per active tab) ───────────────────────────────
-    get renaming() { return tabs[activeTabIdx]?.renaming ?? null; },
-    startRename(path: string, value: string) {
-      const tab = tabs[activeTabIdx];
-      if (tab) tab.renaming = { path, value };
-    },
-    cancelRename() {
-      const tab = tabs[activeTabIdx];
-      if (tab) tab.renaming = null;
-    },
-
     // ── Jobs / operation queue ────────────────────────────────
     get jobs() { return jobs; },
     get jobsPanelOpen() { return jobsPanelOpen; },
-    openJobsPanel() { jobsPanelOpen = true; },
-    closeJobsPanel() { jobsPanelOpen = false; },
+    openJobsPanel()   { jobsPanelOpen = true; },
+    closeJobsPanel()  { jobsPanelOpen = false; },
     toggleJobsPanel() { jobsPanelOpen = !jobsPanelOpen; },
 
     startJob(jobId: string, title: string, opts?: StartJobOpts) {
@@ -733,19 +973,14 @@ function createAppState() {
       const resultMessage = message
         || (success ? (job.statusMessageOnSuccess ?? "") : (job.statusMessageOnFailure ?? ""));
       jobs[idx] = { ...job, progress: 100, done: true, success, resultMessage };
-      // Auto-dismiss successful jobs after 5s — but only when NO queue is running.
-      // When a queue runs, dismissal is batched in executeQueue's finally block so the
-      // user can see the full list of completed operations until the queue finishes.
       if (success && !queueRunning) {
         setTimeout(() => { jobs = jobs.filter(j => j.id !== jobId); }, 5000);
       }
-      // Signal any waiters (for sequential queue execution)
       const waiters = jobWaiters.get(jobId) ?? [];
       jobWaiters.delete(jobId);
       for (const w of waiters) w();
     },
 
-    /** Called when the backend emits job-paused. Freezes the job UI with error context. */
     pauseJob(dto: JobPausedDto) {
       const idx = jobs.findIndex(j => j.id === dto.jobId);
       if (idx === -1) return;
@@ -758,33 +993,18 @@ function createAppState() {
       };
     },
 
-    /** Called after the user sends a resume decision — clears the pause state. */
     clearJobPause(jobId: string) {
       const idx = jobs.findIndex(j => j.id === jobId);
       if (idx === -1) return;
-      jobs[idx] = {
-        ...jobs[idx],
-        paused: false,
-        pauseError: null,
-        pauseFileName: null,
-        pauseIsRecoverable: false,
-      };
+      jobs[idx] = { ...jobs[idx], paused: false, pauseError: null, pauseFileName: null, pauseIsRecoverable: false };
     },
 
-    dismissJob(jobId: string) {
-      jobs = jobs.filter(j => j.id !== jobId);
-    },
+    dismissJob(jobId: string) { jobs = jobs.filter(j => j.id !== jobId); },
+    clearDoneJobs() { jobs = jobs.filter(j => !j.done); },
 
-    clearDoneJobs() {
-      jobs = jobs.filter(j => !j.done);
-    },
-
-    // Legacy compat — no-op (ProgressDialog removed)
     get progress() { return null; },
     clearProgress() {},
 
-    // Returns a Promise that resolves when finishJob(jobId) is called.
-    // Must be called after startJob to ensure the job exists in the array.
     waitForJob(jobId: string): Promise<void> {
       return new Promise(resolve => {
         const job = jobs.find(j => j.id === jobId);
@@ -796,11 +1016,11 @@ function createAppState() {
     },
 
     // ── Operation queue ───────────────────────────────────────
-    get queueMode() { return queueMode; },
-    get opQueue() { return opQueue; },
+    get queueMode()      { return queueMode; },
+    get opQueue()        { return opQueue; },
     get queueConflicts() { return queueConflicts; },
-    get queueRunning() { return queueRunning; },
-    get queueRunStats() { return queueRunStats; },
+    get queueRunning()   { return queueRunning; },
+    get queueRunStats()  { return queueRunStats; },
 
     toggleQueueMode() { queueMode = !queueMode; },
     addToQueue(op: QueuedOp) { opQueue = [...opQueue, op]; jobsPanelOpen = true; },
@@ -823,43 +1043,35 @@ function createAppState() {
       opQueue = next;
     },
 
-    async executeQueue(mode: 'parallel' | 'sequential') {
+    async executeQueue(mode: "parallel" | "sequential") {
       const ops = [...opQueue];
       if (ops.length === 0) return;
       opQueue = [];
       queueRunning = true;
-      // Snapshot which jobs already exist so we can identify queue-spawned jobs later.
       const preExistingIds = new Set(jobs.map(j => j.id));
       queueRunStats = { total: ops.length, completed: 0, succeeded: 0, failed: 0 };
 
-      // Wrap each op so we can track per-op completion count.
       const wrapOp = async (op: QueuedOp) => {
         await op.execute().catch(() => {});
         queueRunStats = { ...queueRunStats!, completed: queueRunStats!.completed + 1 };
       };
 
       try {
-        if (mode === 'parallel') {
+        if (mode === "parallel") {
           await Promise.all(ops.map(wrapOp));
         } else {
           for (const op of ops) await wrapOp(op);
         }
       } finally {
         queueRunning = false;
-
-        // Tally succeeded / failed from the jobs that were created by this queue run.
         const queueJobs = jobs.filter(j => !preExistingIds.has(j.id) && j.done);
         const succeeded = queueJobs.filter(j => j.success).length;
-        const failed = queueJobs.filter(j => !j.success).length;
+        const failed    = queueJobs.filter(j => !j.success).length;
         queueRunStats = { total: ops.length, completed: ops.length, succeeded, failed };
-
-        // Now that the queue is done, schedule auto-dismiss for successful jobs
-        // (these were held back during the run so the user could see them all).
         for (const j of queueJobs.filter(j => j.success)) {
           const id = j.id;
           setTimeout(() => { jobs = jobs.filter(x => x.id !== id); }, 5000);
         }
-        // Keep the stats summary visible for a few seconds after the queue finishes.
         setTimeout(() => { queueRunStats = null; }, 8000);
       }
     },
@@ -869,26 +1081,23 @@ function createAppState() {
     notify(kind: NotificationKind, text: string) {
       const n = makeNotification(kind, text);
       notifications = [n, ...notifications].slice(0, 8);
-      // "error" and "warn" are persistent — the user must dismiss them explicitly.
       if (kind !== "error" && kind !== "warn") {
-        setTimeout(() => {
-          notifications = notifications.filter((x) => x.id !== n.id);
-        }, 4000);
+        setTimeout(() => { notifications = notifications.filter(x => x.id !== n.id); }, 4000);
       }
     },
     dismissNotification(id: string) {
-      notifications = notifications.filter((x) => x.id !== id);
+      notifications = notifications.filter(x => x.id !== id);
     },
 
     // ── Terminal panel ────────────────────────────────────────
-    get terminalPanelOpen() { return terminalPanelOpen; },
+    get terminalPanelOpen()   { return terminalPanelOpen; },
     get terminalPanelHeight() { return terminalPanelHeight; },
-    get terminalTabs() { return terminalTabs; },
-    get activeTerminalId() { return activeTerminalId; },
+    get terminalTabs()        { return terminalTabs; },
+    get activeTerminalId()    { return activeTerminalId; },
 
-    openTerminalPanel() { terminalPanelOpen = true; },
-    closeTerminalPanel() { terminalPanelOpen = false; },
-    toggleTerminalPanel() { terminalPanelOpen = !terminalPanelOpen; },
+    openTerminalPanel()    { terminalPanelOpen = true; },
+    closeTerminalPanel()   { terminalPanelOpen = false; },
+    toggleTerminalPanel()  { terminalPanelOpen = !terminalPanelOpen; },
     setTerminalPanelHeight(h: number) { terminalPanelHeight = h; },
 
     addTerminalTab(tab: TerminalTabInfo) {
@@ -937,8 +1146,6 @@ function applyTheme(t: ThemeMode) {
 
 export const app = createAppState();
 
-// Apply theme and scale CSS variables on module load
 applyTheme(app.settings.theme);
 document.documentElement.style.setProperty("--app-font-scale", String(app.settings.fontScale));
-document.documentElement.style.setProperty("--content-scale", String(app.settings.defaultContentZoom));
 document.documentElement.style.setProperty("--tree-scale", String(app.settings.defaultTreeZoom));

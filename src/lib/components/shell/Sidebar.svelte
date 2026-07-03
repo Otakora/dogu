@@ -16,33 +16,26 @@
   let collapsed = $state({ favorites: false, computer: false, connections: false });
 
   // ── Tab highlights (for TreeNode coloring) ───────────────
-  const tabHighlights = $derived<TabHighlight[]>(
-    app.tabs.map((tab, i) => ({
-      path: tab.currentPath,
-      color: tab.color,
-      isActive: i === app.activeTabIdx,
-    }))
-  );
+  // Uses allTabHighlights to aggregate highlights from ALL panes (split-pane aware)
+  const tabHighlights = $derived<TabHighlight[]>(app.allTabHighlights);
 
   // ── Flat item highlight (for favorites & drives) ─────────
   function computeHighlight(path: string): string | null {
     if (!path) return null;
     let bestColor: string | null = null;
     let bestScore = -1;
-    for (let i = 0; i < app.tabs.length; i++) {
-      const tab = app.tabs[i];
-      if (!tab.currentPath) continue;
-      const tp = tab.currentPath;
+    for (const th of app.allTabHighlights) {
+      if (!th.path) continue;
+      const tp = th.path;
       const isExact = tp === path;
-      // For drives like "C:\", tabs at "C:\Users\..." are ancestors
       const isAncestor = !isExact && (
         tp.startsWith(path + "/") ||
         tp.startsWith(path + "\\") ||
         ((path.endsWith("/") || path.endsWith("\\")) && tp.startsWith(path))
       );
       if (!isExact && !isAncestor) continue;
-      const score = (isExact ? 3 : 0) + (i === app.activeTabIdx ? 1 : 0);
-      if (score > bestScore) { bestScore = score; bestColor = tab.color; }
+      const score = (isExact ? 3 : 0) + (th.isActive ? 1 : 0);
+      if (score > bestScore) { bestScore = score; bestColor = th.color; }
     }
     return bestColor;
   }
@@ -111,17 +104,28 @@
         icon: ICON_NEW_TAB,
         onclick: () => app.addTab(path),
       },
-      { kind: "separator" },
-      {
-        kind: "action",
-        label: t("sidebar.copyPath"),
-        icon: ICON_COPY,
-        onclick: () => {
-          navigator.clipboard.writeText(path);
-          app.notify("info", t("sidebar.pathCopied"));
-        },
-      },
     ];
+
+    if (app.isSplit) {
+      const otherPane = app.getPaneView(app.focusedPaneIdx === 0 ? 1 : 0);
+      items.push({
+        kind: "action",
+        label: t("sidebar.openInOtherPane"),
+        icon: ICON_SPLIT,
+        onclick: () => otherPane.navigate(path),
+      });
+    }
+
+    items.push({ kind: "separator" });
+    items.push({
+      kind: "action",
+      label: t("sidebar.copyPath"),
+      icon: ICON_COPY,
+      onclick: () => {
+        navigator.clipboard.writeText(path);
+        app.notify("info", t("sidebar.pathCopied"));
+      },
+    });
 
     items.push({ kind: "separator" });
     items.push({
@@ -147,26 +151,37 @@
 
   function openVolumeMenu(e: MouseEvent, vol: VolumeDto) {
     e.preventDefault();
-    contextMenu = {
-      x: e.clientX,
-      y: e.clientY,
-      items: [
-        { kind: "action", label: t("sidebar.open"), icon: ICON_OPEN, onclick: () => app.navigate(vol.path) },
-        { kind: "action", label: t("tabs.openInNewTab"), icon: ICON_NEW_TAB, onclick: () => app.addTab(vol.path) },
-        { kind: "separator" },
-        { kind: "action", label: t("terminal.openTerminal"), icon: ICON_TERMINAL, onclick: () => openTerminalAt(vol.path) },
-        { kind: "separator" },
-        {
-          kind: "action",
-          label: t("sidebar.copyPath"),
-          icon: ICON_COPY,
-          onclick: () => {
-            navigator.clipboard.writeText(vol.path);
-            app.notify("info", t("sidebar.pathCopied"));
-          },
+    const volItems: MenuItem[] = [
+      { kind: "action", label: t("sidebar.open"), icon: ICON_OPEN, onclick: () => app.navigate(vol.path) },
+      { kind: "action", label: t("tabs.openInNewTab"), icon: ICON_NEW_TAB, onclick: () => app.addTab(vol.path) },
+    ];
+
+    if (app.isSplit) {
+      const otherPane = app.getPaneView(app.focusedPaneIdx === 0 ? 1 : 0);
+      volItems.push({
+        kind: "action",
+        label: t("sidebar.openInOtherPane"),
+        icon: ICON_SPLIT,
+        onclick: () => otherPane.navigate(vol.path),
+      });
+    }
+
+    volItems.push(
+      { kind: "separator" },
+      { kind: "action", label: t("terminal.openTerminal"), icon: ICON_TERMINAL, onclick: () => openTerminalAt(vol.path) },
+      { kind: "separator" },
+      {
+        kind: "action",
+        label: t("sidebar.copyPath"),
+        icon: ICON_COPY,
+        onclick: () => {
+          navigator.clipboard.writeText(vol.path);
+          app.notify("info", t("sidebar.pathCopied"));
         },
-      ],
-    };
+      },
+    );
+
+    contextMenu = { x: e.clientX, y: e.clientY, items: volItems };
   }
 
   function handleRemoteTreeContextMenu(e: MouseEvent, entry: EntryDto, conn: ActiveConnectionDto) {
@@ -175,17 +190,28 @@
     const items: MenuItem[] = [
       { kind: "action", label: t("sidebar.open"), icon: ICON_OPEN, onclick: () => app.navigate(entry.path) },
       { kind: "action", label: t("tabs.openInNewTab"), icon: ICON_NEW_TAB, onclick: () => app.addTab(entry.path) },
-      { kind: "separator" },
-      {
-        kind: "action",
-        label: t("sidebar.copyPath"),
-        icon: ICON_COPY,
-        onclick: () => {
-          navigator.clipboard.writeText(entry.path);
-          app.notify("info", t("sidebar.pathCopied"));
-        },
-      },
     ];
+
+    if (app.isSplit) {
+      const otherPane = app.getPaneView(app.focusedPaneIdx === 0 ? 1 : 0);
+      items.push({
+        kind: "action",
+        label: t("sidebar.openInOtherPane"),
+        icon: ICON_SPLIT,
+        onclick: () => otherPane.navigate(entry.path),
+      });
+    }
+
+    items.push({ kind: "separator" });
+    items.push({
+      kind: "action",
+      label: t("sidebar.copyPath"),
+      icon: ICON_COPY,
+      onclick: () => {
+        navigator.clipboard.writeText(entry.path);
+        app.notify("info", t("sidebar.pathCopied"));
+      },
+    });
     if (isRoot) {
       items.push({ kind: "separator" });
       items.push({
@@ -244,6 +270,7 @@
   const ICON_REMOVE     = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
   const ICON_DISCONNECT = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`;
   const ICON_TERMINAL   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
+  const ICON_SPLIT      = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>`;
 </script>
 
 <aside

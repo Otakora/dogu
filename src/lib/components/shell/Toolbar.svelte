@@ -19,26 +19,8 @@
 
   let { onRefresh, onNewFolder, onNewFile, onSearch, onClearSearch }: Props = $props();
 
-  // ── Responsive width tracking ─────────────────────────────────
-  let toolbarEl = $state<HTMLElement | undefined>(undefined);
-  let toolbarWidth = $state(9999);
-
-  $effect(() => {
-    if (!toolbarEl) return;
-    toolbarWidth = toolbarEl.getBoundingClientRect().width;
-    const ro = new ResizeObserver(entries => {
-      toolbarWidth = entries[0].contentRect.width;
-    });
-    ro.observe(toolbarEl);
-    return () => ro.disconnect();
-  });
-
-  // Minimum width for a comfortable single row:
-  //   nav(115) + star(28) + actions(117) + split/p0(28) + search(140) + globalBtns/p0(92) + padding+gaps(40) + breadcrumb-min(120)
-  //   Pane 0: 115+28+117+28+140+92+40+120 = 680px
-  //   Pane 1: 115+28+117+  0+140+ 0+40+120 = 560px
-  const minSingleRowWidth = $derived(pane.paneIdx === 0 ? 680 : 560);
-  const twoRow = $derived(toolbarWidth < minSingleRowWidth);
+  // Split view always uses two rows; single pane uses one row.
+  const twoRow = $derived(app.isSplit);
 
   // ── Editable path ─────────────────────────────────────────────
   let editingPath = $state(false);
@@ -327,10 +309,10 @@
   </div>
 {/snippet}
 
-{#snippet searchGroup(fill: boolean)}
+{#snippet searchGroup(variant: 'normal' | 'right')}
   <div
     class="tb-search"
-    class:tb-search--fill={fill}
+    class:tb-search--right={variant === 'right'}
     class:tb-search--focused={searchFocused}
   >
     <svg class="tb-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -401,7 +383,6 @@
 <div
   class="toolbar"
   class:toolbar--two-row={twoRow}
-  bind:this={toolbarEl}
 >
   {#if twoRow}
     <div class="tb-row tb-row--top">
@@ -411,8 +392,8 @@
     </div>
     <div class="tb-row tb-row--bottom">
       {@render actionGroup()}
-      {@render searchGroup(true)}
-      {#if pane.paneIdx === 0}{@render globalButtons()}{/if}
+      {@render searchGroup('right')}
+      {@render globalButtons()}
     </div>
   {:else}
     <div class="tb-row">
@@ -420,8 +401,8 @@
       {@render pathGroup()}
       {@render starButton()}
       {@render actionGroup()}
-      {@render searchGroup(false)}
-      {#if pane.paneIdx === 0}{@render globalButtons()}{/if}
+      {@render searchGroup('normal')}
+      {@render globalButtons()}
     </div>
   {/if}
 </div>
@@ -621,11 +602,11 @@
     transition: border-color 0.15s, box-shadow 0.15s;
   }
 
-  /* in the second row, search expands to fill available space */
-  .tb-search--fill {
-    width: auto;
-    flex: 1;
-    min-width: 80px;
+  /* in the second row, search is right-aligned with a generous but bounded width */
+  .tb-search--right {
+    width: 280px;
+    flex-shrink: 1;
+    margin-left: auto;
   }
 
   .tb-search--focused {

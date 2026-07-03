@@ -1,0 +1,6 @@
+# Binary sidecars — use Git LFS for future updates
+third_party/**/*.exe   filter=lfs diff=lfs merge=lfs -text
+third_party/**/*.dll   filter=lfs diff=lfs merge=lfs -text
+third_party/**/7zz     filter=lfs diff=lfs merge=lfs -text
+third_party/**/7zzs    filter=lfs diff=lfs merge=lfs -text
+third_party/**/chdman  filter=lfs diff=lfs merge=lfs -text

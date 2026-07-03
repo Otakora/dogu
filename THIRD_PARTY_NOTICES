@@ -1,0 +1,32 @@
+THIRD-PARTY NOTICES
+===================
+
+Dogu bundles the following third-party tools as pre-compiled binaries.
+Their license files are included alongside each binary under third_party/.
+
+
+chdman v0.288
+-------------
+Part of the MAME project.
+Copyright (c) 1997-2026 MAMEdev and contributors
+
+License: GNU General Public License, version 2 (GPL-2.0)
+Full license text: third_party/chdman/windows/COPYING
+Source code and releases: https://github.com/mamedev/mame
+Official documentation: https://docs.mamedev.org/tools/chdman.html
+
+
+7-Zip v26.01
+------------
+Copyright (C) 1999-2026 Igor Pavlov.
+
+Licenses:
+  - 7za.exe (Windows): GNU LGPL 2.1, BSD 3-clause, BSD 2-clause
+  - 7zz (Linux):       GNU LGPL 2.1, BSD 3-clause, BSD 2-clause,
+                       unRAR license restriction (decompression only;
+                       the unRAR sources may not be used to re-create
+                       the RAR compression algorithm)
+
+Full license text (Windows): third_party/7zip/windows/License.txt
+Full license text (Linux):   third_party/7zip/linux/License.txt
+Homepage: https://www.7-zip.org/

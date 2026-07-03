@@ -30,6 +30,7 @@
     "targets": "all",
     "resources": [
       "../third_party/**/*",
+      "../THIRD_PARTY_NOTICES",
       "../packaging/assets/io.github.otakora.dogu.svg"
     ],
     "linux": {

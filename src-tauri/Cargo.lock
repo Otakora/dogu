@@ -2771,25 +2771,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "pavao-src"
-version = "4.22.0-4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30b8c63418f1e7dfbb786268ae0927537b87d90b1211216c1ba50ce25d8d9495"
-dependencies = [
- "cc",
- "git2",
- "glob",
-]
-
-[[package]]
 name = "pavao-sys"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07b390d8c7372e94c7e0f7d92e36c98404634c554a52b1cb9ae030b4e7888cde"
 dependencies = [
- "cc",
  "libc",
- "pavao-src",
  "pkg-config",
 ]
 

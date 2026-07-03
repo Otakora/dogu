@@ -46,7 +46,6 @@ jobs:
           path: dist/dogu-windows-x64-*-setup.exe
 
   linux-native:
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,20 +75,9 @@ jobs:
             curl \
             wget \
             file \
+            libsmbclient \
+            libsmbclient-dev \
             pkg-config \
-            libtirpc-dev \
-            libgnutls28-dev \
-            libldap2-dev \
-            libjansson-dev \
-            libparse-yapp-perl \
-            libacl1-dev \
-            libpam0g-dev \
-            libcups2-dev \
-            libsasl2-dev \
-            libunistring-dev \
-            libbsd-dev \
-            libcap-dev \
-            libkeyutils-dev \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
             libsoup-3.0-dev \
@@ -110,7 +98,6 @@ jobs:
           path: dist/dogu-linux-x86_64-*.deb
 
   linux-flatpak:
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -140,20 +127,9 @@ jobs:
             curl \
             wget \
             file \
+            libsmbclient \
+            libsmbclient-dev \
             pkg-config \
-            libtirpc-dev \
-            libgnutls28-dev \
-            libldap2-dev \
-            libjansson-dev \
-            libparse-yapp-perl \
-            libacl1-dev \
-            libpam0g-dev \
-            libcups2-dev \
-            libsasl2-dev \
-            libunistring-dev \
-            libbsd-dev \
-            libcap-dev \
-            libkeyutils-dev \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
             libsoup-3.0-dev \

@@ -86,20 +86,9 @@ sudo apt install -y \
   curl \
   wget \
   file \
+  libsmbclient \
+  libsmbclient-dev \
   pkg-config \
-  libtirpc-dev \
-  libgnutls28-dev \
-  libldap2-dev \
-  libjansson-dev \
-  libparse-yapp-perl \
-  libacl1-dev \
-  libpam0g-dev \
-  libcups2-dev \
-  libsasl2-dev \
-  libunistring-dev \
-  libbsd-dev \
-  libcap-dev \
-  libkeyutils-dev \
   libgtk-3-dev \
   libwebkit2gtk-4.1-dev \
   libsoup-3.0-dev \
@@ -108,7 +97,7 @@ sudo apt install -y \
   patchelf
 ```
 
-`libtirpc-dev`, `libgnutls28-dev`, `libldap2-dev`, `libparse-yapp-perl`, `libjansson-dev`, `libacl1-dev`, `libpam0g-dev`, `libcups2-dev`, `libsasl2-dev`, `libunistring-dev`, `libbsd-dev`, `libcap-dev` y `libkeyutils-dev` son necesarios aqui porque el backend SMB actual (`remotefs-smb` con `vendored`) compila componentes de Samba durante el build en Linux.
+`libsmbclient` y `libsmbclient-dev` son necesarios aqui porque el backend SMB enlaza contra la libreria del sistema en Linux. El resto de paquetes cubre el toolchain habitual de Tauri para GTK/WebKit y el empaquetado AppImage.
 
 ---
 
@@ -126,7 +115,7 @@ Salida esperada:
 
 Notas importantes:
 
-- El script lanza primero `build-linux-native` (AppImage + DEB) y despues construye el bundle Flatpak sobre ese binario.
+- El script compila primero el binario release de Tauri sin bundles y despues construye el bundle Flatpak sobre ese resultado.
 - Requiere `flatpak` y `flatpak-builder` instalados.
 - Usa el runtime `org.freedesktop.Platform//24.08` y las extensiones `node20` y `rust-stable`.
 - El wrapper Flatpak fija `DOGU_RESOURCES_DIR` para que la app localice `chdman` y `7-Zip` integrados.

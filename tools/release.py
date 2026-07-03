@@ -199,7 +199,9 @@ def build_linux_flatpak() -> Path:
     if shutil.which("flatpak") is None or shutil.which("flatpak-builder") is None:
         raise RuntimeError("Instala flatpak y flatpak-builder antes de generar el bundle Flatpak.")
 
-    build_linux_native()
+    ensure_linux_sidecars_permissions()
+    run_tauri(["build", "--no-bundle"])
+    stage_flatpak_input()
     for command in flatpak_build_commands():
         run(command)
     return DIST_DIR / versioned_filename("linux-flatpak")

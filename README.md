@@ -56,8 +56,19 @@ start moving it.
 **🖥️ Built-in terminal** — A real local shell (PowerShell / bash / zsh) and SSH terminals for
 your remotes, each opening at the pane's current path. Resizable, multi-tab, no context switch.
 
-**⏳ Operation queue** — Flip on queue mode and copy/move operations stack up so you can review
-and run them together, with a live progress log and pause/cancel.
+**⏳ Smart operation queue** — This is where Dogu earns its keep. Flip on queue mode and your
+copy / move / delete / extract / compress / convert operations stack up instead of firing one by
+one. Before you run them, Dogu **analyzes the whole batch for conflicts** — it compares every
+operation's sources, destinations and deletions and warns you when they collide:
+
+- 🟥 **Blocking conflicts** — e.g. one operation would delete files another needs as input. The
+  queue won't let you run these in any mode until you fix them.
+- 🟨 **Parallel-only conflicts** — e.g. two operations write to the same folder. Safe if run in
+  order, risky at the same time — so Dogu only offers sequential execution.
+
+Then you choose: run everything **in parallel** for speed, or **sequentially** for safety, with
+live stats (completed / succeeded / failed) as it goes. It's the difference between babysitting a
+pile of scripts and queueing a night's worth of work in one confident click.
 
 **📦 Archive extraction** — Unpack `.zip`, `.7z`, `.rar` and more, one at a time or in bulk,
 with destination options and a preview. **7-Zip is bundled** — nothing to install.
@@ -185,8 +196,20 @@ juegos cabe de verdad antes de empezar a moverlo.
 tus remotos, cada uno abriéndose en la ruta actual del panel. Redimensionable, con varias
 pestañas y sin cambiar de aplicación.
 
-**⏳ Cola de operaciones** — Activa el modo cola y las operaciones de copia/movimiento se
-acumulan para que las revises y ejecutes juntas, con un log de progreso en vivo y pausa/cancelación.
+**⏳ Cola de operaciones inteligente** — Aquí es donde Dogu se gana el sueldo. Activa el modo
+cola y tus operaciones de copia / movimiento / borrado / extracción / compresión / conversión se
+acumulan en lugar de dispararse una a una. Antes de ejecutarlas, Dogu **analiza todo el lote en
+busca de conflictos**: compara los orígenes, destinos y borrados de cada operación y te avisa
+cuando chocan:
+
+- 🟥 **Conflictos bloqueantes** — p. ej. una operación borraría archivos que otra necesita como
+  entrada. La cola no te deja ejecutarlos en ningún modo hasta que lo resuelvas.
+- 🟨 **Conflictos solo-en-paralelo** — p. ej. dos operaciones escriben en la misma carpeta.
+  Seguro si se ejecutan en orden, arriesgado a la vez — así que Dogu solo ofrece ejecución secuencial.
+
+Después eliges: ejecutar todo **en paralelo** por velocidad, o **en secuencia** por seguridad, con
+estadísticas en vivo (completadas / correctas / fallidas) sobre la marcha. Es la diferencia entre
+vigilar un montón de scripts y encolar el trabajo de toda una noche en un único clic con confianza.
 
 **📦 Extracción de comprimidos** — Descomprime `.zip`, `.7z`, `.rar` y más, de uno en uno o en
 masa, con opciones de destino y previsualización. **7-Zip viene integrado** — nada que instalar.

@@ -6,3 +6,5 @@ node_modules/
 src-tauri/target/
 # Windows reserved device name accidentally created at root of src-tauri/
 src-tauri/NUL
+# Claude Code local tooling (preview launch config, local settings)
+.claude/

@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
+    net::ToSocketAddrs as _,
     sync::Mutex,
     time::Duration,
 };
@@ -10,6 +11,8 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{AppHandle, Emitter};
 
 use crate::models::{AvailableShell, TerminalCwdPayload, TerminalDataPayload, TerminalExitPayload};
+
+const SSH_TERMINAL_CONNECT_TIMEOUT_SECS: u64 = 15;
 
 // ── Local PTY session ──────────────────────────────────────────────────────
 
@@ -609,6 +612,66 @@ fn run_ssh_worker(
 
         std::thread::sleep(Duration::from_millis(10));
     }
+
+    Ok(())
+}
+
+pub fn probe_ssh_terminal(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<()> {
+    use ssh2::Session as Ssh2Session;
+
+    let addr = format!("{host}:{port}")
+        .to_socket_addrs()
+        .map_err(|e| anyhow!("No se pudo resolver {}:{}: {}", host, port, e))?
+        .next()
+        .ok_or_else(|| anyhow!("No se pudo resolver {}:{}", host, port))?;
+
+    let tcp = std::net::TcpStream::connect_timeout(
+        &addr,
+        Duration::from_secs(SSH_TERMINAL_CONNECT_TIMEOUT_SECS),
+    )
+    .map_err(|e| anyhow!("No se pudo conectar a {}:{}: {}", host, port, e))?;
+    let _ = tcp.set_read_timeout(Some(Duration::from_secs(SSH_TERMINAL_CONNECT_TIMEOUT_SECS)));
+    let _ = tcp.set_write_timeout(Some(Duration::from_secs(SSH_TERMINAL_CONNECT_TIMEOUT_SECS)));
+
+    let mut session = Ssh2Session::new()
+        .map_err(|e| anyhow!("No se pudo crear sesion SSH: {}", e))?;
+    session.set_tcp_stream(tcp);
+    session
+        .handshake()
+        .map_err(|e| anyhow!("Error en handshake SSH: {}", e))?;
+    session
+        .userauth_password(username, password)
+        .map_err(|e| anyhow!("Autenticacion SSH fallida: {}", e))?;
+
+    if !session.authenticated() {
+        return Err(anyhow!("La autenticacion SSH fallo (credenciales incorrectas)"));
+    }
+
+    let mut channel = session
+        .channel_session()
+        .map_err(|e| anyhow!("No se pudo abrir el canal SSH: {}", e))?;
+    channel
+        .request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
+        .map_err(|e| anyhow!("No se pudo solicitar PTY: {}", e))?;
+
+    if channel.shell().is_err() {
+        let started = ["bash", "/bin/bash", "sh", "/bin/sh"]
+            .iter()
+            .any(|sh| channel.exec(sh).is_ok());
+        if !started {
+            return Err(anyhow!(
+                "El servidor rechazo la solicitud de terminal interactivo. Comprueba que el usuario tiene acceso a shell/PTY y que no esta limitado a un modo solo-SFTP."
+            ));
+        }
+    }
+
+    let _ = channel.close();
+    let _ = channel.wait_close();
 
     Ok(())
 }

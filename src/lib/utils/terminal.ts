@@ -3,6 +3,10 @@ import { app } from "../stores/app.svelte.js";
 
 let _seq = 0;
 
+function isRemotePath(path: string): boolean {
+  return path.startsWith("remote://");
+}
+
 function tabTitleFromCwd(cwd: string | null | undefined): string {
   if (!cwd) return `Terminal ${++_seq}`;
   const name = cwd.replace(/[/\\]+$/, "").split(/[/\\]/).filter(Boolean).pop();
@@ -10,6 +14,10 @@ function tabTitleFromCwd(cwd: string | null | undefined): string {
 }
 
 export async function openTerminalAt(cwd: string, shell?: string): Promise<void> {
+  if (isRemotePath(cwd)) {
+    await openRemoteTerminalAt(cwd);
+    return;
+  }
   const id = `term-${Date.now()}-${++_seq}`;
   const title = tabTitleFromCwd(cwd);
   app.addTerminalTab({ id, title, cwd });

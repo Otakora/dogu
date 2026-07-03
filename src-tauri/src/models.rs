@@ -311,6 +311,18 @@ pub struct VolumeDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RemoteDiskUsageDto {
+    pub scope_path: String,
+    pub total_bytes: Option<u64>,
+    pub free_bytes: Option<u64>,
+    pub used_bytes: Option<u64>,
+    /// "sftpStatvfs" | "sshDf" | "unsupported" | "unavailable"
+    pub method: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AvailableShell {
     pub name: String,
     pub path: String,

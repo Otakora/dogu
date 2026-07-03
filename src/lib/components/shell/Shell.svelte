@@ -24,6 +24,7 @@
   import Pane from "./Pane.svelte";
   import TerminalPanel from "../terminal/TerminalPanel.svelte";
   import ConnectionManager from "../connections/ConnectionManager.svelte";
+  import { openTerminalAt } from "../../utils/terminal.js";
   import JobsPanel from "../dialogs/JobsPanel.svelte";
   import ConfirmDialog from "../dialogs/ConfirmDialog.svelte";
   import SettingsDialog from "../dialogs/SettingsDialog.svelte";
@@ -188,7 +189,9 @@
 
     if (e.ctrlKey && e.key === "`") {
       e.preventDefault();
-      app.toggleTerminalPanel();
+      if (app.currentPath) {
+        openTerminalAt(app.currentPath);
+      }
       return;
     }
 

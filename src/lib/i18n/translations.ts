@@ -68,6 +68,8 @@ const en = {
   "sidebar.addToFavorites": "Add to favorites",
   "sidebar.noConnections": "No active connections.",
   "sidebar.freeOf": "{free} free of {total}",
+  "sidebar.spaceLoading": "Loading space…",
+  "sidebar.spaceUnavailable": "Space unavailable",
   "sidebar.openInOtherPane": "Open in other pane",
 
   // ── TreeNode ────────────────────────────────────────────
@@ -226,6 +228,9 @@ const en = {
   "connectionManager.connectedTo": "Connected to {label}.",
   "connectionManager.couldNotConnect": "Could not connect.",
   "connectionManager.connectionFailedAfterTrust": "Connection failed after trusting fingerprint.",
+  "connectionManager.testTimedOut": "The connection test took too long. The app stopped waiting so you can try again.",
+  "connectionManager.connectTimedOut": "The remote connection took too long. The app stopped waiting so you can try again.",
+  "connectionManager.disconnectTimedOut": "The remote disconnection took too long. The app stopped waiting so you can keep working.",
 
   // ── ConnectionForm ──────────────────────────────────────
   "connectionForm.label": "Label",
@@ -245,7 +250,7 @@ const en = {
   "connectionForm.sftp": "SFTP",
   "connectionForm.sftpHint": "— full file system access",
   "connectionForm.scp": "SCP",
-  "connectionForm.scpHint": "— transfer-only mode",
+  "connectionForm.scpHint": "— compatibility mode, requires remote shell/exec",
   "connectionForm.ftpOptions": "FTP options",
   "connectionForm.passiveMode": "Passive mode",
   "connectionForm.passiveHint": "— recommended",
@@ -563,6 +568,8 @@ const es: Record<TranslationKey, string> = {
   "sidebar.addToFavorites": "Añadir a favoritos",
   "sidebar.noConnections": "Sin conexiones activas.",
   "sidebar.freeOf": "{free} libre de {total}",
+  "sidebar.spaceLoading": "Cargando espacio…",
+  "sidebar.spaceUnavailable": "Espacio no disponible",
   "sidebar.openInOtherPane": "Abrir en el otro panel",
 
   // ── TreeNode ────────────────────────────────────────────
@@ -721,6 +728,9 @@ const es: Record<TranslationKey, string> = {
   "connectionManager.connectedTo": "Conectado a {label}.",
   "connectionManager.couldNotConnect": "No se pudo conectar.",
   "connectionManager.connectionFailedAfterTrust": "La conexión falló tras confiar en la huella.",
+  "connectionManager.testTimedOut": "La prueba de conexión tardó demasiado. La aplicación ha dejado de esperar para que puedas volver a intentarlo.",
+  "connectionManager.connectTimedOut": "La conexión remota tardó demasiado. La aplicación ha dejado de esperar para que puedas volver a intentarlo.",
+  "connectionManager.disconnectTimedOut": "La desconexión remota tardó demasiado. La aplicación ha dejado de esperar para que puedas seguir trabajando.",
 
   // ── ConnectionForm ──────────────────────────────────────
   "connectionForm.label": "Etiqueta",
@@ -740,7 +750,7 @@ const es: Record<TranslationKey, string> = {
   "connectionForm.sftp": "SFTP",
   "connectionForm.sftpHint": "— acceso completo al sistema de archivos",
   "connectionForm.scp": "SCP",
-  "connectionForm.scpHint": "— modo solo transferencia",
+  "connectionForm.scpHint": "— modo de compatibilidad, requiere shell/exec remoto",
   "connectionForm.ftpOptions": "Opciones FTP",
   "connectionForm.passiveMode": "Modo pasivo",
   "connectionForm.passiveHint": "— recomendado",

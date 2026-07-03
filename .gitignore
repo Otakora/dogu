@@ -4,3 +4,5 @@ build/
 dist/
 node_modules/
 src-tauri/target/
+# Windows reserved device name accidentally created at root of src-tauri/
+src-tauri/NUL

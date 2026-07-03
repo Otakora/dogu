@@ -275,6 +275,17 @@ export type VolumeDto = {
   isRemovable: boolean;
 };
 
+export type RemoteDiskUsageMethod = "sftpStatvfs" | "sshDf" | "unsupported" | "unavailable";
+
+export type RemoteDiskUsageDto = {
+  scopePath: string;
+  totalBytes: number | null;
+  freeBytes: number | null;
+  usedBytes: number | null;
+  method: RemoteDiskUsageMethod;
+  note: string | null;
+};
+
 export type KnownFoldersDto = {
   home: string | null;
   desktop: string | null;

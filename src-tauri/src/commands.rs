@@ -11,7 +11,7 @@ use crate::{
         ConnectionOpenResultDto, ConnectionProfileDto,
         ConnectionProfilePayload, EntryDto, ExtractionOptionsPayload, ExtractionPreviewEntry, ExtractionPreviewRow,
         KnownFoldersDto, M3uGeneratePayload, M3uGenerateResultDto, M3uGroupDto, M3uScanOptions,
-        PreflightCheckResult, PropertiesSummaryDto, SelectionAnalysisDto, SummaryOptionsPayload,
+        PreflightCheckResult, PropertiesSummaryDto, RemoteDiskUsageDto, SelectionAnalysisDto, SummaryOptionsPayload,
         VolumeDto,
     },
     m3u, ops, pause, remote, terminal,
@@ -462,56 +462,86 @@ pub fn list_active_connections(
 }
 
 #[tauri::command]
-pub fn connect_connection_profile(
+pub async fn connect_connection_profile(
     remote_state: State<'_, remote::RemoteState>,
     profile_id: String,
     trust_current_fingerprint: bool,
 ) -> Result<ConnectionOpenResultDto, String> {
-    remote_state
-        .inner
-        .connect_profile(&profile_id, trust_current_fingerprint)
-        .map_err(|error| error.to_string())
+    let rm = remote_state.inner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        rm.connect_profile(&profile_id, trust_current_fingerprint)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn test_connection_profile(
+pub async fn test_connection_profile(
     remote_state: State<'_, remote::RemoteState>,
     profile_id: String,
     trust_current_fingerprint: bool,
 ) -> Result<ConnectionOpenResultDto, String> {
-    remote_state
-        .inner
-        .test_profile(&profile_id, trust_current_fingerprint)
-        .map_err(|error| error.to_string())
+    let rm = remote_state.inner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        rm.test_profile(&profile_id, trust_current_fingerprint)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn test_connection_profile_payload(
+pub async fn test_connection_profile_payload(
     remote_state: State<'_, remote::RemoteState>,
     profile: ConnectionProfilePayload,
     trust_current_fingerprint: bool,
 ) -> Result<ConnectionOpenResultDto, String> {
-    remote_state
-        .inner
-        .test_profile_payload(profile, trust_current_fingerprint)
-        .map_err(|error| error.to_string())
+    let rm = remote_state.inner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        rm.test_profile_payload(profile, trust_current_fingerprint)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn disconnect_connection(
+pub async fn disconnect_connection(
     remote_state: State<'_, remote::RemoteState>,
     session_id: String,
 ) -> Result<(), String> {
-    remote_state
-        .inner
-        .disconnect_connection(&session_id)
-        .map_err(|error| error.to_string())
+    let rm = remote_state.inner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        rm.disconnect_connection(&session_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 pub async fn list_volumes() -> Result<Vec<VolumeDto>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         ops::list_volumes().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_remote_disk_usage(
+    remote_state: State<'_, remote::RemoteState>,
+    path: String,
+    force_refresh: Option<bool>,
+) -> Result<RemoteDiskUsageDto, String> {
+    if !remote::RemoteManager::is_remote_path(&path) {
+        return Err("La ruta indicada no es remota.".to_string());
+    }
+    let rm = remote_state.inner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        rm.get_disk_usage(&path, force_refresh.unwrap_or(false))
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -691,6 +721,13 @@ pub fn create_terminal_for_remote_session(
         .inner
         .get_ssh_terminal_params(&virtual_path)
         .map_err(|e| e.to_string())?;
+    terminal::probe_ssh_terminal(
+        &params.host,
+        params.port,
+        &params.username,
+        &params.password,
+    )
+    .map_err(|e| e.to_string())?;
     terminal::create_ssh_terminal(
         &tm,
         app_handle,

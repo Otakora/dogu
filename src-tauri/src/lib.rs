@@ -10,6 +10,8 @@ mod terminal;
 use tauri::Manager;
 
 pub fn run() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -55,6 +57,7 @@ pub fn run() {
             commands::test_connection_profile_payload,
             commands::disconnect_connection,
             commands::list_volumes,
+            commands::get_remote_disk_usage,
             commands::get_known_folders,
             commands::create_terminal,
             commands::create_terminal_for_remote_session,

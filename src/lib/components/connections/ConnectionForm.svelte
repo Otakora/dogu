@@ -291,7 +291,7 @@
 
   <!-- ── Actions ── -->
   <div class="form-actions">
-    <Button variant="ghost" onclick={onCancel} disabled={busy}>{t("connectionForm.cancel")}</Button>
+    <Button variant="ghost" onclick={onCancel} disabled={isSaving}>{t("connectionForm.cancel")}</Button>
     <Button variant="outline" onclick={handleTest} disabled={busy}>
       {#if isTesting}
         <span class="spinner"></span> {t("connectionForm.testing")}

@@ -23,6 +23,11 @@
   let disconnectingId = $state<string | null>(null);
   let testResult = $state<{ ok: boolean; message: string; writeAccess?: boolean | null } | null>(null);
   let deleteConfirmId = $state<string | null>(null);
+  let testRunId = 0;
+  let connectRunId = 0;
+  let disconnectRunId = 0;
+
+  const REMOTE_OPERATION_TIMEOUT_MS = 25000;
 
   // ── Derived ──────────────────────────────────────────────
   const showForm = $derived(isCreating || editingProfile !== null);
@@ -63,9 +68,35 @@
   }
 
   function cancelForm() {
+    testRunId += 1;
+    isTesting = false;
     isCreating = false;
     editingProfile = null;
     testResult = null;
+  }
+
+  function formatInvokeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  async function invokeWithTimeout<T>(
+    command: string,
+    args: Record<string, unknown>,
+    timeoutMessage: string,
+  ): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        invoke<T>(command, args),
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), REMOTE_OPERATION_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+    }
   }
 
   async function saveProfile(payload: ConnectionProfilePayload) {
@@ -84,21 +115,33 @@
   }
 
   async function testProfile(payload: ConnectionProfilePayload) {
+    const runId = ++testRunId;
     isTesting = true;
     testResult = null;
     try {
-      const result = await invoke<ConnectionOpenResultDto>("test_connection_profile_payload", { profile: payload, trustCurrentFingerprint: false });
+      const result = await invokeWithTimeout<ConnectionOpenResultDto>(
+        "test_connection_profile_payload",
+        { profile: payload, trustCurrentFingerprint: false },
+        t("connectionManager.testTimedOut"),
+      );
+      if (runId !== testRunId) return;
 
       if (result.requiresTrust && result.fingerprint) {
         const trusted = await app.promptFingerprint(
           result.fingerprint,
           payload.label || payload.host
         );
+        if (runId !== testRunId) return;
         if (!trusted) {
           testResult = { ok: false, message: t("connectionManager.testCancelledFingerprint") };
           return;
         }
-        const retryResult = await invoke<ConnectionOpenResultDto>("test_connection_profile_payload", { profile: payload, trustCurrentFingerprint: true });
+        const retryResult = await invokeWithTimeout<ConnectionOpenResultDto>(
+          "test_connection_profile_payload",
+          { profile: payload, trustCurrentFingerprint: true },
+          t("connectionManager.testTimedOut"),
+        );
+        if (runId !== testRunId) return;
         testResult = retryResult.connected
           ? { ok: true, message: t("connectionManager.connectionSuccessful"), writeAccess: retryResult.writeAccess }
           : { ok: false, message: retryResult.message ?? t("connectionManager.connectionFailed") };
@@ -109,9 +152,12 @@
         ? { ok: true, message: t("connectionManager.connectionSuccessful"), writeAccess: result.writeAccess }
         : { ok: false, message: result.message ?? t("connectionManager.connectionFailed") };
     } catch (e) {
-      testResult = { ok: false, message: String(e) };
+      if (runId !== testRunId) return;
+      testResult = { ok: false, message: formatInvokeError(e) };
     } finally {
-      isTesting = false;
+      if (runId === testRunId) {
+        isTesting = false;
+      }
     }
   }
 
@@ -128,12 +174,18 @@
 
   // ── Connect ───────────────────────────────────────────────
   async function connectProfile(profileId: string) {
+    const runId = ++connectRunId;
     connectingId = profileId;
     try {
-      const result = await invoke<ConnectionOpenResultDto>("connect_connection_profile", {
-        profileId,
-        trustCurrentFingerprint: false,
-      });
+      const result = await invokeWithTimeout<ConnectionOpenResultDto>(
+        "connect_connection_profile",
+        {
+          profileId,
+          trustCurrentFingerprint: false,
+        },
+        t("connectionManager.connectTimedOut"),
+      );
+      if (runId !== connectRunId) return;
 
       if (result.requiresTrust && result.fingerprint) {
         const profile = profiles.find((p) => p.id === profileId);
@@ -141,12 +193,18 @@
           result.fingerprint,
           profile?.label ?? profile?.host ?? profileId
         );
+        if (runId !== connectRunId) return;
         if (trusted) {
           // Retry with trust granted
-          const retryResult = await invoke<ConnectionOpenResultDto>("connect_connection_profile", {
-            profileId,
-            trustCurrentFingerprint: true,
-          });
+          const retryResult = await invokeWithTimeout<ConnectionOpenResultDto>(
+            "connect_connection_profile",
+            {
+              profileId,
+              trustCurrentFingerprint: true,
+            },
+            t("connectionManager.connectTimedOut"),
+          );
+          if (runId !== connectRunId) return;
           if (retryResult.connected && retryResult.connection) {
             sessions = [...sessions.filter((s) => s.profileId !== profileId), retryResult.connection];
             app.setActiveConnections(sessions);
@@ -170,23 +228,35 @@
         app.notify("error", result.message ?? t("connectionManager.couldNotConnect"));
       }
     } catch (e) {
-      app.notify("error", String(e));
+      if (runId !== connectRunId) return;
+      app.notify("error", formatInvokeError(e));
     } finally {
-      connectingId = null;
+      if (runId === connectRunId) {
+        connectingId = null;
+      }
     }
   }
 
   // ── Disconnect ────────────────────────────────────────────
   async function disconnectSession(sessionId: string) {
+    const runId = ++disconnectRunId;
     disconnectingId = sessionId;
     try {
-      await invoke("disconnect_connection", { sessionId });
+      await invokeWithTimeout(
+        "disconnect_connection",
+        { sessionId },
+        t("connectionManager.disconnectTimedOut"),
+      );
+      if (runId !== disconnectRunId) return;
       sessions = sessions.filter((s) => s.sessionId !== sessionId);
       app.setActiveConnections(sessions);
     } catch (e) {
-      app.notify("error", String(e));
+      if (runId !== disconnectRunId) return;
+      app.notify("error", formatInvokeError(e));
     } finally {
-      disconnectingId = null;
+      if (runId === disconnectRunId) {
+        disconnectingId = null;
+      }
     }
   }
 

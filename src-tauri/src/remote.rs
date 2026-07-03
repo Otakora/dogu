@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{Cursor, Read},
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -18,14 +18,20 @@ use remotefs::{
         UnixPexClass, Welcome,
     },
 };
-use remotefs_ftp::FtpFs;
 use remotefs_smb::SmbFs;
 #[cfg(target_family = "unix")]
 use remotefs_smb::{SmbCredentials, SmbOptions};
 #[cfg(target_family = "windows")]
 use remotefs_smb::SmbCredentials;
 use remotefs_ssh::{LibSsh2Session, ScpFs, SftpFs, SshOpts};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
+    client::{
+        WebPkiServerVerifier,
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    },
+    pki_types::{CertificateDer, ServerName, UnixTime},
+};
 use serde::{Deserialize, Serialize};
 use ssh2::Session as Ssh2Session;
 use suppaftp::{
@@ -38,12 +44,16 @@ use webpki_roots::TLS_SERVER_ROOTS;
 use crate::{
     models::{
         ActiveConnectionDto, ConnectionOpenResultDto, ConnectionProfileDto, ConnectionProfilePayload,
-        EntryDto, PropertiesSummaryDto, SummaryOptionsPayload,
+        EntryDto, PropertiesSummaryDto, RemoteDiskUsageDto, SummaryOptionsPayload,
     },
     ops,
 };
 
 const REMOTE_PREFIX: &str = "remote://";
+const DISK_USAGE_CACHE_TTL_SECS: u64 = 30;
+const FTP_CONNECT_TIMEOUT_SECS: u64 = 15;
+const FTP_COMMAND_TIMEOUT_SECS: u64 = 20;
+const SSH_AUX_TIMEOUT_SECS: u64 = 15;
 
 pub struct SshTerminalParams {
     pub host: String,
@@ -68,6 +78,7 @@ pub struct RemoteManager {
     temp_root: PathBuf,
     profiles: Mutex<Vec<ConnectionProfileDto>>,
     sessions: Mutex<HashMap<String, RemoteSession>>,
+    disk_usage_cache: Mutex<HashMap<String, CachedDiskUsage>>,
     next_id: AtomicU64,
 }
 
@@ -81,6 +92,11 @@ struct RemoteSession {
 struct SessionAccess<'a> {
     guard: std::sync::MutexGuard<'a, HashMap<String, RemoteSession>>,
     session_id: String,
+}
+
+struct CachedDiskUsage {
+    expires_at: SystemTime,
+    value: RemoteDiskUsageDto,
 }
 
 impl<'a> Deref for SessionAccess<'a> {
@@ -115,6 +131,7 @@ impl RemoteState {
             inner: Arc::new(RemoteManager {
                 profiles: Mutex::new(load_profiles(&profiles_path)?),
                 sessions: Mutex::new(HashMap::new()),
+                disk_usage_cache: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 profiles_path,
                 temp_root,
@@ -369,10 +386,49 @@ impl RemoteManager {
         })
     }
 
+    pub fn get_disk_usage(&self, virtual_path: &str, force_refresh: bool) -> Result<RemoteDiskUsageDto> {
+        let (session_id, logical_path) = parse_remote_virtual_path(virtual_path)
+            .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
+        let cache_key = build_remote_disk_usage_cache_key(&session_id, &logical_path);
+        if !force_refresh {
+            if let Some(cached) = self.get_cached_disk_usage(&cache_key)? {
+                return Ok(cached);
+            }
+        }
+
+        let (profile, provider_path) = {
+            let sessions = self.lock_sessions()?;
+            let session = sessions
+                .get(&session_id)
+                .ok_or_else(|| anyhow!("La sesion remota ya no esta activa."))?;
+            (session.profile.clone(), session.resolve_provider_path(&logical_path))
+        };
+
+        let usage = match profile.protocol.as_str() {
+            "ssh" => self.get_ssh_disk_usage(&session_id, &profile, &provider_path, virtual_path),
+            "smb" => Ok(unsupported_disk_usage(
+                virtual_path,
+                "El backend SMB actual no puede consultar espacio libre de forma portable en Windows y Linux.",
+            )),
+            "ftp" | "ftps" => Ok(unsupported_disk_usage(
+                virtual_path,
+                "FTP/FTPS no ofrece una consulta de espacio libre fiable y portable en el backend actual.",
+            )),
+            _ => Ok(unsupported_disk_usage(
+                virtual_path,
+                format!("El protocolo '{}' no admite consulta de espacio en esta version.", profile.protocol),
+            )),
+        }?;
+
+        self.store_cached_disk_usage(cache_key, usage.clone())?;
+        Ok(usage)
+    }
+
     pub fn disconnect_connection(&self, session_id: &str) -> Result<()> {
         if let Some(mut session) = self.lock_sessions()?.remove(session_id) {
             let _ = session.fs.disconnect();
         }
+        self.clear_cached_disk_usage_for_session(session_id)?;
         Ok(())
     }
 
@@ -1084,34 +1140,26 @@ impl RemoteManager {
             }
             "smb" => self.build_smb_fs(profile),
             "ftp" => {
-                let mut fs = FtpFs::new(profile.host.clone(), profile.port)
+                let mut fs = remotefs_ftp::FtpFs::new(profile.host.clone(), profile.port)
                     .username(profile.username.clone())
                     .password(profile.password.clone());
                 fs = if profile.ftp_mode == "active" { fs.active_mode() } else { fs.passive_mode() };
                 Ok((Box::new(fs), profile.start_path.clone()))
             }
             "ftps" => {
-                if profile.ftp_secure_implicit {
-                    Ok((
-                        Box::new(ImplicitFtpsFs::new(
-                            profile.host.clone(),
-                            profile.port,
-                            profile.username.clone(),
-                            profile.password.clone(),
-                            profile.ftp_mode.clone(),
-                            profile.ftp_accept_invalid_certificates,
-                            profile.ftp_accept_invalid_hostnames,
-                        )),
-                        profile.start_path.clone(),
-                    ))
-                } else {
-                    let mut fs = FtpFs::new(profile.host.clone(), profile.port)
-                        .username(profile.username.clone())
-                        .password(profile.password.clone());
-                    fs = if profile.ftp_mode == "active" { fs.active_mode() } else { fs.passive_mode() };
-                    fs = fs.secure();
-                    Ok((Box::new(fs), profile.start_path.clone()))
-                }
+                Ok((
+                    Box::new(FtpsFs::new(
+                        profile.host.clone(),
+                        profile.port,
+                        profile.username.clone(),
+                        profile.password.clone(),
+                        profile.ftp_mode.clone(),
+                        profile.ftp_secure_implicit,
+                        profile.ftp_accept_invalid_certificates,
+                        profile.ftp_accept_invalid_hostnames,
+                    )),
+                    profile.start_path.clone(),
+                ))
             }
             other => Err(anyhow!("Protocolo remoto no soportado: {other}")),
         }
@@ -1181,6 +1229,107 @@ impl RemoteManager {
         self.sessions
             .lock()
             .map_err(|_| anyhow!("No se pudieron bloquear las sesiones remotas"))
+    }
+
+    fn lock_disk_usage_cache(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, CachedDiskUsage>>> {
+        self.disk_usage_cache
+            .lock()
+            .map_err(|_| anyhow!("No se pudo bloquear la cache de espacio remoto"))
+    }
+
+    fn get_cached_disk_usage(&self, cache_key: &str) -> Result<Option<RemoteDiskUsageDto>> {
+        let mut cache = self.lock_disk_usage_cache()?;
+        if let Some(entry) = cache.get(cache_key) {
+            if entry.expires_at > SystemTime::now() {
+                return Ok(Some(entry.value.clone()));
+            }
+        }
+        cache.remove(cache_key);
+        Ok(None)
+    }
+
+    fn store_cached_disk_usage(&self, cache_key: String, usage: RemoteDiskUsageDto) -> Result<()> {
+        let mut cache = self.lock_disk_usage_cache()?;
+        cache.insert(
+            cache_key,
+            CachedDiskUsage {
+                expires_at: SystemTime::now() + Duration::from_secs(DISK_USAGE_CACHE_TTL_SECS),
+                value: usage,
+            },
+        );
+        Ok(())
+    }
+
+    fn clear_cached_disk_usage_for_session(&self, session_id: &str) -> Result<()> {
+        let prefix = format!("{session_id}:");
+        let mut cache = self.lock_disk_usage_cache()?;
+        cache.retain(|key, _| !key.starts_with(&prefix));
+        Ok(())
+    }
+
+    fn get_ssh_disk_usage(
+        &self,
+        session_id: &str,
+        profile: &ConnectionProfileDto,
+        provider_path: &str,
+        virtual_path: &str,
+    ) -> Result<RemoteDiskUsageDto> {
+        let mut statvfs_error: Option<String> = None;
+        if profile.ssh_mode == "sftp" {
+            match fetch_disk_usage_via_sftp_statvfs(profile, provider_path) {
+                Ok((total_bytes, free_bytes, used_bytes)) => {
+                    return Ok(RemoteDiskUsageDto {
+                        scope_path: virtual_path.to_string(),
+                        total_bytes: Some(total_bytes),
+                        free_bytes: Some(free_bytes),
+                        used_bytes: Some(used_bytes),
+                        method: "sftpStatvfs".to_string(),
+                        note: None,
+                    });
+                }
+                Err(error) => {
+                    statvfs_error = Some(error.to_string());
+                }
+            }
+        }
+
+        match self.fetch_disk_usage_via_exec(session_id, provider_path) {
+            Ok((total_bytes, free_bytes, used_bytes)) => Ok(RemoteDiskUsageDto {
+                scope_path: virtual_path.to_string(),
+                total_bytes: Some(total_bytes),
+                free_bytes: Some(free_bytes),
+                used_bytes: Some(used_bytes),
+                method: "sshDf".to_string(),
+                note: statvfs_error.map(|err| format!("Fallback a df tras fallo de statvfs: {err}")),
+            }),
+            Err(exec_error) => Ok(unavailable_disk_usage(
+                virtual_path,
+                match statvfs_error {
+                    Some(statvfs_err) => format!(
+                        "No se pudo consultar el espacio remoto. statvfs: {statvfs_err}. df: {}",
+                        exec_error
+                    ),
+                    None => format!("No se pudo consultar el espacio remoto con df: {}", exec_error),
+                },
+            )),
+        }
+    }
+
+    fn fetch_disk_usage_via_exec(&self, session_id: &str, provider_path: &str) -> Result<(u64, u64, u64)> {
+        let command = format!("LC_ALL=C df -Pk {}", shell_single_quote(provider_path));
+        let mut session = self.get_session_mut(session_id)?;
+        let (status, output) = session
+            .fs
+            .exec(&command)
+            .map_err(|error| anyhow!(error.to_string()))?;
+        if status != 0 {
+            return Err(anyhow!(
+                "El comando df devolvio codigo {} para la ruta '{}'.",
+                status,
+                provider_path
+            ));
+        }
+        parse_df_pk_output(&output)
     }
 
     /// Downloads a single remote file to `local_dest_dir`, streaming directly to disk.
@@ -1327,24 +1476,26 @@ impl RemoteSession {
     }
 }
 
-struct ImplicitFtpsFs {
+struct FtpsFs {
     stream: Option<RustlsFtpStream>,
     host: String,
     port: u16,
     username: String,
     password: String,
     mode: String,
+    implicit_tls: bool,
     accept_invalid_certificates: bool,
     accept_invalid_hostnames: bool,
 }
 
-impl ImplicitFtpsFs {
+impl FtpsFs {
     fn new(
         host: String,
         port: u16,
         username: String,
         password: String,
         mode: String,
+        implicit_tls: bool,
         accept_invalid_certificates: bool,
         accept_invalid_hostnames: bool,
     ) -> Self {
@@ -1355,6 +1506,7 @@ impl ImplicitFtpsFs {
             username,
             password,
             mode,
+            implicit_tls,
             accept_invalid_certificates,
             accept_invalid_hostnames,
         }
@@ -1367,20 +1519,64 @@ impl ImplicitFtpsFs {
     }
 
     fn build_tls_connector(&self) -> Result<RustlsConnector, RemoteError> {
-        if self.accept_invalid_certificates || self.accept_invalid_hostnames {
-            return Err(RemoteError::new_ex(
-                RemoteErrorType::UnsupportedFeature,
-                "Las opciones de aceptar certificados/hostnames invalidos no estan disponibles con el backend FTPS actual.",
-            ));
-        }
-        let mut root_store = RootCertStore::empty();
-        root_store.extend(TLS_SERVER_ROOTS.iter().cloned());
-        let config = std::sync::Arc::new(
-            ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        );
-        Ok(config.into())
+        let mut roots = RootCertStore::empty();
+        roots.extend(TLS_SERVER_ROOTS.iter().cloned());
+        let roots = Arc::new(roots);
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let builder = ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string()))?;
+
+        let config = if self.accept_invalid_certificates || self.accept_invalid_hostnames {
+            // Under rustls we use a permissive verifier for local/self-signed setups.
+            let verifier = PermissiveFtpsVerifier::new(roots.clone(), provider.clone())
+                .map_err(|error| RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string()))?;
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier))
+                .with_no_client_auth()
+        } else {
+            builder
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        };
+
+        Ok(Arc::new(config).into())
+    }
+
+    fn configure_command_timeouts(stream: &RustlsFtpStream) -> Result<(), RemoteError> {
+        stream
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(FTP_COMMAND_TIMEOUT_SECS)))
+            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?;
+        stream
+            .get_ref()
+            .set_write_timeout(Some(Duration::from_secs(FTP_COMMAND_TIMEOUT_SECS)))
+            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?;
+        Ok(())
+    }
+
+    fn connect_explicit(&self, connector: RustlsConnector) -> remotefs::RemoteResult<RustlsFtpStream> {
+        let addr = resolve_socket_addr(&self.host, self.port)?;
+        let stream = RustlsFtpStream::connect_timeout(addr, Duration::from_secs(FTP_CONNECT_TIMEOUT_SECS))
+            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?;
+        Self::configure_command_timeouts(&stream)?;
+        let stream = stream
+            .into_secure(connector, self.host.as_str())
+            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string()))?;
+        Self::configure_command_timeouts(&stream)?;
+        Ok(stream)
+    }
+
+    fn connect_implicit(&self, connector: RustlsConnector) -> remotefs::RemoteResult<RustlsFtpStream> {
+        let stream = RustlsFtpStream::connect_secure_implicit(
+            format!("{}:{}", self.host, self.port),
+            connector,
+            self.host.as_str(),
+        )
+        .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?;
+        Self::configure_command_timeouts(&stream)?;
+        Ok(stream)
     }
 
     fn parse_list(&self, base: &Path, lines: Vec<String>) -> Vec<RemoteFile> {
@@ -1420,15 +1616,14 @@ impl ImplicitFtpsFs {
     }
 }
 
-impl RemoteFs for ImplicitFtpsFs {
+impl RemoteFs for FtpsFs {
     fn connect(&mut self) -> remotefs::RemoteResult<Welcome> {
         let connector = self.build_tls_connector()?;
-        let mut stream = RustlsFtpStream::connect_secure_implicit(
-            format!("{}:{}", self.host, self.port),
-            connector,
-            self.host.as_str(),
-        )
-        .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?;
+        let mut stream = if self.implicit_tls {
+            self.connect_implicit(connector)?
+        } else {
+            self.connect_explicit(connector)?
+        };
         if self.mode == "active" {
             stream = stream.active_mode(Duration::from_secs(30));
         }
@@ -1750,6 +1945,194 @@ fn provider_child_to_logical(parent_provider_path: &str, child_provider_path: &P
     Ok(normalize_logical_path(suffix))
 }
 
+fn build_remote_disk_usage_cache_key(session_id: &str, logical_path: &str) -> String {
+    format!("{session_id}:{}", normalize_logical_path(logical_path))
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn resolve_socket_addr(host: &str, port: u16) -> remotefs::RemoteResult<std::net::SocketAddr> {
+    format!("{host}:{port}")
+        .to_socket_addrs()
+        .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?
+        .next()
+        .ok_or_else(|| RemoteError::new_ex(
+            RemoteErrorType::ConnectionError,
+            format!("No se pudo resolver la direccion {host}:{port}"),
+        ))
+}
+
+fn statvfs_fragment_size(f_frsize: u64, f_bsize: u64) -> u64 {
+    if f_frsize > 0 {
+        f_frsize
+    } else if f_bsize > 0 {
+        f_bsize
+    } else {
+        1
+    }
+}
+
+#[derive(Debug)]
+struct PermissiveFtpsVerifier {
+    inner: Arc<WebPkiServerVerifier>,
+}
+
+impl PermissiveFtpsVerifier {
+    fn new(
+        roots: Arc<RootCertStore>,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+    ) -> Result<Self> {
+        let inner = WebPkiServerVerifier::builder_with_provider(roots, provider)
+            .build()
+            .map_err(|error| anyhow!("No se pudo crear el verificador TLS de FTPS: {}", error))?;
+        Ok(Self { inner })
+    }
+}
+
+impl ServerCertVerifier for PermissiveFtpsVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+fn scale_blocks_to_bytes(blocks: u64, fragment_size: u64) -> u64 {
+    blocks.saturating_mul(fragment_size)
+}
+
+fn build_disk_usage_bytes(total_blocks: u64, free_blocks: u64, fragment_size: u64) -> (u64, u64, u64) {
+    let total_bytes = scale_blocks_to_bytes(total_blocks, fragment_size);
+    let free_bytes = scale_blocks_to_bytes(free_blocks, fragment_size);
+    let used_bytes = total_bytes.saturating_sub(free_bytes);
+    (total_bytes, free_bytes, used_bytes)
+}
+
+fn unsupported_disk_usage(scope_path: &str, note: impl Into<String>) -> RemoteDiskUsageDto {
+    RemoteDiskUsageDto {
+        scope_path: scope_path.to_string(),
+        total_bytes: None,
+        free_bytes: None,
+        used_bytes: None,
+        method: "unsupported".to_string(),
+        note: Some(note.into()),
+    }
+}
+
+fn unavailable_disk_usage(scope_path: &str, note: impl Into<String>) -> RemoteDiskUsageDto {
+    RemoteDiskUsageDto {
+        scope_path: scope_path.to_string(),
+        total_bytes: None,
+        free_bytes: None,
+        used_bytes: None,
+        method: "unavailable".to_string(),
+        note: Some(note.into()),
+    }
+}
+
+fn parse_df_pk_output(output: &str) -> Result<(u64, u64, u64)> {
+    for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if line.starts_with("Filesystem") {
+            continue;
+        }
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        if columns.len() < 4 {
+            continue;
+        }
+        let total_kib = match columns[1].parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let used_kib = match columns[2].parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let free_kib = match columns[3].parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        return Ok((
+            total_kib.saturating_mul(1024),
+            free_kib.saturating_mul(1024),
+            used_kib.saturating_mul(1024),
+        ));
+    }
+    Err(anyhow!("No se pudo interpretar la salida de df."))
+}
+
+fn fetch_disk_usage_via_sftp_statvfs(profile: &ConnectionProfileDto, provider_path: &str) -> Result<(u64, u64, u64)> {
+    let addr = resolve_socket_addr(&profile.host, profile.port)
+        .map_err(|e| anyhow!("No se pudo resolver {}:{}: {}", profile.host, profile.port, e))?;
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(SSH_AUX_TIMEOUT_SECS))
+        .map_err(|e| anyhow!("No se pudo conectar a {}:{}: {}", profile.host, profile.port, e))?;
+    let _ = tcp.set_read_timeout(Some(Duration::from_secs(SSH_AUX_TIMEOUT_SECS)));
+    let _ = tcp.set_write_timeout(Some(Duration::from_secs(SSH_AUX_TIMEOUT_SECS)));
+
+    let mut session = Ssh2Session::new()
+        .map_err(|e| anyhow!("No se pudo crear sesion SSH auxiliar: {}", e))?;
+    session.set_tcp_stream(tcp);
+    session
+        .handshake()
+        .map_err(|e| anyhow!("Error en handshake SSH auxiliar: {}", e))?;
+    session
+        .userauth_password(&profile.username, &profile.password)
+        .map_err(|e| anyhow!("Autenticacion SSH auxiliar fallida: {}", e))?;
+    if !session.authenticated() {
+        return Err(anyhow!("La autenticacion SSH auxiliar no se completo correctamente."));
+    }
+
+    let sftp = session
+        .sftp()
+        .map_err(|e| anyhow!("No se pudo abrir la sesion SFTP auxiliar: {}", e))?;
+
+    let mut handle = match sftp.opendir(Path::new(provider_path)) {
+        Ok(handle) => handle,
+        Err(dir_error) => sftp
+            .open(Path::new(provider_path))
+            .map_err(|file_error| anyhow!(
+                "No se pudo abrir la ruta '{}' para statvfs. Como directorio: {}. Como archivo: {}",
+                provider_path,
+                dir_error,
+                file_error
+            ))?,
+    };
+
+    let stat = handle
+        .statvfs()
+        .map_err(|e| anyhow!("El servidor no expone statvfs para '{}': {}", provider_path, e))?;
+    let fragment_size = statvfs_fragment_size(stat.f_frsize, stat.f_bsize);
+    Ok(build_disk_usage_bytes(stat.f_blocks, stat.f_bavail, fragment_size))
+}
+
 fn describe_profile(profile: &ConnectionProfileDto) -> String {
     match profile.protocol.as_str() {
         "ssh" => format!("SSH | {}:{} | {}", profile.host, profile.port, profile.username),
@@ -1838,6 +2221,17 @@ fn friendly_connection_error(profile: &ConnectionProfileDto, phase: &str, raw: &
             protocol
         );
     }
+    if profile.protocol == "ssh"
+        && profile.ssh_mode == "scp"
+        && (lowered.contains("channel-process-startup")
+            || lowered.contains("could not execute command")
+            || lowered.contains("unable to complete request for channel-process-startup"))
+    {
+        return format!(
+            "El host {} acepta la autenticacion SSH, pero no permite ejecutar comandos remotos para esta cuenta. El modo SCP actual necesita poder lanzar comandos como 'pwd', 'ls' y 'stat' para navegar y validar rutas, asi que esta conexion no es usable en modo SCP. Si el servidor ofrece SFTP, usa SSH/SFTP; si no, habilita shell/exec para este usuario.",
+            endpoint
+        );
+    }
     if lowered.contains("certificate")
         || lowered.contains("tls")
         || lowered.contains("ssl")
@@ -1898,8 +2292,12 @@ fn validate_remote_root(profile: &ConnectionProfileDto, remote_fs: &mut dyn Remo
 }
 
 fn probe_ssh_fingerprint(profile: &ConnectionProfileDto) -> Result<Option<String>> {
-    let tcp = TcpStream::connect((profile.host.as_str(), profile.port))
+    let addr = resolve_socket_addr(&profile.host, profile.port)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(SSH_AUX_TIMEOUT_SECS))
         .with_context(|| format!("No se pudo abrir la conexion TCP hacia {}:{}", profile.host, profile.port))?;
+    let _ = tcp.set_read_timeout(Some(Duration::from_secs(SSH_AUX_TIMEOUT_SECS)));
+    let _ = tcp.set_write_timeout(Some(Duration::from_secs(SSH_AUX_TIMEOUT_SECS)));
     let mut session = Ssh2Session::new().context("No se pudo crear la sesion SSH para leer la huella")?;
     session.set_tcp_stream(tcp);
     session.handshake().context("No se pudo negociar el handshake SSH para leer la huella")?;
@@ -2117,4 +2515,39 @@ fn summarize_remote_dir(
         }
     }
     Ok((total_size, file_count, dir_count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_disk_usage_bytes, parse_df_pk_output, statvfs_fragment_size};
+
+    #[test]
+    fn parse_df_pk_output_reads_posix_layout() {
+        let output = "\
+Filesystem     1024-blocks     Used Available Capacity Mounted on
+/dev/sda1        102390432 45678920  56711512      45% /
+";
+        let (total, free, used) = parse_df_pk_output(output).expect("df output should parse");
+        assert_eq!(total, 102390432 * 1024);
+        assert_eq!(free, 56711512 * 1024);
+        assert_eq!(used, 45678920 * 1024);
+    }
+
+    #[test]
+    fn parse_df_pk_output_skips_noise_until_data_line() {
+        let output = "\
+warning line
+Filesystem 1024-blocks Used Available Capacity Mounted on
+tmpfs 4096 1024 3072 25% /tmp
+";
+        let (total, free, used) = parse_df_pk_output(output).expect("tmpfs row should parse");
+        assert_eq!((total, free, used), (4096 * 1024, 3072 * 1024, 1024 * 1024));
+    }
+
+    #[test]
+    fn statvfs_uses_fragment_size_when_present() {
+        let fragment_size = statvfs_fragment_size(4096, 1024);
+        let (total, free, used) = build_disk_usage_bytes(10, 4, fragment_size);
+        assert_eq!((total, free, used), (40960, 16384, 24576));
+    }
 }

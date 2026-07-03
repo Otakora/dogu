@@ -1,7 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { untrack } from "svelte";
   import { app } from "../../stores/app.svelte.js";
-  import type { EntryDto, ActiveConnectionDto, VolumeDto } from "../../types/index.js";
+  import type { EntryDto, ActiveConnectionDto, RemoteDiskUsageDto, VolumeDto } from "../../types/index.js";
   import TreeNode, { type TabHighlight } from "./TreeNode.svelte";
   import ContextMenu from "../ui/ContextMenu.svelte";
   import type { MenuItem } from "../ui/ContextMenu.svelte";
@@ -11,6 +12,8 @@
   // ── State ────────────────────────────────────────────────
   let disconnectingId = $state<string | null>(null);
   let contextMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  let remoteDiskUsage = $state<Record<string, RemoteDiskUsageDto | null>>({});
+  let remoteDiskUsageLoading = $state<Record<string, boolean>>({});
 
   // Section collapse
   let collapsed = $state({ favorites: false, computer: false, connections: false });
@@ -89,6 +92,69 @@
   }
 
   // ── Context menus ────────────────────────────────────────
+  function pruneRemoteUsageState(sessionIds: string[]) {
+    const activeIds = new Set(sessionIds);
+    const nextUsage = Object.fromEntries(
+      Object.entries(remoteDiskUsage).filter(([sessionId]) => activeIds.has(sessionId))
+    );
+    const nextLoading = Object.fromEntries(
+      Object.entries(remoteDiskUsageLoading).filter(([sessionId]) => activeIds.has(sessionId))
+    );
+    if (Object.keys(nextUsage).length !== Object.keys(remoteDiskUsage).length) {
+      remoteDiskUsage = nextUsage;
+    }
+    if (Object.keys(nextLoading).length !== Object.keys(remoteDiskUsageLoading).length) {
+      remoteDiskUsageLoading = nextLoading;
+    }
+  }
+
+  async function loadRemoteDiskUsage(conn: ActiveConnectionDto, forceRefresh = false) {
+    remoteDiskUsageLoading = { ...remoteDiskUsageLoading, [conn.sessionId]: true };
+    try {
+      const usage = await invoke<RemoteDiskUsageDto>("get_remote_disk_usage", {
+        path: conn.rootPath,
+        forceRefresh,
+      });
+      remoteDiskUsage = { ...remoteDiskUsage, [conn.sessionId]: usage };
+    } catch (error) {
+      remoteDiskUsage = {
+        ...remoteDiskUsage,
+        [conn.sessionId]: {
+          scopePath: conn.rootPath,
+          totalBytes: null,
+          freeBytes: null,
+          usedBytes: null,
+          method: "unavailable",
+          note: String(error),
+        },
+      };
+    } finally {
+      remoteDiskUsageLoading = { ...remoteDiskUsageLoading, [conn.sessionId]: false };
+    }
+  }
+
+  $effect(() => {
+    const connections = app.activeConnections.map((conn) => ({
+      sessionId: conn.sessionId,
+      profileId: conn.profileId,
+      label: conn.label,
+      protocol: conn.protocol,
+      host: conn.host,
+      rootPath: conn.rootPath,
+      displayPath: conn.displayPath,
+      detail: conn.detail,
+    }));
+
+    untrack(() => {
+      pruneRemoteUsageState(connections.map((conn) => conn.sessionId));
+      for (const conn of connections) {
+        if (!remoteDiskUsage[conn.sessionId] && !remoteDiskUsageLoading[conn.sessionId]) {
+          void loadRemoteDiskUsage(conn);
+        }
+      }
+    });
+  });
+
   function openFlatItemMenu(e: MouseEvent, path: string, canRemove: boolean) {
     e.preventDefault();
     const items: MenuItem[] = [
@@ -418,7 +484,12 @@
                       style="width:{usedPct}%"
                     ></span>
                   </span>
-                  <span class="sb-drive-info">{formatBytes(vol.freeBytes)} libre</span>
+                  <span class="sb-drive-info">
+                    {t("sidebar.freeOf", {
+                      free: formatBytes(vol.freeBytes),
+                      total: formatBytes(vol.totalBytes),
+                    })}
+                  </span>
                 {/if}
               </span>
             </button>
@@ -463,38 +534,70 @@
           </div>
         {:else}
           {#each app.activeConnections as conn (conn.sessionId)}
-            <div class="sb-remote-tree-row">
-              <div class="sb-remote-tree-main">
-                <TreeNode
-                  entry={makeRemoteRootEntry(conn)}
-                  depth={0}
-                  iconVariant="remote"
-                  {tabHighlights}
-                  onNavigate={(p) => app.navigate(p)}
-                  onContextMenu={(e, entry) => handleRemoteTreeContextMenu(e, entry, conn)}
-                />
+            {@const usage = remoteDiskUsage[conn.sessionId] ?? null}
+            {@const loadingUsage = remoteDiskUsageLoading[conn.sessionId] ?? false}
+            {@const totalBytes = usage?.totalBytes ?? null}
+            {@const freeBytes = usage?.freeBytes ?? null}
+            {@const usedBytes = usage?.usedBytes ?? (totalBytes != null && freeBytes != null ? Math.max(0, totalBytes - freeBytes) : null)}
+            {@const usedPct = totalBytes != null && totalBytes > 0 && usedBytes != null ? Math.min(100, (usedBytes / totalBytes) * 100) : 0}
+            <div class="sb-remote-conn">
+              <div class="sb-remote-tree-row">
+                <div class="sb-remote-tree-main">
+                  <TreeNode
+                    entry={makeRemoteRootEntry(conn)}
+                    depth={0}
+                    iconVariant="remote"
+                    {tabHighlights}
+                    onNavigate={(p) => app.navigate(p)}
+                    onContextMenu={(e, entry) => handleRemoteTreeContextMenu(e, entry, conn)}
+                  />
+                </div>
+                <div class="sb-remote-actions">
+                  <span
+                    class="sb-proto-badge"
+                    style="background:{PROTO_COLORS[conn.protocol] ?? 'var(--accent)'}20;color:{PROTO_COLORS[conn.protocol] ?? 'var(--accent)'}"
+                  >
+                    {conn.protocol.toUpperCase()}
+                  </span>
+                  <button
+                    class="sb-disconnect-btn"
+                    onclick={() => disconnect(conn)}
+                    disabled={disconnectingId === conn.sessionId}
+                    title={t("sidebar.disconnect")}
+                    aria-label="{t('sidebar.disconnect')}: {conn.label}"
+                  >
+                    {#if disconnectingId === conn.sessionId}
+                      <span class="spinner-xs"></span>
+                    {:else}
+                      {@html ICON_DISCONNECT}
+                    {/if}
+                  </button>
+                </div>
               </div>
-              <div class="sb-remote-actions">
-                <span
-                  class="sb-proto-badge"
-                  style="background:{PROTO_COLORS[conn.protocol] ?? 'var(--accent)'}20;color:{PROTO_COLORS[conn.protocol] ?? 'var(--accent)'}"
-                >
-                  {conn.protocol.toUpperCase()}
-                </span>
-                <button
-                  class="sb-disconnect-btn"
-                  onclick={() => disconnect(conn)}
-                  disabled={disconnectingId === conn.sessionId}
-                  title={t("sidebar.disconnect")}
-                  aria-label="{t('sidebar.disconnect')}: {conn.label}"
-                >
-                  {#if disconnectingId === conn.sessionId}
-                    <span class="spinner-xs"></span>
-                  {:else}
-                    {@html ICON_DISCONNECT}
-                  {/if}
-                </button>
-              </div>
+
+              {#if totalBytes != null && freeBytes != null}
+                <div class="sb-remote-usage">
+                  <span class="sb-drive-bar-track">
+                    <span
+                      class="sb-drive-bar-fill"
+                      class:sb-drive-bar-fill--warn={usedPct > 85}
+                      style="width:{usedPct}%"
+                    ></span>
+                  </span>
+                  <span class="sb-drive-info">
+                    {t("sidebar.freeOf", {
+                      free: formatBytes(freeBytes),
+                      total: formatBytes(totalBytes),
+                    })}
+                  </span>
+                </div>
+              {:else if loadingUsage}
+                <div class="sb-remote-usage sb-remote-usage--muted">{t("sidebar.spaceLoading")}</div>
+              {:else}
+                <div class="sb-remote-usage sb-remote-usage--muted" title={usage?.note ?? ""}>
+                  {t("sidebar.spaceUnavailable")}
+                </div>
+              {/if}
             </div>
           {/each}
         {/if}
@@ -764,6 +867,11 @@
     &:hover .sb-proto-badge { opacity: 0; }
   }
 
+  .sb-remote-conn {
+    display: flex;
+    flex-direction: column;
+  }
+
   .sb-remote-tree-main {
     flex: 1;
     min-width: 0;
@@ -805,6 +913,18 @@
 
     &:hover { background: var(--danger-soft); color: var(--danger); opacity: 1; }
     &:disabled { opacity: 0.4; cursor: default; }
+  }
+
+  .sb-remote-usage {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 0 8px 6px 24px;
+  }
+
+  .sb-remote-usage--muted {
+    font-size: 10px;
+    color: var(--text-subtle);
   }
 
   /* ── Empty states ────────────────────────── */

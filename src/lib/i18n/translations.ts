@@ -278,6 +278,14 @@ const en = {
   "fingerprintDialog.reject": "Reject",
   "fingerprintDialog.trustAndConnect": "Trust & Connect",
 
+  // ── AboutDialog ─────────────────────────────────────────
+  "about.title": "About Dogu",
+  "about.tagline": "Desktop application for managing ROM collections.",
+  "about.thirdParty": "Third-party tools",
+  "about.licensesNote": "License files are included in the application installation directory under third_party/.",
+  "about.sourceCode": "Source code",
+  "about.close": "Close",
+
   // ── SettingsDialog ──────────────────────────────────────
   "settingsDialog.title": "Settings",
   "settingsDialog.appearance": "Appearance",
@@ -297,6 +305,7 @@ const en = {
   "settingsDialog.chdConversion": "CHD Conversion",
   "settingsDialog.chdScanDepth": "Folder scan depth (1–10)",
   "settingsDialog.done": "Done",
+  "settingsDialog.credits": "Credits & Licenses",
 
   // ── ExtractionDialog ────────────────────────────────────
   "extractionDialog.title": "Extract archives",
@@ -778,6 +787,14 @@ const es: Record<TranslationKey, string> = {
   "fingerprintDialog.reject": "Rechazar",
   "fingerprintDialog.trustAndConnect": "Confiar y conectar",
 
+  // ── AboutDialog ─────────────────────────────────────────
+  "about.title": "Acerca de Dogu",
+  "about.tagline": "Aplicación de escritorio para gestionar colecciones de ROMs.",
+  "about.thirdParty": "Herramientas de terceros",
+  "about.licensesNote": "Los archivos de licencia se incluyen en el directorio de instalación de la aplicación, dentro de third_party/.",
+  "about.sourceCode": "Código fuente",
+  "about.close": "Cerrar",
+
   // ── SettingsDialog ──────────────────────────────────────
   "settingsDialog.title": "Configuración",
   "settingsDialog.appearance": "Apariencia",
@@ -797,6 +814,7 @@ const es: Record<TranslationKey, string> = {
   "settingsDialog.chdConversion": "Conversión CHD",
   "settingsDialog.chdScanDepth": "Profundidad de escaneo de carpetas (1–10)",
   "settingsDialog.done": "Listo",
+  "settingsDialog.credits": "Créditos y licencias",
 
   // ── ExtractionDialog ────────────────────────────────────
   "extractionDialog.title": "Extraer archivos comprimidos",

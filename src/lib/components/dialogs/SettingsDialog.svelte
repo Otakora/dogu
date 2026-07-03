@@ -2,8 +2,11 @@
   import { app } from "../../stores/app.svelte.js";
   import Modal from "../ui/Modal.svelte";
   import Button from "../ui/Button.svelte";
+  import AboutDialog from "./AboutDialog.svelte";
   import { t } from "../../i18n/index.js";
   import type { Locale } from "../../types/index.js";
+
+  let aboutOpen = $state(false);
 </script>
 
 {#if app.settingsOpen}
@@ -158,9 +161,16 @@
     {/snippet}
 
     {#snippet footer()}
+      <div class="footer-left">
+        <Button variant="ghost" onclick={() => (aboutOpen = true)}>{t("settingsDialog.credits")}</Button>
+      </div>
       <Button variant="primary" onclick={() => app.closeSettings()}>{t("settingsDialog.done")}</Button>
     {/snippet}
   </Modal>
+{/if}
+
+{#if aboutOpen}
+  <AboutDialog onclose={() => (aboutOpen = false)} />
 {/if}
 
 <style>
@@ -275,5 +285,9 @@
     font: inherit;
     font-size: 13px;
     text-align: right;
+  }
+
+  .footer-left {
+    flex: 1;
   }
 </style>

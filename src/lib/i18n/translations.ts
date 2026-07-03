@@ -37,6 +37,7 @@ const en = {
   "toolbar.editPath": "Type a path…",
   "toolbar.splitView": "Split view",
   "toolbar.closeSplit": "Close split",
+  "toolbar.more": "More actions",
 
   // ── Sidebar ─────────────────────────────────────────────
   "sidebar.locations": "Locations",
@@ -530,6 +531,7 @@ const es: Record<TranslationKey, string> = {
   "toolbar.editPath": "Escribe una ruta…",
   "toolbar.splitView": "Vista dividida",
   "toolbar.closeSplit": "Cerrar división",
+  "toolbar.more": "Más acciones",
 
   // ── Sidebar ─────────────────────────────────────────────
   "sidebar.locations": "Ubicaciones",

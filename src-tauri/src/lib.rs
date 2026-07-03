@@ -41,6 +41,7 @@ pub fn run() {
             commands::open_path,
             commands::open_with_dialog,
             commands::build_extraction_preview,
+            commands::build_extraction_preview_deep,
             commands::start_extract_archives,
             commands::scan_selection,
             commands::start_convert_to_chd,

@@ -396,10 +396,11 @@
   }
 
   /**
-   * Enqueues (or runs) an extraction. When queueing, the archive's top-level
-   * contents are predicted via the backend preview so downstream operations can
-   * target the extracted files. Prediction is skipped for remote archives (not
-   * previewable without downloading) and for ghost archives (don't exist yet).
+   * Enqueues (or runs) an extraction. When queueing, the archive's *entire*
+   * contents (all nested files and folders) are predicted via the backend deep
+   * preview, so downstream operations can target extracted files at any depth
+   * and navigate the predicted folder tree. Prediction is skipped for remote
+   * archives (not previewable without downloading) and ghost archives.
    */
   async function enqueueExtract(archives: string[], opts: ExtractionOptionsPayload) {
     const op = buildExtractOp(archives, opts);
@@ -408,7 +409,7 @@
     const previewable = archives.filter(a => !isGhostPath(a) && !a.startsWith("remote://"));
     if (previewable.length > 0) {
       try {
-        const rows = await invoke<ExtractionPreviewRow[]>("build_extraction_preview", {
+        const rows = await invoke<ExtractionPreviewRow[]>("build_extraction_preview_deep", {
           archives: previewable, options: opts,
         });
         op.produces = rows.flatMap(r =>

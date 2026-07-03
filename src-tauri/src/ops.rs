@@ -479,6 +479,130 @@ fn list_top_level_7z_entries(tool: &Path, archive_path: &Path) -> Result<Vec<(St
     Ok(seen.into_iter().collect())
 }
 
+/// Inserts `rel` and every ancestor directory into `seen`. Ancestors are always
+/// directories; the leaf keeps its own kind. Paths are normalised to '/'.
+fn insert_with_ancestors(
+    seen: &mut std::collections::BTreeMap<String, bool>,
+    rel: &str,
+    is_dir: bool,
+) {
+    let norm = rel.replace('\\', "/");
+    let trimmed = norm.trim_matches('/');
+    if trimmed.is_empty() {
+        return;
+    }
+    let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
+    for i in 0..parts.len() {
+        let is_last = i + 1 == parts.len();
+        let path = parts[..=i].join("/");
+        let entry_is_dir = if is_last { is_dir } else { true };
+        seen.entry(path)
+            .and_modify(|d| *d = *d || entry_is_dir)
+            .or_insert(entry_is_dir);
+    }
+}
+
+/// Lists every entry (files and directories, full relative paths) inside an
+/// archive, synthesising intermediate directories that aren't listed explicitly.
+/// Used to build the deep extraction preview that powers nested ghost trees.
+fn list_all_entries(app: &AppHandle, archive_path: &Path) -> Result<Vec<(String, bool)>> {
+    match archive_path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default()
+        .as_str()
+    {
+        "zip" => list_all_zip_entries(archive_path),
+        "7z" | "rar" => {
+            let tool = seven_zip_path(app)
+                .ok_or_else(|| anyhow!("No se encontro 7zz/7z integrado ni en PATH."))?;
+            ensure_executable(&tool)?;
+            list_all_7z_entries(&tool, archive_path)
+        }
+        _ => Err(anyhow!("Formato no soportado: {}", archive_path.display())),
+    }
+}
+
+fn list_all_zip_entries(archive_path: &Path) -> Result<Vec<(String, bool)>> {
+    let file = fs::File::open(archive_path)?;
+    let mut archive = ZipArchive::new(file)?;
+    let mut seen: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    for index in 0..archive.len() {
+        let item = archive.by_index(index)?;
+        let is_dir = item.name().ends_with('/');
+        let rel = item.mangled_name().to_string_lossy().to_string();
+        insert_with_ancestors(&mut seen, &rel, is_dir);
+    }
+    Ok(seen.into_iter().collect())
+}
+
+fn list_all_7z_entries(tool: &Path, archive_path: &Path) -> Result<Vec<(String, bool)>> {
+    let output = Command::new(tool).arg("l").arg("-slt").arg(archive_path).output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "No se pudo listar el contenido de {}",
+            archive_path.display()
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut seen: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    let mut current_path: Option<String> = None;
+    let mut current_is_dir = false;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Path = ") {
+            if let Some(p) = current_path.take() {
+                insert_with_ancestors(&mut seen, &p, current_is_dir);
+            }
+            current_path = Some(rest.trim().to_string());
+            current_is_dir = false;
+        } else if let Some(rest) = line.strip_prefix("Folder = ") {
+            current_is_dir = rest.trim() == "+";
+        }
+    }
+    if let Some(p) = current_path.take() {
+        insert_with_ancestors(&mut seen, &p, current_is_dir);
+    }
+
+    Ok(seen.into_iter().collect())
+}
+
+/// Builds a deep extraction preview: one entry per file/folder at every level of
+/// the archive, with the destination path each will occupy. Powers navigable
+/// nested ghost trees. `splitEntries` is intentionally not applied here.
+pub fn build_extraction_preview_deep(
+    app: &AppHandle,
+    archives: &[PathBuf],
+    options: &ExtractionOptionsPayload,
+) -> Result<Vec<ExtractionPreviewRow>> {
+    let mut rows = Vec::new();
+    for archive in archives {
+        let destination_root = extraction_destination_root(archive, options);
+        let entries = list_all_entries(app, archive)?;
+        let preview_entries = entries
+            .iter()
+            .map(|(rel, is_dir)| {
+                let dest = rel
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .fold(destination_root.clone(), |acc, seg| acc.join(seg));
+                ExtractionPreviewEntry {
+                    name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
+                    is_dir: *is_dir,
+                    destination_path: dest.to_string_lossy().to_string(),
+                }
+            })
+            .collect();
+        rows.push(ExtractionPreviewRow {
+            archive_path: archive.to_string_lossy().to_string(),
+            destination_root: destination_root.to_string_lossy().to_string(),
+            entries: preview_entries,
+        });
+    }
+    Ok(rows)
+}
+
 /// Moves each top-level file entry produced by an extraction into a folder named after
 /// the file (stripping the extension), leaving top-level directories untouched since they
 /// already act as their own folder.

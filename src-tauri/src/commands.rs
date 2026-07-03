@@ -187,6 +187,27 @@ pub fn open_with_dialog(
     ops::open_with_dialog(&PathBuf::from(path)).map_err(|error| error.to_string())
 }
 
+/// Deep variant of `build_extraction_preview`: enumerates every file/folder at
+/// all levels of each (local) archive so the frontend can build navigable nested
+/// ghost trees. Remote archives are skipped (contents aren't inspectable without
+/// downloading them).
+#[tauri::command]
+pub fn build_extraction_preview_deep(
+    app: AppHandle,
+    archives: Vec<String>,
+    options: ExtractionOptionsPayload,
+) -> Result<Vec<ExtractionPreviewRow>, String> {
+    let local: Vec<String> = archives
+        .into_iter()
+        .filter(|p| !remote::RemoteManager::is_remote_path(p))
+        .collect();
+    if local.is_empty() {
+        return Ok(Vec::new());
+    }
+    ops::build_extraction_preview_deep(&app, &parse_paths(local), &options)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn build_extraction_preview(
     app: AppHandle,

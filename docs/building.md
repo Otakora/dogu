@@ -56,7 +56,7 @@ python tools/release.py build-windows
 
 Salida esperada:
 
-- `dist/dogu-windows-x64-setup.exe`
+- `dist/dogu-windows-x64-<version>-setup.exe`
 
 El script instala dependencias npm si es necesario, lanza `tauri build --bundles nsis` y mueve el instalador a `dist/`.
 
@@ -72,8 +72,8 @@ python3 tools/release.py build-linux-native
 
 Salida esperada:
 
-- `dist/dogu-linux-x86_64.AppImage`
-- `dist/dogu-linux-x86_64.deb`
+- `dist/dogu-linux-x86_64-<version>.AppImage`
+- `dist/dogu-linux-x86_64-<version>.deb`
 
 El script aplica permisos de ejecucion a los sidecars (`chdman`, `7zz`) antes de compilar.
 
@@ -87,6 +87,8 @@ sudo apt install -y \
   wget \
   file \
   pkg-config \
+  libtirpc-dev \
+  libgnutls28-dev \
   libgtk-3-dev \
   libwebkit2gtk-4.1-dev \
   libsoup-3.0-dev \
@@ -94,6 +96,8 @@ sudo apt install -y \
   librsvg2-dev \
   patchelf
 ```
+
+`libtirpc-dev` y `libgnutls28-dev` son necesarios aqui porque el backend SMB actual (`remotefs-smb` con `vendored`) compila componentes de Samba durante el build en Linux.
 
 ---
 
@@ -107,7 +111,7 @@ python3 tools/release.py build-linux-flatpak
 
 Salida esperada:
 
-- `dist/dogu-linux-x86_64.flatpak`
+- `dist/dogu-linux-x86_64-<version>.flatpak`
 
 Notas importantes:
 
@@ -126,15 +130,44 @@ sudo apt install -y flatpak flatpak-builder
 
 ## CI
 
-El workflow `.github/workflows/build-artifacts.yml` genera en cada push a `main`:
+El proyecto usa dos workflows separados:
+
+### 1. CI de validacion
+
+`/.github/workflows/ci.yml` se ejecuta en cada `pull_request` y en cada `push` a `main` o `dev`.
+
+Comprueba:
+
+| Job | Verificacion |
+|-----|--------------|
+| `frontend` | `npm run check` |
+| `rust-windows` | `cargo check` + `cargo test --lib remote::tests -- --nocapture` |
+| `rust-linux` | `cargo check` + `cargo test --lib remote::tests -- --nocapture` |
+
+El job de Linux instala solo las dependencias necesarias para validar el backend Tauri, sin intentar empaquetar instaladores.
+
+### 2. Release oficial
+
+`/.github/workflows/build-artifacts.yml` ya no corre en cada push a `main`.
+
+Ahora se ejecuta:
+
+- manualmente desde GitHub Actions (`workflow_dispatch`)
+- automaticamente al subir un tag `v*` como `v0.2.1`
+
+En ese flujo se generan los instaladores y paquetes de distribucion:
 
 | Job | Artefacto |
 |-----|-----------|
-| `windows` | `dogu-windows-x64-setup.exe` |
-| `linux-native` | `dogu-linux-x86_64.AppImage` + `dogu-linux-x86_64.deb` |
-| `linux-flatpak` | `dogu-linux-x86_64.flatpak` |
+| `windows` | `dogu-windows-x64-<version>-setup.exe` |
+| `linux-native` | `dogu-linux-x86_64-<version>.AppImage` + `dogu-linux-x86_64-<version>.deb` |
+| `linux-flatpak` | `dogu-linux-x86_64-<version>.flatpak` |
 
-El workflow puede lanzarse manualmente desde GitHub Actions (`workflow_dispatch`).
+Cuando el trigger es un tag `v*`, los artefactos generados se adjuntan automaticamente a la GitHub Release correspondiente.
+
+La `<version>` se toma automaticamente del `version` del proyecto, priorizando `src-tauri/Cargo.toml` y usando `package.json` como respaldo.
+
+Por ahora los jobs Linux estan marcados como no bloqueantes en el flujo de release para no impedir publicar una version oficial mientras se estabiliza el empaquetado Linux.
 
 ---
 

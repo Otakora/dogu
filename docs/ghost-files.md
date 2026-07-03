@@ -26,13 +26,21 @@ decided at runtime), so its ghosts are flagged **approximate** (`≈ pending`).
 | Copy / Move    | `dest/<name>` per source                       | ✅ |
 | Compress       | `dest/<archiveName>.<format>`                  | ✅ |
 | CHD convert    | one `.chd` per source (see `build_chd_output_path`) | ✅ |
-| Extract        | the archive's top-level entries (via backend preview) | ✅ |
+| Extract        | the archive's **entire** tree — files and folders at every level (via deep backend preview) | ✅ |
 | CHD restore    | `<stem>.cue` + `<stem>.bin` (or `.iso`)        | ≈ approximate |
 | Delete         | — (removes files)                              | — |
 
-Extraction outputs are predicted by calling `build_extraction_preview` when the
-op is queued. Remote and ghost archives are not previewed, so they produce no
-ghosts (the extraction still runs normally).
+Extraction outputs are predicted by calling `build_extraction_preview_deep` when
+the op is queued — it enumerates the whole archive tree (files and folders at
+every level, synthesising intermediate directories), so ghost folders are
+navigable and you can queue operations on nested files. Remote and ghost
+archives are not previewed, so they produce no ghosts (the extraction still runs
+normally).
+
+**Known limitation:** copying or moving a *folder* predicts a ghost for the
+folder itself but not its contents, so you can't yet drill into a moved/copied
+ghost folder to act on its children. Extraction is the fully-supported deep case.
+Relocating a ghost subtree on copy/move is a planned follow-up.
 
 ## Execution & dependencies
 

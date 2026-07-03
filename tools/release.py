@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -22,14 +24,41 @@ FLATPAK_RUNTIME = "org.freedesktop.Platform//24.08"
 FLATPAK_SDK = "org.freedesktop.Sdk//24.08"
 FLATPAK_NODE_EXT = "org.freedesktop.Sdk.Extension.node20//24.08"
 FLATPAK_RUST_EXT = "org.freedesktop.Sdk.Extension.rust-stable//24.08"
-WINDOWS_BUNDLE_NAME = "dogu-windows-x64-setup.exe"
-LINUX_APPIMAGE_NAME = "dogu-linux-x86_64.AppImage"
-LINUX_DEB_NAME = "dogu-linux-x86_64.deb"
-LINUX_FLATPAK_NAME = "dogu-linux-x86_64.flatpak"
 
 
 def run(command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, cwd=cwd or PROJECT_ROOT, env=env, check=True)
+
+
+def release_version() -> str:
+    cargo_toml = TAURI_DIR / "Cargo.toml"
+    if cargo_toml.exists():
+        data = tomllib.loads(cargo_toml.read_text(encoding="utf-8"))
+        version = data.get("package", {}).get("version")
+        if isinstance(version, str) and version.strip():
+            return version.strip()
+
+    package_json = PROJECT_ROOT / "package.json"
+    if package_json.exists():
+        data = json.loads(package_json.read_text(encoding="utf-8"))
+        version = data.get("version")
+        if isinstance(version, str) and version.strip():
+            return version.strip()
+
+    raise RuntimeError("No se pudo determinar la version actual del proyecto.")
+
+
+def versioned_filename(target: str) -> str:
+    version = release_version()
+    mapping = {
+        "windows": f"dogu-windows-x64-{version}-setup.exe",
+        "linux-appimage": f"dogu-linux-x86_64-{version}.AppImage",
+        "linux-deb": f"dogu-linux-x86_64-{version}.deb",
+        "linux-flatpak": f"dogu-linux-x86_64-{version}.flatpak",
+    }
+    if target not in mapping:
+        raise RuntimeError(f"Target de release desconocido: {target}")
+    return mapping[target]
 
 
 def host_os() -> str:
@@ -134,7 +163,7 @@ def build_windows() -> Path:
         )
 
     run_tauri(["build", "--bundles", "nsis"])
-    return copy_latest("nsis/*-setup.exe", WINDOWS_BUNDLE_NAME)
+    return copy_latest("nsis/*-setup.exe", versioned_filename("windows"))
 
 
 def build_linux_native() -> tuple[Path, Path]:
@@ -145,8 +174,8 @@ def build_linux_native() -> tuple[Path, Path]:
 
     ensure_linux_sidecars_permissions()
     run_tauri(["build"])
-    appimage = copy_latest("appimage/*.AppImage", LINUX_APPIMAGE_NAME)
-    deb = copy_latest("deb/*.deb", LINUX_DEB_NAME)
+    appimage = copy_latest("appimage/*.AppImage", versioned_filename("linux-appimage"))
+    deb = copy_latest("deb/*.deb", versioned_filename("linux-deb"))
     stage_flatpak_input()
     return appimage, deb
 
@@ -154,7 +183,7 @@ def build_linux_native() -> tuple[Path, Path]:
 def flatpak_build_commands() -> list[list[str]]:
     build_root = BUILD_DIR / "flatpak-builder"
     repo_dir = DIST_DIR / "flatpak-repo"
-    bundle_path = DIST_DIR / LINUX_FLATPAK_NAME
+    bundle_path = DIST_DIR / versioned_filename("linux-flatpak")
     return [
         ["flatpak", "remote-add", "--user", "--if-not-exists", "flathub", "https://flathub.org/repo/flathub.flatpakrepo"],
         ["flatpak", "install", "--user", "-y", "flathub", FLATPAK_RUNTIME, FLATPAK_SDK, FLATPAK_NODE_EXT, FLATPAK_RUST_EXT],
@@ -173,7 +202,7 @@ def build_linux_flatpak() -> Path:
     build_linux_native()
     for command in flatpak_build_commands():
         run(command)
-    return DIST_DIR / LINUX_FLATPAK_NAME
+    return DIST_DIR / versioned_filename("linux-flatpak")
 
 
 def main() -> None:

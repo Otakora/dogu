@@ -2,35 +2,50 @@
 
 > **道具** — *herramienta* (japonés)
 
-Aplicacion de escritorio para gestionar colecciones de ROMs. Combina un explorador de archivos avanzado con conexiones remotas persistentes, extraccion de comprimidos y conversion de formatos. Disponible para Windows y Linux.
+Aplicacion de escritorio para gestionar colecciones de ROMs. Combina un explorador de archivos avanzado con conexiones remotas persistentes, extraccion de comprimidos, conversion de formatos y terminal integrado. Disponible para Windows y Linux.
 
 ## Caracteristicas
 
 ### Explorador de archivos
-- Arbol lateral + vista de contenido en lista o rejilla
-- Ruta editable, boton subir y navegacion directa
-- Busqueda global en todo el arbol y busqueda local con `Ctrl+F`
+- Vista dividida (split pane) con divisor arrastrable — dos paneles independientes con sus propias pestañas, historial y modo de vista
+- Pestañas multiples con drag-and-drop entre paneles, reordenacion y menu contextual
+- Arbol lateral con Favoritos, Este equipo (discos con barra de uso) y Conexiones remotas
+- Ruta editable, navegacion directa y barra de herramientas responsive (dos filas en vista dividida)
+- Busqueda integrada por pane con `Ctrl+F`
 - Copiar, cortar, pegar, renombrar inline, eliminar, propiedades
-- Vista de contenido con zoom ajustable y separador arrastrable
-- Seleccion simple y multiple con resumen en barra inferior
+- Vista en lista y rejilla con zoom ajustable
 
 ### Conexiones remotas
-- Protocolos: **SMB**, **SSH** (SFTP/SCP), **FTP**, **FTPS**
-- Perfiles persistentes con gestion de credenciales y huellas SSH
-- Varias sesiones abiertas al mismo tiempo con cambio rapido desde la barra lateral
+- Protocolos: **SSH/SFTP**, **SCP**, **FTP**, **FTPS**, **SMB**
+- Perfiles persistentes con gestion de credenciales y verificacion de huellas SSH
+- Varias sesiones abiertas simultaneamente con cambio rapido desde la barra lateral
+- Indicador de espacio libre y total para conexiones SSH (barra visual, igual que discos locales)
 - Transferencias local → remoto, remoto → local y remoto → remoto
 - Apertura de archivos remotos con copia temporal administrada por la app
+
+### Terminal integrado
+- Terminal local con shell nativo (PowerShell/bash/zsh segun plataforma)
+- Terminal SSH para conexiones remotas, arrancando en la ruta activa del panel
+- Multipestañas, redimensionable con el panel de archivos
+
+### Cola de operaciones
+- Modo cola: las operaciones de copia/movimiento se acumulan y se ejecutan juntas
+- Vista de progreso con log en tiempo real y posibilidad de pausa/cancelacion
 
 ### Extraccion de archivos
 - Soporte para `.zip`, `.7z`, `.rar` y formatos compatibles
 - **7-Zip integrado** — sin dependencias del sistema
-- Extraccion individual o en masa, con opciones de destino y previsualizacion
+- Extraccion individual o en masa con opciones de destino y previsualizacion
 
 ### Conversion CHD
 - Conversion a `.chd` desde `.cue`, `.gdi`, `.toc`, `.iso`, `.bin + .cue`
 - Restauracion desde `.chd` con `extractcd` y `extractdvd`
 - **chdman v0.288 integrado** — sin instalacion adicional
 - Seguimiento de progreso con log en tiempo real
+
+### Generador de M3U
+- Creacion de listas `.m3u` a partir de carpetas o selecciones de archivos
+- Soporte para multidisc y agrupacion por titulo
 
 ## Stack tecnico
 
@@ -60,7 +75,7 @@ npm run check          # svelte-check (TypeScript + Svelte)
 cargo check            # Rust (desde src-tauri/)
 ```
 
-> `npm run dev` arranca **solo el frontend** en el navegador — los `invoke()` de Tauri no funcionan. Util unicamente para iterar en estilos o componentes puros sin recompilar Rust.
+> `npm run dev` arranca **solo el frontend** en el navegador — los `invoke()` de Tauri no funcionan. Util unicamente para iterar en estilos o componentes puros sin compilar Rust.
 
 ## Compilacion
 

@@ -3,6 +3,7 @@
   import type { PropertiesSummaryDto } from "../../types/index.js";
   import Modal from "../ui/Modal.svelte";
   import Button from "../ui/Button.svelte";
+  import { t } from "../../i18n/index.js";
 
   type Props = {
     paths: string[];
@@ -40,38 +41,38 @@
   const title = $derived(
     paths.length === 1
       ? paths[0].split(/[\\/]/).filter(Boolean).pop() ?? paths[0]
-      : `${paths.length} items`
+      : t("propertiesDialog.itemsLabel", { count: paths.length })
   );
 </script>
 
-<Modal title="Properties — {title}" width="420px" {onclose}>
+<Modal title={t("propertiesDialog.title", { name: title })} width="420px" {onclose}>
   {#snippet children()}
     {#if loading}
       <div class="props-loading">
         <span class="props-spinner"></span>
-        Calculating…
+        {t("propertiesDialog.calculating")}
       </div>
     {:else if error}
       <div class="props-error">{error}</div>
     {:else if summary}
       <div class="props-body">
         <div class="props-row">
-          <span class="props-key">Items</span>
+          <span class="props-key">{t("propertiesDialog.items")}</span>
           <span class="props-val">{summary.count.toLocaleString()}</span>
         </div>
         <div class="props-row">
-          <span class="props-key">Files</span>
+          <span class="props-key">{t("propertiesDialog.files")}</span>
           <span class="props-val">{summary.files.toLocaleString()}</span>
         </div>
         <div class="props-row">
-          <span class="props-key">Folders</span>
+          <span class="props-key">{t("propertiesDialog.folders")}</span>
           <span class="props-val">{summary.directories.toLocaleString()}</span>
         </div>
         <div class="props-row">
-          <span class="props-key">Total size</span>
+          <span class="props-key">{t("propertiesDialog.totalSize")}</span>
           <span class="props-val">
             {summary.totalSizeLabel}
-            <span class="props-bytes">({summary.totalSize.toLocaleString()} bytes)</span>
+            <span class="props-bytes">{t("propertiesDialog.bytes", { count: summary.totalSize.toLocaleString() })}</span>
           </span>
         </div>
         {#if summary.lines.length > 0}
@@ -85,7 +86,7 @@
   {/snippet}
 
   {#snippet footer()}
-    <Button variant="primary" onclick={onclose}>Close</Button>
+    <Button variant="primary" onclick={onclose}>{t("propertiesDialog.close")}</Button>
   {/snippet}
 </Modal>
 

@@ -9,6 +9,7 @@
   } from "../../types/index.js";
   import ConnectionForm from "./ConnectionForm.svelte";
   import Button from "../ui/Button.svelte";
+  import { t } from "../../i18n/index.js";
 
   // ── State ────────────────────────────────────────────────
   let profiles = $state<ConnectionProfileDto[]>([]);
@@ -20,7 +21,7 @@
   let isTesting = $state(false);
   let connectingId = $state<string | null>(null);
   let disconnectingId = $state<string | null>(null);
-  let testResult = $state<{ ok: boolean; message: string } | null>(null);
+  let testResult = $state<{ ok: boolean; message: string; writeAccess?: boolean | null } | null>(null);
   let deleteConfirmId = $state<string | null>(null);
 
   // ── Derived ──────────────────────────────────────────────
@@ -74,7 +75,7 @@
       await invoke("save_connection_profile", { profile: payload });
       await loadAll();
       cancelForm();
-      app.notify("success", payload.id ? "Profile saved." : "Profile added.");
+      app.notify("success", payload.id ? t("connectionManager.profileSaved") : t("connectionManager.profileAdded"));
     } catch (e) {
       app.notify("error", String(e));
     } finally {
@@ -87,9 +88,26 @@
     testResult = null;
     try {
       const result = await invoke<ConnectionOpenResultDto>("test_connection_profile_payload", { profile: payload, trustCurrentFingerprint: false });
+
+      if (result.requiresTrust && result.fingerprint) {
+        const trusted = await app.promptFingerprint(
+          result.fingerprint,
+          payload.label || payload.host
+        );
+        if (!trusted) {
+          testResult = { ok: false, message: t("connectionManager.testCancelledFingerprint") };
+          return;
+        }
+        const retryResult = await invoke<ConnectionOpenResultDto>("test_connection_profile_payload", { profile: payload, trustCurrentFingerprint: true });
+        testResult = retryResult.connected
+          ? { ok: true, message: t("connectionManager.connectionSuccessful"), writeAccess: retryResult.writeAccess }
+          : { ok: false, message: retryResult.message ?? t("connectionManager.connectionFailed") };
+        return;
+      }
+
       testResult = result.connected
-        ? { ok: true, message: "Connection successful." }
-        : { ok: false, message: result.message ?? "Connection failed." };
+        ? { ok: true, message: t("connectionManager.connectionSuccessful"), writeAccess: result.writeAccess }
+        : { ok: false, message: result.message ?? t("connectionManager.connectionFailed") };
     } catch (e) {
       testResult = { ok: false, message: String(e) };
     } finally {
@@ -132,11 +150,11 @@
           if (retryResult.connected && retryResult.connection) {
             sessions = [...sessions.filter((s) => s.profileId !== profileId), retryResult.connection];
             app.setActiveConnections(sessions);
-            app.notify("success", `Connected to ${retryResult.connection.label}.`);
+            app.notify("success", t("connectionManager.connectedTo", { label: retryResult.connection.label }));
             app.navigate(retryResult.connection.rootPath);
             app.closeConnectionManager();
           } else {
-            app.notify("error", retryResult.message ?? "Connection failed after trusting fingerprint.");
+            app.notify("error", retryResult.message ?? t("connectionManager.connectionFailedAfterTrust"));
           }
         }
         return;
@@ -145,11 +163,11 @@
       if (result.connected && result.connection) {
         sessions = [...sessions.filter((s) => s.profileId !== profileId), result.connection];
         app.setActiveConnections(sessions);
-        app.notify("success", `Connected to ${result.connection.label}.`);
+        app.notify("success", t("connectionManager.connectedTo", { label: result.connection.label }));
         app.navigate(result.connection.rootPath);
         app.closeConnectionManager();
       } else {
-        app.notify("error", result.message ?? "Could not connect.");
+        app.notify("error", result.message ?? t("connectionManager.couldNotConnect"));
       }
     } catch (e) {
       app.notify("error", String(e));
@@ -185,19 +203,19 @@
   }
 </script>
 
-<aside class="cm-panel" aria-label="Connection Manager">
+<aside class="cm-panel" aria-label={t("connectionManager.title")}>
 
   <!-- ── Header ── -->
   <div class="cm-header">
-    <span class="cm-title">Connections</span>
+    <span class="cm-title">{t("connectionManager.title")}</span>
     <div class="cm-header-actions">
       <Button variant="primary" size="sm" onclick={startCreate} disabled={showForm}>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
           <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
         </svg>
-        New
+        {t("connectionManager.new")}
       </Button>
-      <Button variant="ghost" size="sm" onclick={() => app.closeConnectionManager()} aria-label="Close">
+      <Button variant="ghost" size="sm" onclick={() => app.closeConnectionManager()} aria-label={t("connectionManager.close")}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
         </svg>
@@ -211,7 +229,7 @@
     {#if showForm}
       <section class="cm-section">
         <div class="cm-section-title">
-          {isCreating ? "New connection" : "Edit connection"}
+          {isCreating ? t("connectionManager.newConnection") : t("connectionManager.editConnection")}
         </div>
         {#if testResult}
           <div class="test-result" class:test-result--ok={testResult.ok} class:test-result--fail={!testResult.ok}>
@@ -224,6 +242,22 @@
             </svg>
             {testResult.message}
           </div>
+          {#if testResult.ok && testResult.writeAccess != null}
+            <div class="test-write-access" class:test-write-access--ok={testResult.writeAccess} class:test-write-access--no={!testResult.writeAccess}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                {#if testResult.writeAccess}
+                  <polyline points="20 6 9 17 4 12"/>
+                {:else}
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                {/if}
+              </svg>
+              {#if testResult.writeAccess}
+                {t("connectionManager.writeAccessOk")}
+              {:else}
+                {t("connectionManager.writeAccessDenied")}
+              {/if}
+            </div>
+          {/if}
         {/if}
         <ConnectionForm
           profile={formProfile}
@@ -239,7 +273,7 @@
     <!-- ── Active sessions ── -->
     {#if sessions.length > 0}
       <section class="cm-section">
-        <div class="cm-section-title">Active sessions ({sessions.length})</div>
+        <div class="cm-section-title">{t("connectionManager.activeSessions", { count: sessions.length })}</div>
         <div class="session-list">
           {#each sessions as session (session.sessionId)}
             <div class="session-card">
@@ -265,8 +299,8 @@
                 class="session-disconnect"
                 onclick={() => disconnectSession(session.sessionId)}
                 disabled={disconnectingId === session.sessionId}
-                title="Disconnect"
-                aria-label="Disconnect {session.label}"
+                title={t("connectionManager.disconnect")}
+                aria-label="{t('connectionManager.disconnect')}: {session.label}"
               >
                 {#if disconnectingId === session.sessionId}
                   <span class="spinner-sm"></span>
@@ -286,11 +320,11 @@
 
     <!-- ── Saved profiles ── -->
     <section class="cm-section">
-      <div class="cm-section-title">Saved connections ({profiles.length})</div>
+      <div class="cm-section-title">{t("connectionManager.savedConnections", { count: profiles.length })}</div>
       {#if profiles.length === 0}
         <div class="cm-empty">
-          No saved connections yet.{" "}
-          <button class="link-btn" onclick={startCreate}>Add one</button>
+          {t("connectionManager.noSavedConnections")}{" "}
+          <button class="link-btn" onclick={startCreate}>{t("connectionManager.addOne")}</button>
         </div>
       {:else}
         <div class="profile-list">
@@ -322,23 +356,23 @@
                   <button
                     class="action-btn action-btn--danger"
                     onclick={(e) => { e.stopPropagation(); deleteProfile(profile.id); }}
-                    title="Confirm delete"
+                    title={t("connectionManager.confirmDelete")}
                   >
-                    Confirm
+                    {t("connectionManager.confirm")}
                   </button>
                   <button
                     class="action-btn"
                     onclick={(e) => { e.stopPropagation(); deleteConfirmId = null; }}
-                    title="Cancel"
+                    title={t("connectionManager.cancel")}
                   >
-                    Cancel
+                    {t("connectionManager.cancel")}
                   </button>
                 {:else}
                   <button
                     class="icon-btn icon-btn--danger"
                     onclick={(e) => { e.stopPropagation(); deleteConfirmId = profile.id; }}
-                    title="Delete profile"
-                    aria-label="Delete {profile.label || profile.host}"
+                    title={t("connectionManager.deleteProfile")}
+                    aria-label="{t('connectionManager.deleteProfile')}: {profile.label || profile.host}"
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <polyline points="3 6 5 6 21 6"/>
@@ -353,8 +387,8 @@
                   class="connect-btn"
                   onclick={(e) => { e.stopPropagation(); connectProfile(profile.id); }}
                   disabled={connectingId === profile.id}
-                  title="Connect"
-                  aria-label="Connect to {profile.label || profile.host}"
+                  title={t("connectionManager.connect")}
+                  aria-label="{t('connectionManager.connect')}: {profile.label || profile.host}"
                 >
                   {#if connectingId === profile.id}
                     <span class="spinner-sm"></span>
@@ -363,7 +397,7 @@
                       <polyline points="5 12 19 12 14 7"/><polyline points="14 17 19 12"/>
                     </svg>
                   {/if}
-                  {connectingId === profile.id ? "Connecting…" : "Connect"}
+                  {connectingId === profile.id ? t("connectionManager.connecting") : t("connectionManager.connect")}
                 </button>
               </div>
             </div>
@@ -471,6 +505,30 @@
     background: var(--danger-soft);
     color: var(--danger);
     border: 1px solid var(--danger-border);
+  }
+
+  .test-write-access {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    margin-top: -6px;
+    margin-bottom: 10px;
+  }
+
+  .test-write-access--ok {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border: 1px solid var(--accent-border);
+    opacity: 0.85;
+  }
+
+  .test-write-access--no {
+    background: color-mix(in srgb, #f59e0b 12%, var(--surface));
+    color: #b45309;
+    border: 1px solid color-mix(in srgb, #f59e0b 35%, var(--line));
   }
 
   /* ── Active sessions ── */

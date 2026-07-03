@@ -68,11 +68,21 @@ export type ConnectionOpenResultDto = {
   fingerprint: string | null;
   message: string | null;
   connection: ActiveConnectionDto | null;
+  writeAccess: boolean | null;
+};
+
+export type ToolRuntimeDto = {
+  available: boolean;
+  path: string | null;
+  version: string | null;
+  error: string | null;
 };
 
 export type AppMetadataDto = {
   appVersion: string;
+  platform: string;
   chdman: Record<string, unknown>;
+  chdmanRuntime: ToolRuntimeDto;
 };
 
 export type JobProgressDto = {
@@ -107,15 +117,26 @@ export type SummaryOptionsPayload = {
 
 export type ExtractionOptionsPayload = {
   individualFolders: boolean;
-  destinationMode: "same" | "custom";
+  splitEntries: boolean;
+  destinationMode: 'same' | 'custom';
   destinationPath: string | null;
   deleteArchives: boolean;
   overwrite: boolean;
+  /** Virtual remote path. When set output is written to temp then uploaded. */
+  remoteDestination?: string | null;
+  remoteTransfer?: RemoteTransferPolicy | null;
+};
+
+export type ExtractionPreviewEntry = {
+  name: string;
+  isDir: boolean;
+  destinationPath: string;
 };
 
 export type ExtractionPreviewRow = {
   archivePath: string;
-  destinationPath: string;
+  destinationRoot: string;
+  entries: ExtractionPreviewEntry[];
 };
 
 export type ChdSourceDto = {
@@ -124,6 +145,8 @@ export type ChdSourceDto = {
   command: string;
   displayExtensions: string[];
   requiredPaths: string[];
+  /** Filenames that are referenced but missing from disk. Empty = all OK. */
+  missingFiles: string[];
 };
 
 export type SelectionAnalysisDto = {
@@ -135,7 +158,41 @@ export type SelectionAnalysisDto = {
   uniqueExtensions: string[];
   chdMenuLabel: string | null;
   chdRestoreMenuLabel: string | null;
+  hasRemoteDirectories: boolean;
+  /** .bin files found with no matching .cue anywhere in the same folder. */
+  orphanBins: string[];
 };
+
+// ── Remote transfer ─────────────────────────────────────────────
+
+/** "abort" | "skip" | "pause" — what the backend does on a recoverable error */
+export type RemoteTransferOnError = 'abort' | 'skip' | 'pause';
+
+export type RemoteTransferPolicy = {
+  onError: RemoteTransferOnError;
+};
+
+export type PreflightWarningKind = 'lowSpace' | 'criticalSpace' | 'noSpaceCheck';
+
+export type PreflightWarning = {
+  kind: PreflightWarningKind;
+  detail: string;
+};
+
+export type PreflightCheckResult = {
+  ok: boolean;
+  warnings: PreflightWarning[];
+};
+
+/** Payload of the `job-paused` Tauri event */
+export type JobPausedDto = {
+  jobId: string;
+  error: string;
+  fileName: string;
+  isRecoverable: boolean;
+};
+
+// ── CHD ─────────────────────────────────────────────────────────
 
 export type ChdConversionOptionsPayload = {
   deleteOriginals: boolean;
@@ -143,15 +200,58 @@ export type ChdConversionOptionsPayload = {
   depositToParent: boolean;
   deleteOriginalSubfolders: boolean;
   overwrite: boolean;
+  customName: string | null;
+  /** "same" = alongside source (default), "parent" = parent folder, "custom" = use destinationPath */
+  destinationMode?: 'same' | 'parent' | 'custom' | null;
+  /** Local destination folder when destinationMode == "custom". */
+  destinationPath?: string | null;
+  /** Virtual remote path. When set the CHD is written to temp then uploaded. */
+  remoteDestination?: string | null;
+  remoteTransfer?: RemoteTransferPolicy | null;
 };
+
+export type ChdRestoreNamingMode = 'chdStem' | 'custom';
 
 export type ChdRestoreOptionsPayload = {
   individualFolders: boolean;
   destinationMode: "same" | "custom";
   destinationPath: string | null;
+  /** How to name the extracted output files (.cue/.bin/.iso) */
+  outputNamingMode: ChdRestoreNamingMode;
+  /** Only used when outputNamingMode == "custom" and single CHD */
+  customOutputName: string | null;
+  /** How to name the individual subfolder (only when individualFolders) */
+  folderNamingMode: ChdRestoreNamingMode;
+  /** Only used when folderNamingMode == "custom" and single CHD */
+  customFolderName: string | null;
   deleteChd: boolean;
   overwrite: boolean;
   splitBin: boolean;
+  /** Virtual remote path. When set output is written to temp then uploaded. */
+  remoteDestination?: string | null;
+  remoteTransfer?: RemoteTransferPolicy | null;
+};
+
+// ── Compression ─────────────────────────────────────────────────
+
+export type CompressionFormat = 'zip' | '7z' | 'rar';
+
+export type CompressionOptionsPayload = {
+  format: CompressionFormat;
+  archiveName: string;
+  destinationMode: 'same' | 'custom';
+  destinationPath: string | null;
+  compressionLevel: number; // 0=store 3=fast 5=normal 9=max
+  deleteOriginals: boolean;
+  overwrite: boolean;
+  remoteDestination?: string | null;
+  remoteTransfer?: RemoteTransferPolicy | null;
+};
+
+export type CompressionCapabilitiesDto = {
+  canCompressZip: boolean;
+  canCompress7z: boolean;
+  canCompressRar: boolean;
 };
 
 export type ClipboardState = {
@@ -164,15 +264,36 @@ export type ThemeMode = "light" | "dark";
 export type ContentSortKey = "name" | "type" | "size" | "modified";
 export type SortDirection = "asc" | "desc";
 export type ContentColumnWidths = Record<ContentSortKey, number>;
+export type Locale = "en" | "es";
+
+export type VolumeDto = {
+  path: string;
+  name: string;
+  label: string;
+  totalBytes: number;
+  freeBytes: number;
+  isRemovable: boolean;
+};
+
+export type KnownFoldersDto = {
+  home: string | null;
+  desktop: string | null;
+  documents: string | null;
+  downloads: string | null;
+  pictures: string | null;
+  music: string | null;
+  videos: string | null;
+};
 
 export type AppSettings = {
   theme: ThemeMode;
+  locale: Locale;
   fontScale: number;
   compactUi: boolean;
   defaultViewMode: ViewMode;
   defaultContentZoom: number;
   defaultTreeZoom: number;
-  localLocations: string[];
+  favoriteLocations: string[];
   confirmDelete: boolean;
   hideDeleteProgressPopup: boolean;
   selectionWeightMaxDepth: number;
@@ -180,9 +301,10 @@ export type AppSettings = {
   contentSortKey: ContentSortKey;
   contentSortDirection: SortDirection;
   contentColumnWidths: ContentColumnWidths;
+  chdScanDepth: number;
 };
 
-export type NotificationKind = "error" | "info" | "success";
+export type NotificationKind = "error" | "warn" | "info" | "success";
 
 export type NotificationEntry = {
   id: string;
@@ -208,4 +330,99 @@ export type ProgressState = {
 export type RenameState = {
   path: string;
   value: string;
+};
+
+export type AvailableShell = {
+  name: string;
+  path: string;
+};
+
+export type TerminalTabInfo = {
+  id: string;
+  title: string;
+  cwd: string | null;
+};
+
+// ── M3U generation ──────────────────────────────────────────────
+
+export type M3uOutputLocation = 'sameFolder' | 'scanRoot' | 'currentDir' | 'custom';
+
+export type M3uScanOptions = {
+  multiDiscOnly: boolean;
+  recursive: boolean;
+  outputLocation: M3uOutputLocation;
+  customOutputPath: string | null;
+  useRelativePaths: boolean;
+};
+
+export type M3uEntryDto = {
+  absolutePath: string;
+  m3uPath: string;
+  discNumber: number;
+  format: string;
+};
+
+export type M3uWarningDto = {
+  kind: 'missingDisc' | 'duplicateDisc' | 'mixedFormats' | 'm3uExists';
+  detail: string | null;
+};
+
+export type M3uGroupDto = {
+  id: string;
+  baseName: string;
+  outputPath: string;
+  m3uExists: boolean;
+  entries: M3uEntryDto[];
+  warnings: M3uWarningDto[];
+};
+
+export type M3uGenerateGroupPayload = {
+  outputPath: string;
+  baseName: string;
+  entries: string[];
+};
+
+export type M3uGeneratePayload = {
+  groups: M3uGenerateGroupPayload[];
+  overwrite: boolean;
+};
+
+export type M3uFailureDto = {
+  path: string;
+  error: string;
+};
+
+export type M3uGenerateResultDto = {
+  created: string[];
+  skipped: string[];
+  failed: M3uFailureDto[];
+};
+
+// ── Operation queue ─────────────────────────────────────────────
+
+export type QueuedOpKind = 'copy' | 'move' | 'delete' | 'extract' | 'compress' | 'chd-convert' | 'chd-restore';
+
+export type QueuedOp = {
+  id: string;
+  title: string;
+  kind: QueuedOpKind;
+  sources: string[];
+  destinations: string[];
+  deletes: string[];
+  execute: () => Promise<void>;
+};
+
+export type ConflictKind = 'source-deleted' | 'dest-deleted' | 'dest-collision';
+
+// 'blocking'      → dangerous in sequential AND parallel (deleter runs first in queue)
+// 'parallel-only' → safe in sequential (order in queue protects it), dangerous in parallel
+export type ConflictSeverity = 'blocking' | 'parallel-only';
+
+export type QueueConflict = {
+  opAId: string;
+  opBId: string;
+  kind: ConflictKind;
+  severity: ConflictSeverity;
+  pathA: string;
+  pathB: string;
 };

@@ -2,6 +2,7 @@
   import { app } from "../../stores/app.svelte.js";
   import Modal from "../ui/Modal.svelte";
   import Button from "../ui/Button.svelte";
+  import { t } from "../../i18n/index.js";
 
   const dialog = $derived(app.confirmDialog);
 </script>
@@ -13,12 +14,12 @@
     {/snippet}
 
     {#snippet footer()}
-      <Button variant="ghost" onclick={() => app.closeConfirm()}>Cancel</Button>
+      <Button variant="ghost" onclick={() => app.closeConfirm()}>{t("confirmDialog.cancel")}</Button>
       <Button
         variant="danger"
         onclick={() => { dialog.onConfirm(); app.closeConfirm(); }}
       >
-        {dialog.confirmLabel ?? "Confirm"}
+        {dialog.confirmLabel ?? t("confirmDialog.confirm")}
       </Button>
     {/snippet}
   </Modal>

@@ -36,6 +36,12 @@
       "appimage": {
         "bundleMediaFramework": false
       }
+    },
+    "windows": {
+      "nsis": {
+        "languages": ["English", "Spanish"],
+        "displayLanguageSelector": true
+      }
     }
   }
 }

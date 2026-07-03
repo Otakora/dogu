@@ -1,8 +1,11 @@
 mod commands;
+mod m3u;
 mod models;
 mod ops;
+mod pause;
 mod remote;
 mod sidecars;
+mod terminal;
 
 use tauri::Manager;
 
@@ -13,10 +16,14 @@ pub fn run() {
         .manage(commands::SummaryRequestState {
             current_request_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
+        .manage(pause::PauseRegistry::new())
+        .manage(terminal::TerminalManager::new())
         .setup(|app| {
             let _ = app.handle();
             let remote_state = remote::RemoteState::new(&app.handle())?;
             app.manage(remote_state);
+            // Clean up temp dirs left by any previous session that crashed or was force-killed.
+            ops::sweep_temp_dirs(&app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -36,6 +43,8 @@ pub fn run() {
             commands::scan_selection,
             commands::start_convert_to_chd,
             commands::start_restore_from_chd,
+            commands::resume_job,
+            commands::preflight_remote_transfer,
             commands::get_app_metadata,
             commands::list_connection_profiles,
             commands::save_connection_profile,
@@ -44,7 +53,19 @@ pub fn run() {
             commands::connect_connection_profile,
             commands::test_connection_profile,
             commands::test_connection_profile_payload,
-            commands::disconnect_connection
+            commands::disconnect_connection,
+            commands::list_volumes,
+            commands::get_known_folders,
+            commands::create_terminal,
+            commands::create_terminal_for_remote_session,
+            commands::terminal_input,
+            commands::resize_terminal,
+            commands::close_terminal,
+            commands::get_available_shells,
+            commands::scan_for_m3u_groups,
+            commands::generate_m3u_files,
+            commands::get_compression_capabilities,
+            commands::start_compress
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

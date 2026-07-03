@@ -2,6 +2,7 @@
   import { untrack } from "svelte";
   import type { ConnectionProfileDto, ConnectionProfilePayload } from "../../types/index.js";
   import Button from "../ui/Button.svelte";
+  import { t } from "../../i18n/index.js";
 
   type Props = {
     profile?: ConnectionProfileDto | null;
@@ -57,12 +58,12 @@
 
   const portPlaceholder = $derived(String(defaultPort()));
 
-  // Auto-update port when protocol or implicit mode changes, only if user hasn't set a custom port
+  // Auto-update port when protocol or implicit mode changes, only if user hasn't set a custom port.
+  // untrack() on portStr reads prevents this effect from re-running when the user types.
   $effect(() => {
     const def = defaultPort();
-    const current = parseInt(portStr, 10);
-    // If the port is currently the default for ANY protocol, update it to the new default
-    if (!portStr || [21, 22, 445, 990].includes(current)) {
+    const current = untrack(() => parseInt(portStr, 10));
+    if (!untrack(() => portStr) || [21, 22, 445, 990].includes(current)) {
       portStr = String(def);
     }
   });
@@ -91,11 +92,11 @@
 
   function validate(): boolean {
     const e: Record<string, string> = {};
-    if (!host.trim()) e.host = "Host is required";
-    if (protocol === "smb" && !share.trim()) e.share = "Share name is required";
+    if (!host.trim()) e.host = t("connectionForm.hostRequired");
+    if (protocol === "smb" && !share.trim()) e.share = t("connectionForm.shareRequired");
     if (portStr) {
       const n = parseInt(portStr, 10);
-      if (isNaN(n) || n < 1 || n > 65535) e.port = "Port must be 1–65535";
+      if (isNaN(n) || n < 1 || n > 65535) e.port = t("connectionForm.portRange");
     }
     errors = e;
     return Object.keys(e).length === 0;
@@ -122,14 +123,14 @@
 
   <!-- ── Label ── -->
   <div class="field">
-    <label class="field-label" for="cf-label">Label <span class="optional">(optional)</span></label>
+    <label class="field-label" for="cf-label">{t("connectionForm.label")} <span class="optional">{t("connectionForm.optional")}</span></label>
     <input id="cf-label" class="field-input" type="text" bind:value={label} placeholder="My server" />
   </div>
 
   <!-- ── Protocol + Host + Port ── -->
   <div class="field-row">
     <div class="field field--protocol">
-      <label class="field-label" for="cf-protocol">Protocol</label>
+      <label class="field-label" for="cf-protocol">{t("connectionForm.protocol")}</label>
       <select id="cf-protocol" class="field-select" bind:value={protocol}>
         <option value="ssh">SSH / SFTP</option>
         <option value="ftp">FTP</option>
@@ -138,7 +139,7 @@
       </select>
     </div>
     <div class="field field--host">
-      <label class="field-label" for="cf-host">Host <span class="required">*</span></label>
+      <label class="field-label" for="cf-host">{t("connectionForm.host")} <span class="required">{t("connectionForm.required")}</span></label>
       <input
         id="cf-host"
         class="field-input"
@@ -152,14 +153,14 @@
       {#if errors.host}<span class="field-error">{errors.host}</span>{/if}
     </div>
     <div class="field field--port">
-      <label class="field-label" for="cf-port">Port</label>
+      <label class="field-label" for="cf-port">{t("connectionForm.port")}</label>
       <input
         id="cf-port"
         class="field-input"
         class:field-input--error={errors.port}
-        type="number"
-        min="1"
-        max="65535"
+        type="text"
+        inputmode="numeric"
+        pattern="[0-9]*"
         bind:value={portStr}
         placeholder={portPlaceholder}
       />
@@ -170,11 +171,11 @@
   <!-- ── Credentials ── -->
   <div class="field-row">
     <div class="field field--flex">
-      <label class="field-label" for="cf-user">Username</label>
+      <label class="field-label" for="cf-user">{t("connectionForm.username")}</label>
       <input id="cf-user" class="field-input" type="text" bind:value={username} placeholder="anonymous" autocomplete="off" />
     </div>
     <div class="field field--flex">
-      <label class="field-label" for="cf-pass">Password</label>
+      <label class="field-label" for="cf-pass">{t("connectionForm.password")}</label>
       <div class="field-password-wrap">
         <input
           id="cf-pass"
@@ -188,7 +189,7 @@
           type="button"
           class="show-pass-btn"
           onclick={() => (showPassword = !showPassword)}
-          aria-label={showPassword ? "Hide password" : "Show password"}
+          aria-label={showPassword ? t("connectionForm.hidePassword") : t("connectionForm.showPassword")}
         >
           {#if showPassword}
             <!-- eye-slash icon -->
@@ -212,7 +213,7 @@
   {#if isSMB}
     <div class="field-row">
       <div class="field field--flex">
-        <label class="field-label" for="cf-share">Share <span class="required">*</span></label>
+        <label class="field-label" for="cf-share">{t("connectionForm.share")} <span class="required">{t("connectionForm.required")}</span></label>
         <input
           id="cf-share"
           class="field-input"
@@ -226,7 +227,7 @@
         {#if errors.share}<span class="field-error">{errors.share}</span>{/if}
       </div>
       <div class="field field--flex">
-        <label class="field-label" for="cf-workgroup">Workgroup <span class="optional">(optional)</span></label>
+        <label class="field-label" for="cf-workgroup">{t("connectionForm.workgroup")} <span class="optional">{t("connectionForm.optional")}</span></label>
         <input id="cf-workgroup" class="field-input" type="text" bind:value={workgroup} placeholder="WORKGROUP" autocomplete="off" />
       </div>
     </div>
@@ -234,22 +235,22 @@
 
   <!-- ── Start path ── -->
   <div class="field">
-    <label class="field-label" for="cf-start-path">Start path <span class="optional">(optional)</span></label>
+    <label class="field-label" for="cf-start-path">{t("connectionForm.startPath")} <span class="optional">{t("connectionForm.optional")}</span></label>
     <input id="cf-start-path" class="field-input" type="text" bind:value={startPath} placeholder="/" autocomplete="off" spellcheck="false" />
   </div>
 
   <!-- ── SSH-specific ── -->
   {#if isSSH}
     <div class="field-section">
-      <span class="section-label">SSH options</span>
+      <span class="section-label">{t("connectionForm.sshOptions")}</span>
       <div class="radio-group">
         <label class="radio-label">
           <input type="radio" bind:group={sshMode} value="sftp" />
-          SFTP <span class="radio-hint">— full file system access</span>
+          {t("connectionForm.sftp")} <span class="radio-hint">{t("connectionForm.sftpHint")}</span>
         </label>
         <label class="radio-label">
           <input type="radio" bind:group={sshMode} value="scp" />
-          SCP <span class="radio-hint">— transfer-only mode</span>
+          {t("connectionForm.scp")} <span class="radio-hint">{t("connectionForm.scpHint")}</span>
         </label>
       </div>
     </div>
@@ -258,30 +259,30 @@
   <!-- ── FTP/FTPS-specific ── -->
   {#if isFTP}
     <div class="field-section">
-      <span class="section-label">FTP options</span>
+      <span class="section-label">{t("connectionForm.ftpOptions")}</span>
       <div class="radio-group">
         <label class="radio-label">
           <input type="radio" bind:group={ftpMode} value="passive" />
-          Passive mode <span class="radio-hint">— recommended</span>
+          {t("connectionForm.passiveMode")} <span class="radio-hint">{t("connectionForm.passiveHint")}</span>
         </label>
         <label class="radio-label">
           <input type="radio" bind:group={ftpMode} value="active" />
-          Active mode
+          {t("connectionForm.activeMode")}
         </label>
       </div>
       {#if isFTPS}
         <div class="checkbox-group">
           <label class="checkbox-label">
             <input type="checkbox" bind:checked={ftpSecureImplicit} />
-            Implicit TLS (port 990) <span class="radio-hint">— instead of explicit STARTTLS</span>
+            {t("connectionForm.implicitTls")} <span class="radio-hint">{t("connectionForm.implicitTlsHint")}</span>
           </label>
           <label class="checkbox-label">
             <input type="checkbox" bind:checked={ftpAcceptInvalidCerts} />
-            Accept invalid certificates
+            {t("connectionForm.acceptInvalidCerts")}
           </label>
           <label class="checkbox-label">
             <input type="checkbox" bind:checked={ftpAcceptInvalidHostnames} />
-            Accept invalid hostnames
+            {t("connectionForm.acceptInvalidHostnames")}
           </label>
         </div>
       {/if}
@@ -290,19 +291,19 @@
 
   <!-- ── Actions ── -->
   <div class="form-actions">
-    <Button variant="ghost" onclick={onCancel} disabled={busy}>Cancel</Button>
+    <Button variant="ghost" onclick={onCancel} disabled={busy}>{t("connectionForm.cancel")}</Button>
     <Button variant="outline" onclick={handleTest} disabled={busy}>
       {#if isTesting}
-        <span class="spinner"></span> Testing…
+        <span class="spinner"></span> {t("connectionForm.testing")}
       {:else}
-        Test connection
+        {t("connectionForm.testConnection")}
       {/if}
     </Button>
     <Button variant="primary" type="submit" disabled={busy}>
       {#if isSaving}
-        <span class="spinner"></span> Saving…
+        <span class="spinner"></span> {t("connectionForm.saving")}
       {:else}
-        {profile ? "Save" : "Add connection"}
+        {profile ? t("connectionForm.save") : t("connectionForm.addConnection")}
       {/if}
     </Button>
   </div>

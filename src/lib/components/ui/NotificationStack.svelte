@@ -1,17 +1,10 @@
 <script lang="ts">
   import { app } from "../../stores/app.svelte.js";
-
-  const ICONS = {
-    success: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`,
-    error:   `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
-    info:    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
-  };
 </script>
 
 <div class="notif-stack" aria-live="polite" aria-label="Notifications">
   {#each app.notifications as n (n.id)}
     <div class="notif notif--{n.kind}" role="alert">
-      <span class="notif-icon" aria-hidden="true">{@html ICONS[n.kind]}</span>
       <span class="notif-text">{n.text}</span>
       <button
         class="notif-dismiss"
@@ -25,7 +18,7 @@
 <style>
   .notif-stack {
     position: fixed;
-    bottom: 16px;
+    top: 16px;
     right: 16px;
     z-index: 2000;
     display: flex;
@@ -46,31 +39,31 @@
     line-height: 1.4;
     pointer-events: auto;
     animation: fade-in 0.18s ease;
-    box-shadow: var(--shadow);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
   }
 
   .notif--success {
-    background: var(--accent-soft);
-    border-color: var(--accent-border);
+    background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
     color: var(--accent);
   }
 
   .notif--error {
-    background: var(--danger-soft);
-    border-color: var(--danger-border);
-    color: var(--danger);
+    background: color-mix(in srgb, var(--danger, #e5484d) 18%, var(--surface));
+    border-color: color-mix(in srgb, var(--danger, #e5484d) 40%, var(--line));
+    color: var(--danger, #e5484d);
+  }
+
+  .notif--warn {
+    background: color-mix(in srgb, #f59e0b 14%, var(--surface));
+    border-color: color-mix(in srgb, #f59e0b 40%, var(--line));
+    color: #92400e;
   }
 
   .notif--info {
-    background: var(--surface);
-    border-color: var(--line-strong);
+    background: color-mix(in srgb, var(--text) 8%, var(--surface));
+    border-color: var(--line-strong, var(--line));
     color: var(--text);
-  }
-
-  .notif-icon {
-    flex-shrink: 0;
-    margin-top: 1px;
-    display: flex;
   }
 
   .notif-text {
@@ -92,5 +85,10 @@
     margin-top: 1px;
 
     &:hover { opacity: 1; }
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
 </style>

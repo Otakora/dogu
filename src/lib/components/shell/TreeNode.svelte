@@ -1,27 +1,46 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { app } from "../../stores/app.svelte.js";
   import type { EntryDto } from "../../types/index.js";
   import TreeNode from "./TreeNode.svelte";
+  import { t } from "../../i18n/index.js";
+
+  export type TabHighlight = { path: string | null; color: string; isActive: boolean };
 
   type Props = {
     entry: EntryDto;
     depth?: number;
+    iconVariant?: "folder" | "remote";
+    tabHighlights?: TabHighlight[];
     onNavigate?: (path: string) => void;
+    onContextMenu?: (e: MouseEvent, entry: EntryDto) => void;
   };
 
-  let { entry, depth = 0, onNavigate }: Props = $props();
+  let { entry, depth = 0, iconVariant = "folder", tabHighlights = [], onNavigate, onContextMenu }: Props = $props();
 
   let expanded = $state(false);
   let children = $state<EntryDto[]>([]);
   let loading = $state(false);
   let loaded = $state(false);
 
-  const isActive = $derived(
-    app.currentPath === entry.path ||
-    (app.currentPath?.startsWith(entry.path + "/") ?? false) ||
-    (app.currentPath?.startsWith(entry.path + "\\") ?? false)
-  );
+  // Find best matching tab color for this node.
+  // Priority: exact match > ancestor match; active > inactive at same match type.
+  const highlight = $derived((() => {
+    let bestColor: string | null = null;
+    let bestScore = -1;
+    for (const tab of tabHighlights) {
+      if (!tab.path) continue;
+      const isExact = tab.path === entry.path;
+      const isAncestor = !isExact && (
+        tab.path.startsWith(entry.path + "/") ||
+        tab.path.startsWith(entry.path + "\\")
+      );
+      if (!isExact && !isAncestor) continue;
+      // Score: exact(3) > ancestor(0); active(+1) > inactive(+0)
+      const score = (isExact ? 3 : 0) + (tab.isActive ? 1 : 0);
+      if (score > bestScore) { bestScore = score; bestColor = tab.color; }
+    }
+    return bestColor;
+  })());
 
   const hasChildren = $derived(entry.hasDirectoryChildren);
 
@@ -46,24 +65,23 @@
 
   function navigate(e: MouseEvent) {
     e.stopPropagation();
-    if (onNavigate) {
-      onNavigate(entry.path);
-    } else {
-      app.navigate(entry.path);
-    }
+    onNavigate?.(entry.path);
   }
 </script>
 
 <div class="tree-node" style="--depth:{depth}">
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
     class="tree-row"
-    class:tree-row--active={isActive}
+    class:tree-row--highlighted={!!highlight}
+    style:--tab-color={highlight ?? "transparent"}
     role="treeitem"
-    aria-selected={isActive}
+    aria-selected={!!highlight}
     aria-expanded={hasChildren ? expanded : undefined}
     tabindex="0"
     onclick={navigate}
     onkeydown={(e) => e.key === "Enter" && navigate(e as unknown as MouseEvent)}
+    oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu?.(e, entry); }}
   >
     <span class="tree-indent"></span>
 
@@ -74,7 +92,7 @@
       class:tree-arrow--hidden={!hasChildren}
       onclick={toggle}
       tabindex="-1"
-      aria-label={expanded ? "Collapse" : "Expand"}
+      aria-label={expanded ? t("treeNode.collapse") : t("treeNode.expand")}
     >
       {#if loading}
         <span class="tree-spinner"></span>
@@ -87,9 +105,16 @@
 
     <!-- Icon -->
     <span class="tree-icon" aria-hidden="true">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" opacity="0.7">
-        <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
-      </svg>
+      {#if iconVariant === "remote" && depth === 0}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" opacity="0.85">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <path d="M8 21h8M12 17v4"/>
+        </svg>
+      {:else}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" opacity="0.7">
+          <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+        </svg>
+      {/if}
     </span>
 
     <span class="tree-label">{entry.name}</span>
@@ -99,14 +124,14 @@
   {#if expanded && children.length > 0}
     <div class="tree-children" role="group">
       {#each children as child (child.path)}
-        <TreeNode entry={child} depth={depth + 1} {onNavigate} />
+        <TreeNode entry={child} depth={depth + 1} {tabHighlights} {onNavigate} {onContextMenu} />
       {/each}
     </div>
   {/if}
 
   {#if expanded && loaded && children.length === 0}
     <div class="tree-empty" style="padding-left:calc({depth + 1} * 16px + 32px)">
-      Empty
+      {t("treeNode.empty")}
     </div>
   {/if}
 </div>
@@ -120,27 +145,32 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    height: 26px;
+    height: calc(26px * var(--tree-scale, 1));
     padding-left: calc(var(--depth, 0) * 14px + 4px);
     padding-right: 8px;
     border-radius: 5px;
     cursor: pointer;
     color: var(--text);
+    border-left: 2px solid transparent;
 
     &:hover {
       background: var(--surface-hover);
     }
   }
 
-  .tree-row--active {
-    background: var(--accent-soft);
-    color: var(--accent);
+  .tree-row--highlighted {
+    background: color-mix(in srgb, var(--tab-color) 13%, transparent);
+    color: var(--tab-color);
+    border-left-color: var(--tab-color);
 
-    .tree-icon { color: var(--accent); }
+    .tree-icon { color: var(--tab-color); }
+
+    &:hover {
+      background: color-mix(in srgb, var(--tab-color) 20%, transparent);
+    }
   }
 
   .tree-indent {
-    /* handled by padding-left above */
     display: none;
   }
 
@@ -183,7 +213,7 @@
   .tree-label {
     flex: 1;
     min-width: 0;
-    font-size: 13px;
+    font-size: calc(13px * var(--tree-scale, 1));
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -205,6 +235,4 @@
     padding-top: 2px;
     padding-bottom: 2px;
   }
-
-  /* .tree-children — depth handled by children's own padding-left */
 </style>

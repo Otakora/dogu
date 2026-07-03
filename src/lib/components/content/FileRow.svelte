@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from "../../stores/app.svelte.js";
   import type { EntryDto } from "../../types/index.js";
+  import { t } from "../../i18n/index.js";
 
   type Props = {
     entry: EntryDto;
@@ -14,33 +15,32 @@
 
   // ── Inline rename ────────────────────────────────────────
   const isRenaming = $derived(app.renaming?.path === entry.path);
-  let renameInput = $state<HTMLInputElement | undefined>(undefined);
 
-  $effect(() => {
-    if (isRenaming && renameInput) {
-      renameInput.focus();
-      // Select name without extension
-      const dot = app.renaming!.value.lastIndexOf(".");
-      if (dot > 0 && !entry.isDir) {
-        renameInput.setSelectionRange(0, dot);
-      } else {
-        renameInput.select();
-      }
-    }
-  });
+  // Svelte action — runs exactly once when the input mounts.
+  // No reactive reads, no $effect, no bind:value to the store.
+  // The input is uncontrolled: the DOM owns the value while editing.
+  function initRenameInput(node: HTMLInputElement) {
+    const initial = app.renaming?.value ?? entry.name;
+    node.value = initial;
+    node.focus();
+    const dot = initial.lastIndexOf(".");
+    if (dot > 0 && !entry.isDir) node.setSelectionRange(0, dot);
+    else node.select();
+  }
 
-  function commitRename(e?: Event) {
-    e?.stopPropagation();
-    const val = app.renaming?.value?.trim();
+  function commitRename(e: Event) {
+    // Guard: cancelRename() may have already been called (e.g. Escape triggers
+    // DOM removal which fires blur — we must not re-commit in that case).
+    if (!app.renaming) return;
+    const val = (e.currentTarget as HTMLInputElement).value.trim();
     if (!val || val === entry.name) { app.cancelRename(); return; }
-    // Dispatch event for Shell to handle
     document.dispatchEvent(new CustomEvent("dogu:rename-commit", {
       detail: { path: entry.path, newName: val }
     }));
   }
 
   function handleRenameKey(e: KeyboardEvent) {
-    if (e.key === "Enter") { e.preventDefault(); commitRename(); }
+    if (e.key === "Enter") { e.preventDefault(); commitRename(e); }
     if (e.key === "Escape") { e.preventDefault(); app.cancelRename(); }
     e.stopPropagation();
   }
@@ -51,6 +51,7 @@
   class="file-row"
   class:file-row--selected={isSelected}
   class:file-row--dir={entry.isDir}
+  data-path={entry.path}
   role="row"
   aria-selected={isSelected}
   tabindex="0"
@@ -74,32 +75,30 @@
     </span>
 
     {#if isRenaming}
-      <!-- Inline rename input -->
       <input
         class="file-rename-input"
         type="text"
-        bind:value={app.renaming!.value}
-        bind:this={renameInput}
+        use:initRenameInput
         onblur={commitRename}
         onkeydown={handleRenameKey}
         onclick={(e) => e.stopPropagation()}
         onmousedown={(e) => e.stopPropagation()}
-        aria-label="Rename"
+        aria-label={t("fileRow.rename")}
       />
     {:else}
       <span class="file-name">{entry.name}</span>
     {/if}
   </div>
 
-  <div class="file-col file-col--type" aria-label="Type">
-    {entry.isDir ? "Folder" : (entry.extension || "File")}
+  <div class="file-col file-col--type" aria-label={t("fileRow.type")}>
+    {entry.isDir ? t("fileRow.folder") : (entry.extension || t("fileRow.file"))}
   </div>
 
-  <div class="file-col file-col--size" aria-label="Size">
+  <div class="file-col file-col--size" aria-label={t("fileRow.size")}>
     {entry.isDir ? "—" : entry.sizeLabel}
   </div>
 
-  <div class="file-col file-col--modified" aria-label="Modified">
+  <div class="file-col file-col--modified" aria-label={t("fileRow.modified")}>
     {entry.modifiedLabel || "—"}
   </div>
 </div>
@@ -108,7 +107,7 @@
   .file-row {
     display: flex;
     align-items: center;
-    height: 28px;
+    height: calc(28px * var(--content-scale, 1));
     padding: 0 8px;
     border-radius: 4px;
     cursor: pointer;
@@ -136,18 +135,19 @@
     align-items: center;
     overflow: hidden;
     white-space: nowrap;
-    font-size: 13px;
+    font-size: calc(13px * var(--content-scale, 1));
   }
 
   .file-col--name {
-    flex: 1;
+    width: var(--col-name, 280px);
+    flex-shrink: 0;
     gap: 7px;
     min-width: 0;
   }
 
-  .file-col--type  { width: 80px; flex-shrink: 0; color: var(--text-muted); font-size: 12px; }
-  .file-col--size  { width: 90px; flex-shrink: 0; color: var(--text-muted); font-size: 12px; justify-content: flex-end; }
-  .file-col--modified { width: 140px; flex-shrink: 0; color: var(--text-muted); font-size: 12px; padding-left: 8px; }
+  .file-col--type  { width: var(--col-type, 80px); flex-shrink: 0; color: var(--text-muted); font-size: calc(12px * var(--content-scale, 1)); }
+  .file-col--size  { width: var(--col-size, 90px); flex-shrink: 0; color: var(--text-muted); font-size: calc(12px * var(--content-scale, 1)); justify-content: flex-end; }
+  .file-col--modified { width: var(--col-modified, 140px); flex-shrink: 0; color: var(--text-muted); font-size: calc(12px * var(--content-scale, 1)); padding-left: 8px; }
 
   .file-name {
     overflow: hidden;

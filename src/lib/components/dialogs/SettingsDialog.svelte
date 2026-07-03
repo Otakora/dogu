@@ -2,19 +2,21 @@
   import { app } from "../../stores/app.svelte.js";
   import Modal from "../ui/Modal.svelte";
   import Button from "../ui/Button.svelte";
+  import { t } from "../../i18n/index.js";
+  import type { Locale } from "../../types/index.js";
 </script>
 
 {#if app.settingsOpen}
-  <Modal title="Settings" width="440px" onclose={() => app.closeSettings()}>
+  <Modal title={t("settingsDialog.title")} width="440px" onclose={() => app.closeSettings()}>
     {#snippet children()}
       <div class="settings-body">
 
         <!-- Theme -->
         <div class="setting-group">
-          <div class="setting-label">Appearance</div>
+          <div class="setting-label">{t("settingsDialog.appearance")}</div>
           <div class="setting-row">
-            <span class="setting-name">Theme</span>
-            <div class="toggle-group" role="group" aria-label="Theme">
+            <span class="setting-name">{t("settingsDialog.theme")}</span>
+            <div class="toggle-group" role="group" aria-label={t("settingsDialog.theme")}>
               <button
                 class="toggle-btn"
                 class:toggle-btn--active={app.theme === "light"}
@@ -28,7 +30,7 @@
                   <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
                   <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
                 </svg>
-                Light
+                {t("settingsDialog.light")}
               </button>
               <button
                 class="toggle-btn"
@@ -39,18 +41,31 @@
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
                 </svg>
-                Dark
+                {t("settingsDialog.dark")}
               </button>
             </div>
           </div>
 
           <div class="setting-row">
-            <span class="setting-name">Font scale</span>
+            <span class="setting-name">{t("settingsDialog.language")}</span>
+            <select
+              class="select-input"
+              value={app.settings.locale}
+              onchange={(e) => app.updateSettings({ locale: (e.target as HTMLSelectElement).value as Locale })}
+              aria-label={t("settingsDialog.language")}
+            >
+              <option value="en">English</option>
+              <option value="es">Español</option>
+            </select>
+          </div>
+
+          <div class="setting-row">
+            <span class="setting-name">{t("settingsDialog.fontScale")}</span>
             <div class="setting-row-right">
               <input
                 type="range"
-                min="0.8"
-                max="1.3"
+                min="0.75"
+                max="1.5"
                 step="0.05"
                 value={app.settings.fontScale}
                 oninput={(e) => {
@@ -59,56 +74,56 @@
                   document.documentElement.style.setProperty("--app-font-scale", String(v));
                 }}
                 class="range-input"
-                aria-label="Font scale"
+                aria-label={t("settingsDialog.fontScale")}
               />
               <span class="range-val">{Math.round(app.settings.fontScale * 100)}%</span>
             </div>
           </div>
 
           <div class="setting-row">
-            <span class="setting-name">Compact UI</span>
+            <span class="setting-name">{t("settingsDialog.compactUi")}</span>
             <input
               type="checkbox"
               checked={app.settings.compactUi}
               onchange={(e) => app.updateSettings({ compactUi: (e.target as HTMLInputElement).checked })}
               class="checkbox"
-              aria-label="Compact UI"
+              aria-label={t("settingsDialog.compactUi")}
             />
           </div>
         </div>
 
         <!-- Files -->
         <div class="setting-group">
-          <div class="setting-label">File operations</div>
+          <div class="setting-label">{t("settingsDialog.fileOperations")}</div>
           <div class="setting-row">
-            <span class="setting-name">Confirm before delete</span>
+            <span class="setting-name">{t("settingsDialog.confirmBeforeDelete")}</span>
             <input
               type="checkbox"
               checked={app.settings.confirmDelete}
               onchange={(e) => app.updateSettings({ confirmDelete: (e.target as HTMLInputElement).checked })}
               class="checkbox"
-              aria-label="Confirm delete"
+              aria-label={t("settingsDialog.confirmBeforeDelete")}
             />
           </div>
           <div class="setting-row">
-            <span class="setting-name">Default view</span>
+            <span class="setting-name">{t("settingsDialog.defaultView")}</span>
             <select
               class="select-input"
               value={app.settings.defaultViewMode}
               onchange={(e) => app.updateSettings({ defaultViewMode: (e.target as HTMLSelectElement).value as "list" | "grid" })}
-              aria-label="Default view mode"
+              aria-label={t("settingsDialog.defaultView")}
             >
-              <option value="list">List</option>
-              <option value="grid">Grid</option>
+              <option value="list">{t("settingsDialog.list")}</option>
+              <option value="grid">{t("settingsDialog.grid")}</option>
             </select>
           </div>
         </div>
 
         <!-- Weight / summary -->
         <div class="setting-group">
-          <div class="setting-label">Properties</div>
+          <div class="setting-label">{t("settingsDialog.properties")}</div>
           <div class="setting-row">
-            <span class="setting-name">Max depth for size calculation</span>
+            <span class="setting-name">{t("settingsDialog.maxDepth")}</span>
             <input
               type="number"
               min="1"
@@ -116,15 +131,34 @@
               class="number-input"
               value={app.settings.selectionWeightMaxDepth}
               oninput={(e) => app.updateSettings({ selectionWeightMaxDepth: parseInt((e.target as HTMLInputElement).value) || 5 })}
-              aria-label="Max depth"
+              aria-label={t("settingsDialog.maxDepth")}
             />
+          </div>
+        </div>
+
+        <!-- CHD -->
+        <div class="setting-group">
+          <div class="setting-label">{t("settingsDialog.chdConversion")}</div>
+          <div class="setting-row">
+            <span class="setting-name">{t("settingsDialog.chdScanDepth")}</span>
+            <div class="setting-row-right">
+              <input
+                type="number"
+                min="1"
+                max="10"
+                class="number-input"
+                value={app.settings.chdScanDepth}
+                oninput={(e) => app.updateSettings({ chdScanDepth: Math.min(10, Math.max(1, parseInt((e.target as HTMLInputElement).value) || 3)) })}
+                aria-label={t("settingsDialog.chdScanDepth")}
+              />
+            </div>
           </div>
         </div>
       </div>
     {/snippet}
 
     {#snippet footer()}
-      <Button variant="primary" onclick={() => app.closeSettings()}>Done</Button>
+      <Button variant="primary" onclick={() => app.closeSettings()}>{t("settingsDialog.done")}</Button>
     {/snippet}
   </Modal>
 {/if}

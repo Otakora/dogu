@@ -1,6 +1,7 @@
 <script lang="ts">
   import Modal from "../ui/Modal.svelte";
   import Button from "../ui/Button.svelte";
+  import { t } from "../../i18n/index.js";
 
   type Props = {
     fingerprint: string;
@@ -11,32 +12,20 @@
 
   let { fingerprint, profileLabel, onTrust, onReject }: Props = $props();
 
-  // Format SHA256 fingerprint as colon-separated hex pairs for readability
-  const formatted = $derived(() => {
-    const clean = fingerprint.replace(/^SHA256:/i, "").replace(/[^a-zA-Z0-9+/=]/g, "");
-    // If it looks like base64, display as-is with the prefix; otherwise format hex
-    if (fingerprint.startsWith("SHA256:")) return fingerprint;
-    // Hex: group into pairs separated by colons
-    const hex = clean.toLowerCase();
-    return hex.match(/.{1,2}/g)?.join(":") ?? fingerprint;
-  });
+  let copied = $state(false);
 
-  // Split into rows of 8 pairs for visual alignment
-  const fingerprintRows = $derived(() => {
-    const pairs = formatted().replace(/^SHA256:/i, "").split(":").filter(Boolean);
-    const rows: string[][] = [];
-    for (let i = 0; i < pairs.length; i += 8) {
-      rows.push(pairs.slice(i, i + 8));
-    }
-    return rows;
-  });
+  async function copyFingerprint() {
+    await navigator.clipboard.writeText(fingerprint);
+    copied = true;
+    setTimeout(() => { copied = false; }, 2000);
+  }
 </script>
 
-<Modal title="Unknown host key" width="500px" onclose={onReject}>
+<Modal title={t("fingerprintDialog.title")} width="480px" onclose={onReject}>
   {#snippet children()}
     <div class="fp-body">
       <div class="fp-icon" aria-hidden="true">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <path stroke-linecap="round" stroke-linejoin="round"
             d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
           />
@@ -44,33 +33,34 @@
       </div>
       <div class="fp-content">
         <p class="fp-intro">
-          The authenticity of host <strong>{profileLabel}</strong> cannot be established.
+          {@html t("fingerprintDialog.intro", { host: `<strong>${profileLabel}</strong>` })}
         </p>
-        <p class="fp-sub">SSH host key fingerprint:</p>
+        <p class="fp-sub">{t("fingerprintDialog.subLabel")}</p>
         <div class="fp-box">
-          {#if fingerprintRows().length > 0}
-            {#each fingerprintRows() as row}
-              <div class="fp-row">
-                {#each row as pair, i}
-                  <span class="fp-pair" class:fp-pair--sep={i > 0}>{pair}</span>
-                {/each}
-              </div>
-            {/each}
-          {:else}
-            <span class="fp-raw">{fingerprint}</span>
-          {/if}
+          <code class="fp-text">{fingerprint}</code>
+          <button class="fp-copy" onclick={copyFingerprint} title={t("fingerprintDialog.copyFingerprint")} aria-label={t("fingerprintDialog.copyFingerprint")}>
+            {#if copied}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            {:else}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+            {/if}
+          </button>
         </div>
         <p class="fp-warn">
-          If you trust this fingerprint, future connections to this host will be verified
-          against it. Reject if you did not expect to connect to this server.
+          {t("fingerprintDialog.warning")}
         </p>
       </div>
     </div>
   {/snippet}
 
   {#snippet footer()}
-    <Button variant="ghost" onclick={onReject}>Reject</Button>
-    <Button variant="primary" onclick={onTrust}>Trust &amp; Connect</Button>
+    <Button variant="ghost" onclick={onReject}>{t("fingerprintDialog.reject")}</Button>
+    <Button variant="primary" onclick={onTrust}>{t("fingerprintDialog.trustAndConnect")}</Button>
   {/snippet}
 </Modal>
 
@@ -101,43 +91,55 @@
 
   .fp-sub {
     margin: 0 0 6px;
-    font-size: 12px;
+    font-size: 11px;
+    font-weight: 600;
     color: var(--text-muted);
-    font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
   }
 
   .fp-box {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
     background: var(--surface-alt);
     border: 1px solid var(--line);
     border-radius: 6px;
-    padding: 10px 12px;
+    padding: 10px 10px 10px 12px;
     margin-bottom: 12px;
+  }
+
+  .fp-text {
+    flex: 1;
+    min-width: 0;
     font-family: var(--font-mono);
     font-size: 12px;
-    line-height: 1.7;
-    color: var(--text);
-  }
-
-  .fp-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0;
-  }
-
-  .fp-pair {
+    line-height: 1.6;
     color: var(--accent);
-  }
-
-  .fp-pair--sep::before {
-    content: ":";
-    color: var(--text-muted);
-  }
-
-  .fp-raw {
     word-break: break-all;
-    color: var(--accent);
+    user-select: all;
+    white-space: pre-wrap;
+  }
+
+  .fp-copy {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: 1px solid var(--line-strong);
+    border-radius: 5px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+    margin-top: 1px;
+
+    &:hover {
+      background: var(--surface-hover);
+      color: var(--text);
+    }
   }
 
   .fp-warn {

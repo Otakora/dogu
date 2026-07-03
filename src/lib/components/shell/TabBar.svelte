@@ -10,11 +10,11 @@
 
   let contextMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
-  // ── Drag-to-reorder ──────────────────────────────────────
+  // ── Drag-to-reorder / drag-to-other-pane ─────────────────────
   type DragState = { fromIdx: number; startX: number; active: boolean };
   let drag: DragState | null = null;
   let draggedIdx    = $state<number | null>(null);
-  let dropInsertIdx = $state<number | null>(null);
+  let dropInsertIdx = $state<number | null>(null); // insert position within THIS pane
 
   let tabListEl = $state<HTMLElement | undefined>();
 
@@ -33,20 +33,57 @@
       draggedIdx = drag.fromIdx;
       document.body.style.cursor = "grabbing";
     }
-    const tabEls = tabListEl?.querySelectorAll<HTMLElement>(".tab");
-    if (!tabEls) return;
-    let insert = tabEls.length;
-    for (let i = 0; i < tabEls.length; i++) {
-      const rect = tabEls[i].getBoundingClientRect();
-      if (e.clientX < rect.left + rect.width / 2) { insert = i; break; }
+
+    // Which tab-bar is the pointer over?
+    const underEl = document.elementFromPoint(e.clientX, e.clientY);
+    const targetBar = underEl?.closest<HTMLElement>("[data-pane-idx]");
+    const targetPaneIdx = targetBar ? parseInt(targetBar.dataset.paneIdx ?? "-1") : -1;
+
+    if (targetPaneIdx === pane.paneIdx || targetPaneIdx === -1) {
+      // ── Within own tab bar ──
+      if (app.crossPaneDrag !== null) app.setCrossPaneDrag(null);
+
+      const tabEls = tabListEl?.querySelectorAll<HTMLElement>(".tab");
+      if (!tabEls) return;
+      let insert = tabEls.length;
+      for (let i = 0; i < tabEls.length; i++) {
+        const rect = tabEls[i].getBoundingClientRect();
+        if (e.clientX < rect.left + rect.width / 2) { insert = i; break; }
+      }
+      dropInsertIdx = insert;
+    } else {
+      // ── Crossed into another pane's tab bar ──
+      dropInsertIdx = null;
+
+      const foreignTabEls = targetBar!.querySelectorAll<HTMLElement>(".tab");
+      let insertIdx = foreignTabEls.length;
+      for (let i = 0; i < foreignTabEls.length; i++) {
+        const rect = foreignTabEls[i].getBoundingClientRect();
+        if (e.clientX < rect.left + rect.width / 2) { insertIdx = i; break; }
+      }
+
+      app.setCrossPaneDrag({
+        fromPaneIdx: pane.paneIdx,
+        fromTabIdx: drag.fromIdx,
+        toPaneIdx: targetPaneIdx,
+        toInsertIdx: insertIdx,
+      });
     }
-    dropInsertIdx = insert;
   }
 
   function onWindowMouseUp() {
-    if (drag?.active && dropInsertIdx !== null) {
-      pane.reorderTabs(drag.fromIdx, dropInsertIdx);
+    if (drag?.active) {
+      const cpd = app.crossPaneDrag;
+      if (cpd && cpd.fromPaneIdx === pane.paneIdx) {
+        // Cross-pane drop
+        app.moveTabToPane(cpd.fromPaneIdx, cpd.fromTabIdx, cpd.toPaneIdx, cpd.toInsertIdx);
+      } else if (dropInsertIdx !== null) {
+        // Same-pane reorder
+        pane.reorderTabs(drag.fromIdx, dropInsertIdx);
+      }
     }
+
+    app.setCrossPaneDrag(null);
     drag = null;
     draggedIdx = null;
     dropInsertIdx = null;
@@ -59,9 +96,17 @@
     window.removeEventListener("mousemove", onWindowMouseMove);
     window.removeEventListener("mouseup", onWindowMouseUp);
     document.body.style.cursor = "";
+    app.setCrossPaneDrag(null);
   });
 
-  // ── Tab helpers ───────────────────────────────────────────
+  // ── Foreign drop indicator (driven by source pane via store) ──
+  const foreignDrop = $derived(
+    app.isSplit && app.crossPaneDrag?.toPaneIdx === pane.paneIdx
+      ? app.crossPaneDrag
+      : null
+  );
+
+  // ── Tab helpers ────────────────────────────────────────────────
   function tabTitle(path: string | null): string {
     if (!path) return t("tabs.newTab");
     return path.split(/[/\\]/).filter(Boolean).pop() ?? t("tabs.newTab");
@@ -118,7 +163,6 @@
         onclick: () => pane.addTab(tab.currentPath ?? undefined),
       });
 
-      // "Open in other pane" when split
       if (app.isSplit) {
         const otherPane = app.getPaneView(pane.paneIdx === 0 ? 1 : 0);
         items.push({ kind: "separator" });
@@ -128,6 +172,14 @@
           icon: ICON_SPLIT,
           onclick: () => otherPane.addTab(tab.currentPath ?? undefined),
         });
+        if (pane.tabs.length > 1) {
+          items.push({
+            kind: "action",
+            label: t("tabs.moveToOtherPane"),
+            icon: ICON_MOVE_PANE,
+            onclick: () => app.moveTabToPane(pane.paneIdx, idx, pane.paneIdx === 0 ? 1 : 0, otherPane.tabs.length),
+          });
+        }
       }
 
       items.push({ kind: "separator" });
@@ -151,11 +203,18 @@
   const ICON_NEW_TAB      = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h6"/></svg>`;
   const ICON_COPY         = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
   const ICON_SPLIT        = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>`;
+  const ICON_MOVE_PANE    = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/><polyline points="16 8 21 12 16 16"/></svg>`;
 </script>
 
-<div class="tab-bar" role="tablist" aria-label="File browser tabs">
+<div
+  class="tab-bar"
+  class:tab-bar--drop-target={foreignDrop !== null}
+  data-pane-idx={pane.paneIdx}
+  role="tablist"
+  aria-label="File browser tabs"
+>
   <div class="tab-list" bind:this={tabListEl}>
-    {#if dropInsertIdx === 0}
+    {#if dropInsertIdx === 0 || foreignDrop?.toInsertIdx === 0}
       <div class="drop-indicator" aria-hidden="true"></div>
     {/if}
 
@@ -192,7 +251,7 @@
         {/if}
       </div>
 
-      {#if dropInsertIdx === i + 1}
+      {#if dropInsertIdx === i + 1 || foreignDrop?.toInsertIdx === i + 1}
         <div class="drop-indicator" aria-hidden="true"></div>
       {/if}
     {/each}
@@ -229,6 +288,12 @@
     padding: 0 4px 0 0;
     flex-shrink: 0;
     overflow: hidden;
+    transition: box-shadow 0.15s;
+  }
+
+  /* Visual hint when a foreign tab is being dragged over this bar */
+  .tab-bar--drop-target {
+    box-shadow: inset 0 0 0 2px var(--accent);
   }
 
   .tab-list {
@@ -288,6 +353,7 @@
 
     &.dragging {
       opacity: 0.4;
+      cursor: grabbing;
     }
   }
 

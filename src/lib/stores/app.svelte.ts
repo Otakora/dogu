@@ -64,6 +64,13 @@ export type TabHighlight = {
   isActive: boolean;
 };
 
+export type CrossPaneDragState = {
+  fromPaneIdx: number;
+  fromTabIdx: number;
+  toPaneIdx: number;
+  toInsertIdx: number;
+} | null;
+
 // PaneView: pane-scoped interface used by Toolbar, TabBar, ContentPanel via Svelte context
 export type PaneView = {
   readonly paneIdx: number;
@@ -424,6 +431,9 @@ function createAppState() {
   let queueRunStats = $state<QueueRunStats | null>(null);
   const queueConflicts = $derived(detectConflicts(opQueue));
 
+  // Cross-pane tab drag
+  let crossPaneDrag = $state<CrossPaneDragState>(null);
+
   // Notifications
   let notifications = $state<NotificationEntry[]>([]);
 
@@ -769,6 +779,26 @@ function createAppState() {
     },
 
     getPaneView,
+
+    // ── Cross-pane tab drag ───────────────────────────────────
+    get crossPaneDrag() { return crossPaneDrag; },
+    setCrossPaneDrag(s: CrossPaneDragState) { crossPaneDrag = s; },
+
+    moveTabToPane(fromPaneIdx: number, fromTabIdx: number, toPaneIdx: number, toInsertIdx: number) {
+      const fromPane = panes[fromPaneIdx];
+      const toPane   = panes[toPaneIdx];
+      if (!fromPane || !toPane || fromPaneIdx === toPaneIdx) return;
+      if (fromPane.tabs.length <= 1) return; // can't leave a pane empty
+      const moved     = fromPane.tabs[fromTabIdx];
+      const newFrom   = fromPane.tabs.filter((_, i) => i !== fromTabIdx);
+      fromPane.tabs   = newFrom;
+      if (fromPane.activeTabIdx >= newFrom.length)      fromPane.activeTabIdx = newFrom.length - 1;
+      else if (fromPane.activeTabIdx > fromTabIdx)      fromPane.activeTabIdx -= 1;
+      const at        = Math.min(toInsertIdx, toPane.tabs.length);
+      toPane.tabs     = [...toPane.tabs.slice(0, at), moved, ...toPane.tabs.slice(at)];
+      toPane.activeTabIdx = at;
+      persistPanes(panes, focusedPaneIdx);
+    },
 
     // ── Tabs (focused pane) ──────────────────────────────────
     get tabs() { return fp().tabs; },

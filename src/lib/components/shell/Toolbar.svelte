@@ -294,18 +294,16 @@
         </svg>
       </button>
     </div>
-    {#if pane.paneIdx === 0}
-      <button
-        class="tb-btn"
-        class:tb-btn--active={app.isSplit}
-        onclick={() => app.isSplit ? app.closeSecondPane() : app.addPane()}
-        title={app.isSplit ? t("toolbar.closeSplit") : t("toolbar.splitView")}
-        aria-label={app.isSplit ? t("toolbar.closeSplit") : t("toolbar.splitView")}
-        aria-pressed={app.isSplit}
-      >
-        {@html ICON_SPLIT}
-      </button>
-    {/if}
+    <button
+      class="tb-btn"
+      class:tb-btn--active={app.isSplit}
+      onclick={() => app.isSplit ? app.closeSecondPane() : app.addPane()}
+      title={app.isSplit ? t("toolbar.closeSplit") : t("toolbar.splitView")}
+      aria-label={app.isSplit ? t("toolbar.closeSplit") : t("toolbar.splitView")}
+      aria-pressed={app.isSplit}
+    >
+      {@html ICON_SPLIT}
+    </button>
   </div>
 {/snippet}
 

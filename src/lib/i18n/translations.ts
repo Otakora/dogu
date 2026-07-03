@@ -380,6 +380,7 @@ const en = {
   "tabs.duplicateTab": "Duplicate tab",
   "tabs.openInNewTab": "Open in new tab",
   "tabs.openInOtherPane": "Open in other pane",
+  "tabs.moveToOtherPane": "Move to other pane",
   "tabs.closeOthers": "Close other tabs",
   "tabs.copyPath": "Copy path",
 
@@ -874,6 +875,7 @@ const es: Record<TranslationKey, string> = {
   "tabs.duplicateTab": "Duplicar pestaña",
   "tabs.openInNewTab": "Abrir en nueva pestaña",
   "tabs.openInOtherPane": "Abrir en el otro panel",
+  "tabs.moveToOtherPane": "Mover al otro panel",
   "tabs.closeOthers": "Cerrar las demás pestañas",
   "tabs.copyPath": "Copiar ruta",
 

@@ -86,6 +86,7 @@ sudo apt install -y \
   curl \
   wget \
   file \
+  libfuse2t64 \
   libsmbclient \
   libsmbclient-dev \
   pkg-config \
@@ -97,7 +98,7 @@ sudo apt install -y \
   patchelf
 ```
 
-`libsmbclient` y `libsmbclient-dev` son necesarios aqui porque el backend SMB enlaza contra la libreria del sistema en Linux. El resto de paquetes cubre el toolchain habitual de Tauri para GTK/WebKit y el empaquetado AppImage.
+`libfuse2t64` permite ejecutar `linuxdeploy` y sus plugins AppImage en Ubuntu 24.04+, que es lo que usa Tauri durante el bundle AppImage. `libsmbclient` y `libsmbclient-dev` son necesarios porque el backend SMB enlaza contra la libreria del sistema en Linux. El resto de paquetes cubre el toolchain habitual de Tauri para GTK/WebKit y el empaquetado AppImage.
 
 ---
 

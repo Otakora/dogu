@@ -75,6 +75,7 @@ jobs:
             curl \
             wget \
             file \
+            libfuse2t64 \
             libsmbclient \
             libsmbclient-dev \
             pkg-config \

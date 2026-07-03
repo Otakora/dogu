@@ -18,7 +18,19 @@
     VolumeDto,
     KnownFoldersDto,
     QueuedOp,
+    ChdSourceDto,
+    ExtractionPreviewRow,
   } from "../../types/index.js";
+  import {
+    predictCopyMove,
+    predictCompress,
+    predictChdConvert,
+    predictChdRestore,
+    buildGhost,
+    normalizePath,
+    basenameOf,
+    dirnameOf,
+  } from "../../utils/ghosts.js";
 
   import Sidebar from "./Sidebar.svelte";
   import Pane from "./Pane.svelte";
@@ -263,6 +275,8 @@
       sources: [],
       destinations: [],
       deletes: paths,
+      produces: [],
+      dependsOn: [],
       execute: () => executeDelete(paths),
     };
   }
@@ -304,13 +318,16 @@
 
     if (isCut) app.setClipboard(null);
 
+    const opId = newQueueId();
     enqueueOrRun({
-      id: newQueueId(),
+      id: opId,
       title: isCut ? t("shell.moving") : t("shell.copying"),
       kind: isCut ? 'move' : 'copy',
       sources: paths,
       destinations: [dest],
       deletes: isCut ? paths : [],
+      produces: predictCopyMove(paths, dest, opId),
+      dependsOn: [],
       execute: () => executePaste(paths, dest, isCut),
     });
   }
@@ -339,7 +356,7 @@
       destinationMode: "same", destinationPath: null,
       deleteArchives: false, overwrite: false,
     };
-    enqueueOrRun(buildExtractOp(archives, opts));
+    enqueueExtract(archives, opts);
   }
 
   function handleExtractToFolder(archives: string[]) {
@@ -348,7 +365,7 @@
       destinationMode: "same", destinationPath: null,
       deleteArchives: false, overwrite: false,
     };
-    enqueueOrRun(buildExtractOp(archives, opts));
+    enqueueExtract(archives, opts);
   }
 
   function handleExtractTo(paths: string[]) {
@@ -366,8 +383,45 @@
       sources: archives,
       destinations,
       deletes: opts.deleteArchives ? archives : [],
+      produces: [],
+      dependsOn: [],
       execute: () => executeExtraction(archives, opts),
     };
+  }
+
+  /** True when `path` is currently a ghost output of some queued op. */
+  function isGhostPath(path: string): boolean {
+    const np = normalizePath(path);
+    return app.queueGhosts.some(g => normalizePath(g.path) === np);
+  }
+
+  /**
+   * Enqueues (or runs) an extraction. When queueing, the archive's top-level
+   * contents are predicted via the backend preview so downstream operations can
+   * target the extracted files. Prediction is skipped for remote archives (not
+   * previewable without downloading) and for ghost archives (don't exist yet).
+   */
+  async function enqueueExtract(archives: string[], opts: ExtractionOptionsPayload) {
+    const op = buildExtractOp(archives, opts);
+    if (!app.queueMode) { op.execute(); return; }
+
+    const previewable = archives.filter(a => !isGhostPath(a) && !a.startsWith("remote://"));
+    if (previewable.length > 0) {
+      try {
+        const rows = await invoke<ExtractionPreviewRow[]>("build_extraction_preview", {
+          archives: previewable, options: opts,
+        });
+        op.produces = rows.flatMap(r =>
+          r.entries
+            .filter(e => e.destinationPath)
+            .map(e => buildGhost(e.destinationPath, e.isDir, op.id, false)),
+        );
+      } catch {
+        // Leave produces empty if the preview fails — the op still runs fine.
+      }
+    }
+    app.addToQueue(op);
+    app.notify("info", t("queue.operationQueued"));
   }
 
   async function executeExtraction(archives: string[], opts: ExtractionOptionsPayload): Promise<void> {
@@ -394,9 +448,61 @@
   }
 
   // ── CHD ───────────────────────────────────────────────────
+  const CD_GHOST_EXTS = new Set(["cue", "gdi", "toc"]);
+  const DVD_GHOST_EXTS = new Set(["iso"]);
+
+  function emptyAnalysis(): SelectionAnalysisDto {
+    return {
+      archives: [], chdSources: [], restorableChds: [],
+      hasDirectories: false, hasFiles: false, uniqueExtensions: [],
+      chdMenuLabel: null, chdRestoreMenuLabel: null,
+      hasRemoteDirectories: false, orphanBins: [],
+    };
+  }
+
+  /**
+   * Builds a CHD analysis for ghost sources without touching disk. A ghost's
+   * companion files (e.g. the .bin next to a .cue) are also ghosts and will
+   * exist by the time the conversion runs, so nothing is reported missing.
+   */
+  function synthesizeGhostChdAnalysis(ghostPaths: string[]): Pick<SelectionAnalysisDto, "chdSources" | "restorableChds"> {
+    const chdSources: ChdSourceDto[] = [];
+    const restorableChds: string[] = [];
+    for (const p of ghostPaths) {
+      const ext = (basenameOf(p).split(".").pop() ?? "").toLowerCase();
+      if (ext === "chd") { restorableChds.push(p); continue; }
+      const isDvd = DVD_GHOST_EXTS.has(ext);
+      const isCd = CD_GHOST_EXTS.has(ext);
+      if (!isCd && !isDvd) continue; // not a directly convertible disc image
+      chdSources.push({
+        sourcePath: p,
+        containerDir: dirnameOf(p),
+        command: isDvd ? "createdvd" : "createcd",
+        displayExtensions: [`.${ext}`],
+        requiredPaths: [p],
+        missingFiles: [],
+      });
+    }
+    return { chdSources, restorableChds };
+  }
+
   export async function openChdDialog(paths: string[]) {
+    const ghostPaths = paths.filter(isGhostPath);
+    const realPaths = paths.filter(p => !isGhostPath(p));
     try {
-      const analysis = await invoke<SelectionAnalysisDto>("scan_selection", { paths, maxDepth: app.settings.chdScanDepth });
+      let analysis = realPaths.length > 0
+        ? await invoke<SelectionAnalysisDto>("scan_selection", { paths: realPaths, maxDepth: app.settings.chdScanDepth })
+        : emptyAnalysis();
+
+      if (ghostPaths.length > 0) {
+        const synth = synthesizeGhostChdAnalysis(ghostPaths);
+        analysis = {
+          ...analysis,
+          chdSources: [...analysis.chdSources, ...synth.chdSources],
+          restorableChds: [...analysis.restorableChds, ...synth.restorableChds],
+        };
+      }
+
       if (analysis.chdSources.length === 0 && analysis.restorableChds.length === 0) {
         app.notify("info", t("shell.noChdCompatible"));
         return;
@@ -409,13 +515,16 @@
   }
 
   function buildConvertChdOp(paths: string[], opts: ChdConversionOptionsPayload): QueuedOp {
+    const opId = newQueueId();
     return {
-      id: newQueueId(),
+      id: opId,
       title: t("shell.convertingToChd"),
       kind: 'chd-convert',
       sources: paths,
       destinations: paths.map(p => parentDir(p)),
       deletes: opts.deleteOriginals ? paths : [],
+      produces: predictChdConvert(paths, opts, opId),
+      dependsOn: [],
       execute: () => executeConvertChd(paths, opts),
     };
   }
@@ -440,13 +549,16 @@
     const destinations = opts.destinationPath
       ? [opts.destinationPath]
       : paths.map(p => parentDir(p));
+    const opId = newQueueId();
     return {
-      id: newQueueId(),
+      id: opId,
       title: t("shell.restoringFromChd"),
       kind: 'chd-restore',
       sources: paths,
       destinations,
       deletes: opts.deleteChd ? paths : [],
+      produces: predictChdRestore(paths, opts, opId),
+      dependsOn: [],
       execute: () => executeRestoreChd(paths, opts),
     };
   }
@@ -492,13 +604,18 @@
     const destinations = opts.destinationPath
       ? [opts.destinationPath]
       : sources.map(p => parentDir(p));
+    const opId = newQueueId();
+    // "Same folder as source" places the archive alongside the sources.
+    const archiveDir = opts.destinationPath ?? opts.remoteDestination ?? dirnameOf(sources[0] ?? "");
     return {
-      id: newQueueId(),
+      id: opId,
       title: t("shell.compressing"),
       kind: 'compress',
       sources,
       destinations,
       deletes: opts.deleteOriginals ? sources : [],
+      produces: predictCompress(opts, archiveDir, opId),
+      dependsOn: [],
       execute: () => executeCompress(sources, opts),
     };
   }
@@ -614,7 +731,7 @@
     archives={extractionState.archives}
     onclose={() => (extractionState = null)}
     onExtract={(archives, opts) => {
-      enqueueOrRun(buildExtractOp(archives, opts));
+      enqueueExtract(archives, opts);
       extractionState = null;
     }}
   />

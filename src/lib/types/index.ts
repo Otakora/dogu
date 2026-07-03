@@ -12,6 +12,11 @@ export type EntryDto = {
   locationKind: string;
   displayPath: string;
   rootLabel: string | null;
+  /** Ghost overlay markers — set only for predicted (not-yet-existing) entries. */
+  isGhost?: boolean;
+  ghostOpId?: string;
+  /** True when the prediction is only approximate (e.g. CHD restore output). */
+  ghostApproximate?: boolean;
 };
 
 export type ConnectionProfileDto = {
@@ -413,6 +418,28 @@ export type M3uGenerateResultDto = {
 
 export type QueuedOpKind = 'copy' | 'move' | 'delete' | 'extract' | 'compress' | 'chd-convert' | 'chd-restore';
 
+/**
+ * A predicted file/folder that a queued operation will create once it runs.
+ * For deterministic operations the `path` is exactly where the real file will
+ * land, so a later operation can target it directly. For approximate outputs
+ * (CHD restore) the path is a best guess and is resolved against reality at
+ * execution time.
+ */
+export type GhostEntry = {
+  /** Predicted concrete path (equals the real path once produced, for deterministic ops). */
+  path: string;
+  name: string;
+  isDir: boolean;
+  /** Parent directory of `path`, used to place the ghost in the explorer overlay. */
+  parentDir: string;
+  /** Lower-case extension without the dot ('' for directories). */
+  format: string;
+  /** True when the exact name/format/type isn't guaranteed until the op runs. */
+  approximate: boolean;
+  /** Id of the queued op that will produce this entry. */
+  producedByOpId: string;
+};
+
 export type QueuedOp = {
   id: string;
   title: string;
@@ -420,6 +447,10 @@ export type QueuedOp = {
   sources: string[];
   destinations: string[];
   deletes: string[];
+  /** Files/folders this op will create (ghost outputs). */
+  produces: GhostEntry[];
+  /** Ids of queued ops whose ghost outputs this op consumes as input. */
+  dependsOn: string[];
   execute: () => Promise<void>;
 };
 

@@ -9,6 +9,7 @@
   import type { MenuItem } from "../ui/ContextMenu.svelte";
   import { t, tn } from "../../i18n/index.js";
   import { openTerminalAt, openRemoteTerminalAt } from "../../utils/terminal.js";
+  import { ghostToEntry, normalizePath } from "../../utils/ghosts.js";
 
   const pane = getContext<PaneView>("pane");
 
@@ -191,8 +192,32 @@
     window.removeEventListener("mouseup", onColResizeEnd);
   });
 
+  // ── Ghost overlay ────────────────────────────────────────
+  // Predicted outputs of queued operations that will land in this folder.
+  // Hidden while searching (search results come straight from the backend).
+  // Ghosts whose path collides with a real entry (or another ghost) are dropped
+  // so the list never renders duplicate keys.
+  const ghostEntries = $derived.by(() => {
+    if (pane.isSearching) return [];
+    const seen = new Set(pane.entries.map((e) => normalizePath(e.path)));
+    const result: EntryDto[] = [];
+    for (const g of app.ghostsForDir(pane.currentPath)) {
+      const key = normalizePath(g.path);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(ghostToEntry(g));
+    }
+    return result;
+  });
+  const combinedEntries = $derived([...pane.entries, ...ghostEntries]);
+
+  /** Looks up a display entry (real or ghost) by path. */
+  function entryOf(path: string): EntryDto | undefined {
+    return combinedEntries.find(en => en.path === path);
+  }
+
   // ── Sorted entries ───────────────────────────────────────
-  const sorted = $derived(sortEntries(pane.entries, pane.sortKey, pane.sortDir));
+  const sorted = $derived(sortEntries(combinedEntries, pane.sortKey, pane.sortDir));
 
   // ── Quick filter ──────────────────────────────────────────
   let quickFilter = $state("");
@@ -286,7 +311,10 @@
         if (contentBodyEl) contentBodyEl.scrollTop = pane.activeTab?.scrollTop ?? 0;
       });
     } catch (e) {
-      app.notify("error", t("contentPanel.couldNotLoad", { error: String(e) }));
+      // A ghost directory doesn't exist on disk yet — show its predicted
+      // children (from the overlay) without a spurious load error.
+      const isGhostDir = app.queueGhosts.some(g => g.isDir && normalizePath(g.path) === normalizePath(path));
+      if (!isGhostDir) app.notify("error", t("contentPanel.couldNotLoad", { error: String(e) }));
       pane.setEntries([]);
     } finally {
       pane.setLoading(false);
@@ -404,7 +432,9 @@
   }
 
   function handleActivate(entry: EntryDto) {
+    if (entry.isGhost && !entry.isDir) return; // can't open a file that doesn't exist yet
     if (entry.isDir) {
+      // Ghost directories are navigable: loadPath shows their predicted children.
       pane.navigate(entry.path);
     } else {
       invoke("open_path", { path: entry.path }).catch(e => app.notify("error", String(e)));
@@ -484,32 +514,34 @@
 
     const isMulti = sel.length > 1;
     const isRemote = sel.some(p => p.startsWith("remote://"));
-    const allFiles = sel.every(p => !pane.entries.find(en => en.path === p)?.isDir);
-    const isSingleDir = !isMulti && !!pane.entries.find(en => en.path === sel[0])?.isDir;
-    const hasM3uDirs = sel.some(p => !!pane.entries.find(en => en.path === p)?.isDir);
+    // Ghosts are predicted outputs of queued ops — they can be re-queued into
+    // further operations, but not opened, renamed, inspected or navigated.
+    const selHasGhost = sel.some(p => entryOf(p)?.isGhost);
+    const normalizeExt = (p: string) => {
+      const ext = entryOf(p)?.extension ?? "";
+      return ext.startsWith(".") ? ext : ext ? `.${ext}` : "";
+    };
+    const allFiles = sel.every(p => !entryOf(p)?.isDir);
+    const isSingleDir = !isMulti && !!entryOf(sel[0])?.isDir;
+    const hasM3uDirs = sel.some(p => !!entryOf(p)?.isDir);
     const archivePaths = allFiles
-      ? sel.filter(p => [".zip", ".7z", ".rar"].includes(pane.entries.find(en => en.path === p)?.extension ?? ""))
+      ? sel.filter(p => [".zip", ".7z", ".rar"].includes(normalizeExt(p)))
       : [];
     const hasArchives = archivePaths.length > 0;
     const canCompress = true;
-    const hasChdSources = allFiles && sel.some(p => {
-      const ext = pane.entries.find(en => en.path === p)?.extension ?? "";
-      return [".cue", ".gdi", ".toc", ".iso"].includes(ext);
-    });
-    const hasChdFiles = allFiles && sel.some(p => {
-      const ext = pane.entries.find(en => en.path === p)?.extension ?? "";
-      return ext === ".chd";
-    });
-    const hasChdDirs = sel.some(p => !!pane.entries.find(en => en.path === p)?.isDir);
+    const hasChdSources = allFiles && sel.some(p => [".cue", ".gdi", ".toc", ".iso"].includes(normalizeExt(p)));
+    const hasChdFiles = allFiles && sel.some(p => normalizeExt(p) === ".chd");
+    const hasChdDirs = sel.some(p => !!entryOf(p)?.isDir);
 
     const newTabIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h6"/></svg>`;
     const splitPaneIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>`;
 
-    const items: MenuItem[] = [
-      { kind: "action", label: isMulti ? t("menu.openCount", { count: sel.length }) : t("menu.open"), icon: openIcon, onclick: () => sel.forEach(p => invoke("open_path", { path: p })) },
-    ];
+    const items: MenuItem[] = [];
+    if (!selHasGhost) {
+      items.push({ kind: "action", label: isMulti ? t("menu.openCount", { count: sel.length }) : t("menu.open"), icon: openIcon, onclick: () => sel.forEach(p => invoke("open_path", { path: p })) });
+    }
 
-    if (isSingleDir) {
+    if (isSingleDir && !selHasGhost) {
       items.push({ kind: "action", label: t("tabs.openInNewTab"), icon: newTabIcon, onclick: () => pane.addTab(sel[0]) });
 
       // Open in other pane when split
@@ -530,7 +562,7 @@
       }
     }
 
-    if (!isMulti) {
+    if (!isMulti && !selHasGhost) {
       items.push({ kind: "action", label: t("menu.openWith"), icon: openWithIcon, onclick: () => onOpenWith(sel[0]) });
       items.push({ kind: "action", label: t("menu.rename"), shortcut: "F2", icon: renameIcon, onclick: () => pane.startRename(entry.path, entry.name) });
     }
@@ -571,19 +603,21 @@
       });
     }
 
-    if (hasM3uDirs) {
+    if (hasM3uDirs && !selHasGhost) {
       const m3uIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
       items.push({ kind: "separator" });
       items.push({
         kind: "action",
         label: t("m3u.menuItem"),
         icon: m3uIcon,
-        onclick: () => onM3u(sel.filter(p => !!pane.entries.find(en => en.path === p)?.isDir)),
+        onclick: () => onM3u(sel.filter(p => !!entryOf(p)?.isDir)),
       });
     }
 
-    items.push({ kind: "separator" });
-    items.push({ kind: "action", label: t("menu.properties"), icon: propsIcon, onclick: () => onProperties(sel) });
+    if (!selHasGhost) {
+      items.push({ kind: "separator" });
+      items.push({ kind: "action", label: t("menu.properties"), icon: propsIcon, onclick: () => onProperties(sel) });
+    }
     items.push({ kind: "separator" });
     items.push({ kind: "action", label: t("menu.delete"), shortcut: "Del", icon: deleteIcon, danger: true, onclick: () => onDelete(sel) });
 
@@ -764,15 +798,26 @@
             <div
               class="grid-item"
               class:grid-item--selected={pane.selectedPaths.has(entry.path)}
+              class:grid-item--ghost={entry.isGhost}
               data-path={entry.path}
               role="gridcell"
               tabindex="0"
+              title={entry.isGhost ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending")) : undefined}
               onmousedown={(e) => handleMousedown(e, entry)}
               ondblclick={() => { if (pane.renaming?.path !== entry.path) handleActivate(entry); }}
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, entry); }}
             >
               <div class="grid-icon" aria-hidden="true">
-                {#if entry.isDir}
+                {#if entry.isGhost}
+                  <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="3 2" class="icon-ghost-lg">
+                    {#if entry.isDir}
+                      <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+                    {:else}
+                      <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+                      <polyline points="13 2 13 9 20 9"/>
+                    {/if}
+                  </svg>
+                {:else if entry.isDir}
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" class="icon-dir-lg">
                     <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
                   </svg>
@@ -993,6 +1038,14 @@
   .grid-icon { display: flex; align-items: center; justify-content: center; }
   .icon-dir-lg { color: #e0a030; }
   .icon-file-lg { color: var(--text-muted); }
+  .icon-ghost-lg { color: var(--accent); opacity: 0.7; }
+
+  .grid-item--ghost {
+    opacity: 0.72;
+
+    .grid-name { font-style: italic; color: var(--text-muted); }
+  }
+  .grid-item--ghost.grid-item--selected { opacity: 1; }
 
   .grid-name {
     font-size: 11px;

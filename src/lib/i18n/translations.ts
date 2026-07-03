@@ -437,6 +437,16 @@ const en = {
   "queue.kind.compress": "Compress",
   "queue.kind.chdConvert": "CHD Conv",
   "queue.kind.chdRestore": "CHD Rest",
+  "queue.afterStep": "after step {n}",
+  "queue.dependencyBadge": "chained",
+  "queue.parallelDisabledDeps": "Sequential only — some steps use the output of earlier steps",
+  "queue.removedWithDependents": "Removed {count} chained operations",
+
+  // ── Ghost files (predicted queued outputs) ──────────────
+  "ghost.badge": "pending",
+  "ghost.badgeApprox": "≈ pending",
+  "ghost.pending": "Pending output of a queued operation — it will exist once the queue runs.",
+  "ghost.pendingApprox": "Approximate output of a queued operation — its exact name and format are resolved when the queue runs.",
 
   // ── M3U generation ───────────────────────────────────────
   "m3u.menuItem": "Generate .m3u…",
@@ -946,6 +956,16 @@ const es: Record<TranslationKey, string> = {
   "queue.kind.compress": "Comprimir",
   "queue.kind.chdConvert": "CHD Conv",
   "queue.kind.chdRestore": "CHD Rest",
+  "queue.afterStep": "tras el paso {n}",
+  "queue.dependencyBadge": "encadenada",
+  "queue.parallelDisabledDeps": "Solo secuencial — hay pasos que usan la salida de pasos anteriores",
+  "queue.removedWithDependents": "Se han quitado {count} operaciones encadenadas",
+
+  // ── Ghost files (predicted queued outputs) ──────────────
+  "ghost.badge": "pendiente",
+  "ghost.badgeApprox": "≈ pendiente",
+  "ghost.pending": "Salida pendiente de una operación en cola — existirá cuando se ejecute la cola.",
+  "ghost.pendingApprox": "Salida aproximada de una operación en cola — su nombre y formato exactos se resuelven al ejecutar la cola.",
 
   // ── M3U generation ───────────────────────────────────────
   "m3u.menuItem": "Generar .m3u…",

@@ -51,10 +51,12 @@
   class="file-row"
   class:file-row--selected={isSelected}
   class:file-row--dir={entry.isDir}
+  class:file-row--ghost={entry.isGhost}
   data-path={entry.path}
   role="row"
   aria-selected={isSelected}
   tabindex="0"
+  title={entry.isGhost ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending")) : undefined}
   onmousedown={(e) => onMousedown(e, entry)}
   ondblclick={() => onActivate(entry)}
   oncontextmenu={(e) => { e.preventDefault(); onContextMenu(e, entry); }}
@@ -62,7 +64,19 @@
   <!-- Icon -->
   <div class="file-col file-col--name">
     <span class="file-icon" aria-hidden="true">
-      {#if entry.isDir}
+      {#if entry.isGhost}
+        <!-- Dashed outline = a file/folder that does not exist yet -->
+        {#if entry.isDir}
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2" class="icon-ghost">
+            <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+          </svg>
+        {:else}
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2" class="icon-ghost">
+            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+            <polyline points="13 2 13 9 20 9"/>
+          </svg>
+        {/if}
+      {:else if entry.isDir}
         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" class="icon-dir">
           <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
         </svg>
@@ -87,6 +101,9 @@
       />
     {:else}
       <span class="file-name">{entry.name}</span>
+      {#if entry.isGhost}
+        <span class="ghost-badge">{entry.ghostApproximate ? t("ghost.badgeApprox") : t("ghost.badge")}</span>
+      {/if}
     {/if}
   </div>
 
@@ -161,6 +178,33 @@
   .file-icon { flex-shrink: 0; display: flex; }
   .icon-dir  { color: #e0a030; }
   .icon-file { color: var(--text-muted); }
+  .icon-ghost { color: var(--accent); opacity: 0.7; }
+
+  /* Ghost (predicted, not-yet-existing) rows */
+  .file-row--ghost {
+    opacity: 0.72;
+
+    .file-name { font-style: italic; color: var(--text-muted); }
+  }
+
+  .file-row--ghost.file-row--selected { opacity: 1; }
+
+  .ghost-badge {
+    flex-shrink: 0;
+    margin-left: 6px;
+    padding: 0 5px;
+    height: 15px;
+    display: inline-flex;
+    align-items: center;
+    border-radius: 7px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  }
 
   /* Rename input */
   .file-rename-input {

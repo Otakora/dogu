@@ -20,8 +20,10 @@ import type {
   QueueConflict,
   ConflictKind,
   ConflictSeverity,
+  GhostEntry,
   JobPausedDto,
 } from "../types/index.js";
+import { normalizePath } from "../utils/ghosts.js";
 
 // ─── Local types ───────────────────────────────────────────
 type ConfirmDialogState = {
@@ -395,6 +397,52 @@ function detectConflicts(ops: QueuedOp[]): QueueConflict[] {
   return conflicts;
 }
 
+// ─── Ghost dependency helpers ──────────────────────────────
+/** Returns the id of the queued op that produces `path` (or contains it), if any. */
+function ghostProducerOf(path: string, ops: QueuedOp[]): string | null {
+  const np = normalizePath(path);
+  for (const op of ops) {
+    for (const g of op.produces) {
+      const gp = normalizePath(g.path);
+      if (np === gp || np.startsWith(gp + "/")) return op.id;
+    }
+  }
+  return null;
+}
+
+/** Computes which already-queued ops an op depends on (consumes their outputs). */
+function linkDependencies(op: QueuedOp, existing: QueuedOp[]): string[] {
+  const deps = new Set<string>();
+  for (const input of [...op.sources, ...op.deletes]) {
+    const producer = ghostProducerOf(input, existing);
+    if (producer && producer !== op.id) deps.add(producer);
+  }
+  return [...deps];
+}
+
+/** Transitive closure of ops that (directly or indirectly) depend on any of `ids`. */
+function collectDependents(ids: string[], ops: QueuedOp[]): Set<string> {
+  const result = new Set(ids);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const op of ops) {
+      if (result.has(op.id)) continue;
+      if (op.dependsOn.some((d) => result.has(d))) {
+        result.add(op.id);
+        changed = true;
+      }
+    }
+  }
+  return result;
+}
+
+/** True when every op appears after all the ops it depends on. */
+function orderRespectsDeps(ops: QueuedOp[]): boolean {
+  const indexOf = new Map(ops.map((o, i) => [o.id, i]));
+  return ops.every((op, i) => op.dependsOn.every((d) => (indexOf.get(d) ?? -1) < i));
+}
+
 // ─── App state (Svelte 5 runes) ────────────────────────────
 function createAppState() {
   // Settings
@@ -430,6 +478,8 @@ function createAppState() {
   let queueRunning = $state(false);
   let queueRunStats = $state<QueueRunStats | null>(null);
   const queueConflicts = $derived(detectConflicts(opQueue));
+  // Any op consuming another op's ghost output forces ordered (sequential) execution.
+  const queueHasDependencies = $derived(opQueue.some((o) => o.dependsOn.length > 0));
 
   // Cross-pane tab drag
   let crossPaneDrag = $state<CrossPaneDragState>(null);
@@ -1051,10 +1101,38 @@ function createAppState() {
     get queueConflicts() { return queueConflicts; },
     get queueRunning()   { return queueRunning; },
     get queueRunStats()  { return queueRunStats; },
+    get queueHasDependencies() { return queueHasDependencies; },
+
+    /** All ghost outputs pending across the whole queue. */
+    get queueGhosts(): GhostEntry[] { return opQueue.flatMap((o) => o.produces); },
+
+    /** Ghost outputs predicted to land directly inside `dir` (for the explorer overlay). */
+    ghostsForDir(dir: string | null): GhostEntry[] {
+      if (!dir) return [];
+      const key = normalizePath(dir);
+      return opQueue.flatMap((o) => o.produces).filter((g) => normalizePath(g.parentDir) === key);
+    },
 
     toggleQueueMode() { queueMode = !queueMode; },
-    addToQueue(op: QueuedOp) { opQueue = [...opQueue, op]; jobsPanelOpen = true; },
-    removeFromQueue(id: string) { opQueue = opQueue.filter(o => o.id !== id); },
+
+    addToQueue(op: QueuedOp) {
+      // Link the op to any already-queued ops whose ghost outputs it consumes.
+      op.dependsOn = linkDependencies(op, opQueue);
+      opQueue = [...opQueue, op];
+      jobsPanelOpen = true;
+    },
+
+    /**
+     * Removes an op and (cascading) every op that depends on its output, since
+     * those consumers would otherwise be left pointing at a ghost that will
+     * never be produced. Returns the number of ops actually removed.
+     */
+    removeFromQueue(id: string): number {
+      const doomed = collectDependents([id], opQueue);
+      opQueue = opQueue.filter((o) => !doomed.has(o.id));
+      return doomed.size;
+    },
+
     clearQueue() { opQueue = []; },
 
     moveOpQueueItem(fromIdx: number, delta: -1 | 1) {
@@ -1062,6 +1140,7 @@ function createAppState() {
       if (toIdx < 0 || toIdx >= opQueue.length) return;
       const next = [...opQueue];
       [next[fromIdx], next[toIdx]] = [next[toIdx], next[fromIdx]];
+      if (!orderRespectsDeps(next)) return; // would place a consumer before its producer
       opQueue = next;
     },
 
@@ -1070,6 +1149,7 @@ function createAppState() {
       const next = [...opQueue];
       const [moved] = next.splice(fromIdx, 1);
       next.splice(fromIdx < insertIdx ? insertIdx - 1 : insertIdx, 0, moved);
+      if (!orderRespectsDeps(next)) return; // would break a dependency ordering
       opQueue = next;
     },
 
@@ -1086,8 +1166,14 @@ function createAppState() {
         queueRunStats = { ...queueRunStats!, completed: queueRunStats!.completed + 1 };
       };
 
+      // Ghost dependencies require ordered execution: a consumer must run after
+      // its producer so the real files exist when it starts. Parallel mode is
+      // only safe when nothing in the batch depends on another op's output.
+      const hasDeps = ops.some((o) => o.dependsOn.length > 0);
+      const effectiveMode = hasDeps ? "sequential" : mode;
+
       try {
-        if (mode === "parallel") {
+        if (effectiveMode === "parallel") {
           await Promise.all(ops.map(wrapOp));
         } else {
           for (const op of ops) await wrapOp(op);

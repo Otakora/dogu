@@ -27,8 +27,9 @@
   const parallelConflicts   = $derived(app.queueConflicts.filter(c => c.severity === 'parallel-only'));
   const hasConflicts        = $derived(app.queueConflicts.length > 0);
   const hasBlockingConflicts= $derived(blockingConflicts.length > 0);
-  // Parallel is only safe when there are NO conflicts of any kind
-  const canRunParallel      = $derived(hasQueue && !hasConflicts        && !app.queueRunning);
+  // Parallel is only safe with NO conflicts AND no chained dependencies
+  // (a consumer must wait for the producer that creates its input).
+  const canRunParallel      = $derived(hasQueue && !hasConflicts && !app.queueHasDependencies && !app.queueRunning);
   // Sequential is safe even with parallel-only conflicts (queue order protects it)
   const canRunSequential    = $derived(hasQueue && !hasBlockingConflicts && !app.queueRunning);
 
@@ -54,6 +55,17 @@
 
   function opDisplaySources(op: QueuedOp): string[] {
     return (op.kind === "delete" ? op.deletes : op.sources);
+  }
+
+  /** 1-based positions of the ops this op depends on, e.g. "after step 1". */
+  function dependencyLabel(op: QueuedOp): string | null {
+    if (op.dependsOn.length === 0) return null;
+    const steps = op.dependsOn
+      .map(id => app.opQueue.findIndex(o => o.id === id) + 1)
+      .filter(n => n > 0)
+      .sort((a, b) => a - b);
+    if (steps.length === 0) return null;
+    return t("queue.afterStep", { n: steps.join(", ") });
   }
 
   function basename(p: string): string {
@@ -174,7 +186,7 @@
           class="header-btn header-btn--accent"
           onclick={() => app.executeQueue("parallel")}
           disabled={!canRunParallel}
-          title={hasConflicts ? t("queue.conflicts.blocking") : t("queue.runParallel")}
+          title={app.queueHasDependencies ? t("queue.parallelDisabledDeps") : hasConflicts ? t("queue.conflicts.blocking") : t("queue.runParallel")}
         >{t("queue.runParallel")}</button>
         <button
           class="header-btn header-btn--accent"
@@ -258,7 +270,12 @@
 
                     <!-- Content -->
                     <div class="op-content">
-                      <div class="op-title">{op.title}</div>
+                      <div class="op-title">
+                        {op.title}
+                        {#if dependencyLabel(op)}
+                          <span class="dep-badge" title={t("queue.parallelDisabledDeps")}>⛓ {dependencyLabel(op)}</span>
+                        {/if}
+                      </div>
                       {#if opDisplaySources(op).length > 0}
                         <div class="op-paths">
                           {#each opDisplaySources(op).slice(0, 2) as src}
@@ -300,7 +317,7 @@
                       </button>
                       <button
                         class="icon-btn icon-btn--remove"
-                        onclick={() => app.removeFromQueue(op.id)}
+                        onclick={() => { const n = app.removeFromQueue(op.id); if (n > 1) app.notify("info", t("queue.removedWithDependents", { count: n })); }}
                         title={t("queue.remove")}
                         aria-label={t("queue.remove")}
                       >
@@ -704,6 +721,18 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .dep-badge {
+    margin-left: 6px;
+    padding: 1px 5px;
+    border-radius: 7px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    white-space: nowrap;
   }
 
   .op-paths {

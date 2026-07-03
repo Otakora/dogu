@@ -54,6 +54,7 @@ jobs:
             libtirpc-dev \
             libgnutls28-dev \
             libldap2-dev \
+            libjansson-dev \
             libparse-yapp-perl \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \

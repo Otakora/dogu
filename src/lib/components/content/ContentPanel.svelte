@@ -198,14 +198,22 @@
   // Ghosts whose path collides with a real entry (or another ghost) are dropped
   // so the list never renders duplicate keys.
   const ghostEntries = $derived.by(() => {
-    if (pane.isSearching) return [];
+    if (pane.isSearching || !pane.currentPath) return [];
+    // Read the reactive opQueue getter directly (the same signal JobsPanel uses)
+    // and filter to this folder inline. Going through a store method here does
+    // NOT register opQueue as a dependency of this derived, so the overlay would
+    // never update — read the getter directly instead.
+    const dirKey = normalizePath(pane.currentPath);
     const seen = new Set(pane.entries.map((e) => normalizePath(e.path)));
     const result: EntryDto[] = [];
-    for (const g of app.ghostsForDir(pane.currentPath)) {
-      const key = normalizePath(g.path);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      result.push(ghostToEntry(g));
+    for (const op of app.opQueue) {
+      for (const g of op.produces) {
+        if (normalizePath(g.parentDir) !== dirKey) continue;
+        const key = normalizePath(g.path);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(ghostToEntry(g));
+      }
     }
     return result;
   });

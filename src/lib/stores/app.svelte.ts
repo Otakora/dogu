@@ -1103,15 +1103,13 @@ function createAppState() {
     get queueRunStats()  { return queueRunStats; },
     get queueHasDependencies() { return queueHasDependencies; },
 
-    /** All ghost outputs pending across the whole queue. */
+    /**
+     * All ghost outputs pending across the whole queue. Consumers that need
+     * reactivity (e.g. the explorer overlay) must read `opQueue` directly in
+     * their own derived — reading through a store method does not register
+     * opQueue as a dependency. This getter is for one-shot, non-reactive checks.
+     */
     get queueGhosts(): GhostEntry[] { return opQueue.flatMap((o) => o.produces); },
-
-    /** Ghost outputs predicted to land directly inside `dir` (for the explorer overlay). */
-    ghostsForDir(dir: string | null): GhostEntry[] {
-      if (!dir) return [];
-      const key = normalizePath(dir);
-      return opQueue.flatMap((o) => o.produces).filter((g) => normalizePath(g.parentDir) === key);
-    },
 
     toggleQueueMode() { queueMode = !queueMode; },
 

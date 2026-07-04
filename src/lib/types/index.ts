@@ -416,7 +416,7 @@ export type M3uGenerateResultDto = {
 
 // ── Operation queue ─────────────────────────────────────────────
 
-export type QueuedOpKind = 'copy' | 'move' | 'delete' | 'extract' | 'compress' | 'chd-convert' | 'chd-restore';
+export type QueuedOpKind = 'copy' | 'move' | 'delete' | 'extract' | 'compress' | 'chd-convert' | 'chd-restore' | 'm3u';
 
 /**
  * A predicted file/folder that a queued operation will create once it runs.

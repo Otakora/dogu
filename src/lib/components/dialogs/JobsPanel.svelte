@@ -42,6 +42,7 @@
     compress:     "#10b981",
     "chd-convert":"#0d9488",
     "chd-restore":"#0d9488",
+    m3u:          "#d946ef",
   };
 
   function kindLabel(k: QueuedOpKind): string {
@@ -49,6 +50,7 @@
       copy: "queue.kind.copy", move: "queue.kind.move", delete: "queue.kind.delete",
       extract: "queue.kind.extract", compress: "queue.kind.compress",
       "chd-convert": "queue.kind.chdConvert", "chd-restore": "queue.kind.chdRestore",
+      m3u: "queue.kind.m3u",
     };
     return t(map[k]);
   }

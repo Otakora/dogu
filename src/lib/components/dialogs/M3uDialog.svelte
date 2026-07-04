@@ -12,6 +12,7 @@
   import Button from "../ui/Button.svelte";
   import DestinationField from "./DestinationField.svelte";
   import { t } from "../../i18n/index.js";
+  import { app } from "../../stores/app.svelte.js";
 
   let customDestLabel = $state<string | null>(null);
 
@@ -20,9 +21,14 @@
     /** The folder currently open in the app — used for the "currentDir" output option. */
     currentDir?: string;
     onclose: () => void;
+    /**
+     * Called instead of running immediately when queue mode is on. Receives the
+     * generation payload and the .m3u output paths (for ghost prediction).
+     */
+    onEnqueue?: (payload: M3uGeneratePayload, outputPaths: string[], sources: string[]) => void;
   };
 
-  let { dirs, currentDir = "", onclose }: Props = $props();
+  let { dirs, currentDir = "", onclose, onEnqueue }: Props = $props();
 
   // ── Options ───────────────────────────────────────────────
   let opts = $state<M3uScanOptions>({
@@ -74,12 +80,8 @@
     }
   }
 
-  async function generate() {
-    const toGenerate = groups.filter((g) => selectedIds.has(g.id));
-    if (toGenerate.length === 0) return;
-
-    phase = "generating";
-    const payload: M3uGeneratePayload = {
+  function buildPayload(toGenerate: M3uGroupDto[]): M3uGeneratePayload {
+    return {
       overwrite,
       groups: toGenerate.map((g) => ({
         outputPath: g.outputPath,
@@ -87,6 +89,25 @@
         entries: g.entries.map((e) => e.m3uPath),
       })),
     };
+  }
+
+  async function generate() {
+    const toGenerate = groups.filter((g) => selectedIds.has(g.id));
+    if (toGenerate.length === 0) return;
+
+    const payload = buildPayload(toGenerate);
+
+    // Queue mode: hand the op to the caller (which shows a .m3u ghost) instead
+    // of generating right away.
+    if (app.queueMode && onEnqueue) {
+      const outputPaths = toGenerate.map((g) => g.outputPath);
+      const sources = toGenerate.flatMap((g) => g.entries.map((e) => e.absolutePath));
+      onEnqueue(payload, outputPaths, sources);
+      onclose();
+      return;
+    }
+
+    phase = "generating";
     try {
       result = await invoke<M3uGenerateResultDto>("generate_m3u_files", { payload });
       phase = "done";

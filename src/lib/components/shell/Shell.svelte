@@ -20,6 +20,7 @@
     QueuedOp,
     ChdSourceDto,
     ExtractionPreviewRow,
+    M3uGeneratePayload,
   } from "../../types/index.js";
   import {
     predictCopyMove,
@@ -448,6 +449,38 @@
     m3uDirs = dirs;
   }
 
+  function buildM3uOp(payload: M3uGeneratePayload, outputPaths: string[], sources: string[]): QueuedOp {
+    const opId = newQueueId();
+    return {
+      id: opId,
+      title: t("shell.generatingM3u"),
+      kind: 'm3u',
+      sources,
+      destinations: outputPaths.map(p => parentDir(p)),
+      deletes: [],
+      produces: outputPaths.map(p => buildGhost(p, false, opId, false)),
+      dependsOn: [],
+      execute: () => executeM3u(payload),
+    };
+  }
+
+  async function executeM3u(payload: M3uGeneratePayload): Promise<void> {
+    const jobId = newJobId();
+    app.startJob(jobId, t("shell.generatingM3u"), {
+      statusMessageOnSuccess: t("shell.m3uComplete"),
+      statusMessageOnFailure: t("shell.m3uFailed"),
+    });
+    const done = app.waitForJob(jobId);
+    try {
+      await invoke("generate_m3u_files", { payload });
+      app.finishJob(jobId, true, t("shell.m3uComplete"));
+    } catch (e) {
+      app.notify("error", String(e));
+      app.finishJob(jobId, false, String(e));
+    }
+    await done;
+  }
+
   // ── CHD ───────────────────────────────────────────────────
   const CD_GHOST_EXTS = new Set(["cue", "gdi", "toc"]);
   const DVD_GHOST_EXTS = new Set(["iso"]);
@@ -751,7 +784,15 @@
 {/if}
 
 {#if m3uDirs}
-  <M3uDialog dirs={m3uDirs} currentDir={app.currentPath ?? ""} onclose={() => (m3uDirs = null)} />
+  <M3uDialog
+    dirs={m3uDirs}
+    currentDir={app.currentPath ?? ""}
+    onclose={() => (m3uDirs = null)}
+    onEnqueue={(payload, outputPaths, sources) => {
+      enqueueOrRun(buildM3uOp(payload, outputPaths, sources));
+      m3uDirs = null;
+    }}
+  />
 {/if}
 
 {#if chdState}

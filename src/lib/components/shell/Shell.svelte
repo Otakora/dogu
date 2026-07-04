@@ -278,6 +278,8 @@
       deletes: paths,
       produces: [],
       dependsOn: [],
+      overwrite: false,
+      renameOnConflict: false,
       execute: () => executeDelete(paths),
     };
   }
@@ -320,6 +322,8 @@
     if (isCut) app.setClipboard(null);
 
     const opId = newQueueId();
+    const overwrite = app.settings.defaultOverwriteOnConflict;
+    const renameOnConflict = app.settings.renameOnConflict;
     enqueueOrRun({
       id: opId,
       title: isCut ? t("shell.moving") : t("shell.copying"),
@@ -329,11 +333,13 @@
       deletes: isCut ? paths : [],
       produces: predictCopyMove(paths, dest, opId),
       dependsOn: [],
-      execute: () => executePaste(paths, dest, isCut),
+      overwrite,
+      renameOnConflict,
+      execute: () => executePaste(paths, dest, isCut, overwrite, renameOnConflict),
     });
   }
 
-  async function executePaste(paths: string[], dest: string, isCut: boolean): Promise<void> {
+  async function executePaste(paths: string[], dest: string, isCut: boolean, overwrite: boolean, renameOnConflict: boolean): Promise<void> {
     const jobId = newJobId();
     const op = isCut ? "cut" : "copy";
     app.startJob(jobId, op === "copy" ? t("shell.copying") : t("shell.moving"), {
@@ -342,7 +348,7 @@
     });
     const done = app.waitForJob(jobId);
     try {
-      await invoke("start_copy_or_move_paths", { jobId, paths, destination: dest, operation: op, overwrite: false });
+      await invoke("start_copy_or_move_paths", { jobId, paths, destination: dest, operation: op, overwrite, renameOnConflict });
     } catch (e) {
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
@@ -386,6 +392,8 @@
       deletes: opts.deleteArchives ? archives : [],
       produces: [],
       dependsOn: [],
+      overwrite: opts.overwrite,
+      renameOnConflict: opts.renameOnConflict ?? false,
       execute: () => executeExtraction(archives, opts),
     };
   }
@@ -404,6 +412,7 @@
    * archives (not previewable without downloading) and ghost archives.
    */
   async function enqueueExtract(archives: string[], opts: ExtractionOptionsPayload) {
+    opts = { ...opts, renameOnConflict: app.settings.renameOnConflict };
     const op = buildExtractOp(archives, opts);
     if (!app.queueMode) { op.execute(); return; }
 
@@ -449,8 +458,9 @@
     m3uDirs = dirs;
   }
 
-  function buildM3uOp(payload: M3uGeneratePayload, outputPaths: string[], sources: string[]): QueuedOp {
+  function buildM3uOp(rawPayload: M3uGeneratePayload, outputPaths: string[], sources: string[]): QueuedOp {
     const opId = newQueueId();
+    const payload: M3uGeneratePayload = { ...rawPayload, renameOnConflict: app.settings.renameOnConflict };
     return {
       id: opId,
       title: t("shell.generatingM3u"),
@@ -460,6 +470,8 @@
       deletes: [],
       produces: outputPaths.map(p => buildGhost(p, false, opId, false)),
       dependsOn: [],
+      overwrite: payload.overwrite,
+      renameOnConflict: payload.renameOnConflict ?? false,
       execute: () => executeM3u(payload),
     };
   }
@@ -548,8 +560,9 @@
     }
   }
 
-  function buildConvertChdOp(paths: string[], opts: ChdConversionOptionsPayload): QueuedOp {
+  function buildConvertChdOp(paths: string[], rawOpts: ChdConversionOptionsPayload): QueuedOp {
     const opId = newQueueId();
+    const opts: ChdConversionOptionsPayload = { ...rawOpts, renameOnConflict: app.settings.renameOnConflict };
     return {
       id: opId,
       title: t("shell.convertingToChd"),
@@ -559,6 +572,8 @@
       deletes: opts.deleteOriginals ? paths : [],
       produces: predictChdConvert(paths, opts, opId),
       dependsOn: [],
+      overwrite: opts.overwrite,
+      renameOnConflict: opts.renameOnConflict ?? false,
       execute: () => executeConvertChd(paths, opts),
     };
   }
@@ -579,7 +594,8 @@
     await done;
   }
 
-  function buildRestoreChdOp(paths: string[], opts: ChdRestoreOptionsPayload): QueuedOp {
+  function buildRestoreChdOp(paths: string[], rawOpts: ChdRestoreOptionsPayload): QueuedOp {
+    const opts: ChdRestoreOptionsPayload = { ...rawOpts, renameOnConflict: app.settings.renameOnConflict };
     const destinations = opts.destinationPath
       ? [opts.destinationPath]
       : paths.map(p => parentDir(p));
@@ -593,6 +609,8 @@
       deletes: opts.deleteChd ? paths : [],
       produces: predictChdRestore(paths, opts, opId),
       dependsOn: [],
+      overwrite: opts.overwrite,
+      renameOnConflict: opts.renameOnConflict ?? false,
       execute: () => executeRestoreChd(paths, opts),
     };
   }
@@ -634,7 +652,8 @@
     compressionState = { sources: paths };
   }
 
-  function buildCompressOp(sources: string[], opts: CompressionOptionsPayload): QueuedOp {
+  function buildCompressOp(sources: string[], rawOpts: CompressionOptionsPayload): QueuedOp {
+    const opts: CompressionOptionsPayload = { ...rawOpts, renameOnConflict: app.settings.renameOnConflict };
     const destinations = opts.destinationPath
       ? [opts.destinationPath]
       : sources.map(p => parentDir(p));
@@ -650,6 +669,8 @@
       deletes: opts.deleteOriginals ? sources : [],
       produces: predictCompress(opts, archiveDir, opId),
       dependsOn: [],
+      overwrite: opts.overwrite,
+      renameOnConflict: opts.renameOnConflict ?? false,
       execute: () => executeCompress(sources, opts),
     };
   }

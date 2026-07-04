@@ -10,6 +10,7 @@
   import ExtractionPreviewModal from "./ExtractionPreviewModal.svelte";
   import DestinationField from "./DestinationField.svelte";
   import { t } from "../../i18n/index.js";
+  import { app } from "../../stores/app.svelte.js";
 
   type Props = {
     archives: string[];
@@ -29,7 +30,7 @@
     destinationMode: untrack(() => hasRemoteArchives) ? "same" : "custom",
     destinationPath: null,
     deleteArchives: false,
-    overwrite: false,
+    overwrite: untrack(() => app.settings.defaultOverwriteOnConflict),
     remoteDestination: null,
     remoteTransfer: null,
   });

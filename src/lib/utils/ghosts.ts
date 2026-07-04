@@ -93,6 +93,27 @@ export function sameDir(a: string, b: string): boolean {
   return normalizePath(a) === normalizePath(b);
 }
 
+/**
+ * Mirrors the backend `unique_path`: if `desired` is already taken, returns the
+ * first "stem (N)" variant (N≥2, extension preserved) not present in `taken`
+ * (a set of normalized paths). Used to display the name a renamed output will get.
+ */
+export function uniqueDisplayPath(desired: string, taken: Set<string>): string {
+  if (!taken.has(normalizePath(desired))) return desired;
+  const dir = dirnameOf(desired);
+  const name = basenameOf(desired);
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : ""; // includes the leading dot
+  let n = 2;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const candidate = joinPath(dir, `${stem} (${n})${ext}`);
+    if (!taken.has(normalizePath(candidate))) return candidate;
+    n++;
+  }
+}
+
 // ── Ghost construction ─────────────────────────────────────────────────────
 
 function makeGhost(path: string, isDir: boolean, opId: string, approximate: boolean): GhostEntry {

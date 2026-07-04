@@ -455,6 +455,12 @@ const en = {
   "ghost.badgeApprox": "≈ pending",
   "ghost.pending": "Pending output of a queued operation — it will exist once the queue runs.",
   "ghost.pendingApprox": "Approximate output of a queued operation — its exact name and format are resolved when the queue runs.",
+  "ghost.badgeRemoved": "removing",
+  "ghost.badgeReplaced": "replacing",
+  "ghost.badgeConflict": "conflict",
+  "ghost.willBeRemoved": "A queued operation will delete this file.",
+  "ghost.willBeReplaced": "A queued operation will overwrite this file.",
+  "ghost.willConflict": "A queued operation targets this name but won't overwrite or rename — it will fail. Enable replace or auto-rename in Settings.",
 
   // ── M3U generation ───────────────────────────────────────
   "m3u.menuItem": "Generate .m3u…",
@@ -982,6 +988,12 @@ const es: Record<TranslationKey, string> = {
   "ghost.badgeApprox": "≈ pendiente",
   "ghost.pending": "Salida pendiente de una operación en cola — existirá cuando se ejecute la cola.",
   "ghost.pendingApprox": "Salida aproximada de una operación en cola — su nombre y formato exactos se resuelven al ejecutar la cola.",
+  "ghost.badgeRemoved": "se elimina",
+  "ghost.badgeReplaced": "se reemplaza",
+  "ghost.badgeConflict": "conflicto",
+  "ghost.willBeRemoved": "Una operación en cola eliminará este fichero.",
+  "ghost.willBeReplaced": "Una operación en cola sobrescribirá este fichero.",
+  "ghost.willConflict": "Una operación en cola apunta a este nombre pero no reemplaza ni renombra — fallará. Activa reemplazar o autorenombrar en Configuración.",
 
   // ── M3U generation ───────────────────────────────────────
   "m3u.menuItem": "Generar .m3u…",

@@ -12,6 +12,7 @@
   import DestinationField from "./DestinationField.svelte";
   import { untrack } from "svelte";
   import { t } from "../../i18n/index.js";
+  import { app } from "../../stores/app.svelte.js";
 
   type Props = {
     sources: string[];
@@ -42,7 +43,7 @@
   let onError = $state<RemoteTransferOnError>("abort");
   let compressionLevel = $state(5);
   let deleteOriginals = $state(false);
-  let overwrite = $state(false);
+  let overwrite = $state(untrack(() => app.settings.defaultOverwriteOnConflict));
 
   const isRemoteDest = $derived(remoteDest != null);
   const hasCustomDest = $derived(destinationMode === "custom" || isRemoteDest);

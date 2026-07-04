@@ -39,7 +39,7 @@
     customOutputPath: untrack(() => currentDir || null),
     useRelativePaths: true,
   });
-  let overwrite = $state(false);
+  let overwrite = $state(untrack(() => app.settings.defaultOverwriteOnConflict));
 
   // Keep customOutputPath in sync when the user picks "currentDir"
   $effect(() => {

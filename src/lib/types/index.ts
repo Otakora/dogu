@@ -17,6 +17,13 @@ export type EntryDto = {
   ghostOpId?: string;
   /** True when the prediction is only approximate (e.g. CHD restore output). */
   ghostApproximate?: boolean;
+  /** Set on a real entry that a queued op will overwrite. */
+  willBeReplaced?: boolean;
+  /** Set on a real entry that a queued op will delete. */
+  willBeRemoved?: boolean;
+  /** Set on a real entry that a queued op wants to write over but can neither
+   *  overwrite nor rename around — the op will fail at run time. */
+  willConflict?: boolean;
 };
 
 export type ConnectionProfileDto = {
@@ -127,6 +134,8 @@ export type ExtractionOptionsPayload = {
   destinationPath: string | null;
   deleteArchives: boolean;
   overwrite: boolean;
+  /** When not overwriting and a name collides, auto-rename instead of failing/skipping. */
+  renameOnConflict?: boolean;
   /** Virtual remote path. When set output is written to temp then uploaded. */
   remoteDestination?: string | null;
   remoteTransfer?: RemoteTransferPolicy | null;
@@ -205,6 +214,7 @@ export type ChdConversionOptionsPayload = {
   depositToParent: boolean;
   deleteOriginalSubfolders: boolean;
   overwrite: boolean;
+  renameOnConflict?: boolean;
   customName: string | null;
   /** "same" = alongside source (default), "parent" = parent folder, "custom" = use destinationPath */
   destinationMode?: 'same' | 'parent' | 'custom' | null;
@@ -231,6 +241,7 @@ export type ChdRestoreOptionsPayload = {
   customFolderName: string | null;
   deleteChd: boolean;
   overwrite: boolean;
+  renameOnConflict?: boolean;
   splitBin: boolean;
   /** Virtual remote path. When set output is written to temp then uploaded. */
   remoteDestination?: string | null;
@@ -249,6 +260,7 @@ export type CompressionOptionsPayload = {
   compressionLevel: number; // 0=store 3=fast 5=normal 9=max
   deleteOriginals: boolean;
   overwrite: boolean;
+  renameOnConflict?: boolean;
   remoteDestination?: string | null;
   remoteTransfer?: RemoteTransferPolicy | null;
 };
@@ -407,6 +419,7 @@ export type M3uGenerateGroupPayload = {
 export type M3uGeneratePayload = {
   groups: M3uGenerateGroupPayload[];
   overwrite: boolean;
+  renameOnConflict?: boolean;
 };
 
 export type M3uFailureDto = {
@@ -457,6 +470,9 @@ export type QueuedOp = {
   produces: GhostEntry[];
   /** Ids of queued ops whose ghost outputs this op consumes as input. */
   dependsOn: string[];
+  /** Effective conflict policy — drives the overlay's replace/rename/conflict rendering. */
+  overwrite: boolean;
+  renameOnConflict: boolean;
   execute: () => Promise<void>;
 };
 

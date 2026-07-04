@@ -52,11 +52,19 @@
   class:file-row--selected={isSelected}
   class:file-row--dir={entry.isDir}
   class:file-row--ghost={entry.isGhost}
+  class:file-row--removed={entry.willBeRemoved}
+  class:file-row--replaced={entry.willBeReplaced}
+  class:file-row--conflict={entry.willConflict}
   data-path={entry.path}
   role="row"
   aria-selected={isSelected}
   tabindex="0"
-  title={entry.isGhost ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending")) : undefined}
+  title={entry.isGhost
+    ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending"))
+    : entry.willBeRemoved ? t("ghost.willBeRemoved")
+    : entry.willBeReplaced ? t("ghost.willBeReplaced")
+    : entry.willConflict ? t("ghost.willConflict")
+    : undefined}
   onmousedown={(e) => onMousedown(e, entry)}
   ondblclick={() => onActivate(entry)}
   oncontextmenu={(e) => { e.preventDefault(); onContextMenu(e, entry); }}
@@ -103,6 +111,12 @@
       <span class="file-name">{entry.name}</span>
       {#if entry.isGhost}
         <span class="ghost-badge">{entry.ghostApproximate ? t("ghost.badgeApprox") : t("ghost.badge")}</span>
+      {:else if entry.willBeRemoved}
+        <span class="status-badge status-badge--removed">{t("ghost.badgeRemoved")}</span>
+      {:else if entry.willBeReplaced}
+        <span class="status-badge status-badge--replaced">{t("ghost.badgeReplaced")}</span>
+      {:else if entry.willConflict}
+        <span class="status-badge status-badge--conflict">{t("ghost.badgeConflict")}</span>
       {/if}
     {/if}
   </div>
@@ -191,7 +205,8 @@
 
   .file-row--ghost.file-row--selected { opacity: 1; }
 
-  .ghost-badge {
+  .ghost-badge,
+  .status-badge {
     flex-shrink: 0;
     margin-left: 8px;
     margin-right: 10px;
@@ -207,6 +222,32 @@
     color: var(--accent);
     background: var(--accent-soft);
     border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+
+  /* ── Real entries affected by queued operations ── */
+  .status-badge--removed {
+    color: var(--danger, #e5484d);
+    background: color-mix(in srgb, var(--danger, #e5484d) 12%, transparent);
+    border-color: color-mix(in srgb, var(--danger, #e5484d) 30%, transparent);
+  }
+  .status-badge--replaced {
+    color: #d9820b;
+    background: color-mix(in srgb, #d9820b 12%, transparent);
+    border-color: color-mix(in srgb, #d9820b 30%, transparent);
+  }
+  .status-badge--conflict {
+    color: var(--danger, #e5484d);
+    background: color-mix(in srgb, var(--danger, #e5484d) 12%, transparent);
+    border-color: color-mix(in srgb, var(--danger, #e5484d) 45%, transparent);
+  }
+
+  .file-row--removed {
+    .file-name { text-decoration: line-through; color: var(--text-subtle); }
+    .icon-dir, .icon-file { opacity: 0.5; }
+  }
+  .file-row--replaced .file-name { color: #d9820b; }
+  .file-row--conflict {
+    background: color-mix(in srgb, var(--danger, #e5484d) 7%, transparent);
   }
 
   /* Rename input */

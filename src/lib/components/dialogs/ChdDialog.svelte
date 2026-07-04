@@ -11,6 +11,7 @@
   import Button from "../ui/Button.svelte";
   import DestinationField from "./DestinationField.svelte";
   import { t } from "../../i18n/index.js";
+  import { app } from "../../stores/app.svelte.js";
 
   type Mode = "convert" | "restore";
   type NamingMode = "container" | "source" | "custom";
@@ -82,7 +83,7 @@
   // ── Convert: other options ────────────────────────────────
   let deleteOriginals  = $state(false);
   let deleteSubfolders = $state(false);
-  let overwriteChd     = $state(false);
+  let overwriteChd     = $state(untrack(() => app.settings.defaultOverwriteOnConflict));
 
   // ── Restore: destination ──────────────────────────────────
   let restDestMode       = $state<"same" | "custom">("same");
@@ -104,7 +105,7 @@
   // ── Restore: misc ─────────────────────────────────────────
   let restSplitBin      = $state(false);
   let restDeleteChd     = $state(false);
-  let restOverwrite     = $state(false);
+  let restOverwrite     = $state(untrack(() => app.settings.defaultOverwriteOnConflict));
 
   // Sync output-name input when switching away from "custom"
   $effect(() => {

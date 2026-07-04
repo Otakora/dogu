@@ -9,7 +9,7 @@
   import type { MenuItem } from "../ui/ContextMenu.svelte";
   import { t, tn } from "../../i18n/index.js";
   import { openTerminalAt, openRemoteTerminalAt } from "../../utils/terminal.js";
-  import { ghostToEntry, normalizePath } from "../../utils/ghosts.js";
+  import { ghostToEntry, normalizePath, uniqueDisplayPath, dirnameOf, basenameOf } from "../../utils/ghosts.js";
 
   const pane = getContext<PaneView>("pane");
 
@@ -197,27 +197,51 @@
   // Hidden while searching (search results come straight from the backend).
   // Ghosts whose path collides with a real entry (or another ghost) are dropped
   // so the list never renders duplicate keys.
-  const ghostEntries = $derived.by(() => {
-    if (pane.isSearching || !pane.currentPath) return [];
-    // Read the reactive opQueue getter directly (the same signal JobsPanel uses)
-    // and filter to this folder inline. Going through a store method here does
-    // NOT register opQueue as a dependency of this derived, so the overlay would
-    // never update — read the getter directly instead.
+  // Merges the folder's real entries with the ghost outputs of queued ops,
+  // resolving collisions the same way the backend will:
+  //  - overwrite ON   → the real entry is marked "will be replaced" (no ghost row)
+  //  - renameOnConflict → the ghost is shown with a " (2)" suffix
+  //  - neither         → the real entry is marked "conflict" (op will fail)
+  // Also marks real entries a queued op will delete ("will be removed").
+  // Reads the reactive app.opQueue getter directly so the derived re-runs when
+  // the queue changes (going through a store method would not track it).
+  const combinedEntries = $derived.by<EntryDto[]>(() => {
+    if (pane.isSearching || !pane.currentPath) return pane.entries;
     const dirKey = normalizePath(pane.currentPath);
-    const seen = new Set(pane.entries.map((e) => normalizePath(e.path)));
-    const result: EntryDto[] = [];
+    const taken = new Set(pane.entries.map((e) => normalizePath(e.path)));
+    const replaced = new Set<string>();
+    const removed = new Set<string>();
+    const conflicting = new Set<string>();
+    const ghosts: EntryDto[] = [];
+
     for (const op of app.opQueue) {
+      for (const d of op.deletes) {
+        if (normalizePath(dirnameOf(d)) === dirKey) removed.add(normalizePath(d));
+      }
       for (const g of op.produces) {
         if (normalizePath(g.parentDir) !== dirKey) continue;
-        const key = normalizePath(g.path);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        result.push(ghostToEntry(g));
+        const gkey = normalizePath(g.path);
+        const collides = taken.has(gkey);
+        if (collides && op.overwrite) { replaced.add(gkey); continue; }
+        if (collides && !op.renameOnConflict) { conflicting.add(gkey); continue; }
+        // Free slot, or renamed around the collision.
+        const path = collides ? uniqueDisplayPath(g.path, taken) : g.path;
+        const key = normalizePath(path);
+        if (taken.has(key)) continue; // safety: never emit a duplicate key
+        taken.add(key);
+        ghosts.push(ghostToEntry({ ...g, path, name: basenameOf(path) }));
       }
     }
-    return result;
+
+    const reals = pane.entries.map((e) => {
+      const k = normalizePath(e.path);
+      const rep = replaced.has(k);
+      const rem = removed.has(k);
+      const con = conflicting.has(k);
+      return rep || rem || con ? { ...e, willBeReplaced: rep, willBeRemoved: rem, willConflict: con } : e;
+    });
+    return [...reals, ...ghosts];
   });
-  const combinedEntries = $derived([...pane.entries, ...ghostEntries]);
 
   /** Looks up a display entry (real or ghost) by path. */
   function entryOf(path: string): EntryDto | undefined {
@@ -807,10 +831,18 @@
               class="grid-item"
               class:grid-item--selected={pane.selectedPaths.has(entry.path)}
               class:grid-item--ghost={entry.isGhost}
+              class:grid-item--removed={entry.willBeRemoved}
+              class:grid-item--replaced={entry.willBeReplaced}
+              class:grid-item--conflict={entry.willConflict}
               data-path={entry.path}
               role="gridcell"
               tabindex="0"
-              title={entry.isGhost ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending")) : undefined}
+              title={entry.isGhost
+                ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending"))
+                : entry.willBeRemoved ? t("ghost.willBeRemoved")
+                : entry.willBeReplaced ? t("ghost.willBeReplaced")
+                : entry.willConflict ? t("ghost.willConflict")
+                : undefined}
               onmousedown={(e) => handleMousedown(e, entry)}
               ondblclick={() => { if (pane.renaming?.path !== entry.path) handleActivate(entry); }}
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, entry); }}
@@ -1057,6 +1089,11 @@
     .grid-name { font-style: italic; color: var(--text-muted); }
   }
   .grid-item--ghost.grid-item--selected { opacity: 1; }
+
+  .grid-item--removed .grid-name { text-decoration: line-through; color: var(--text-subtle); }
+  .grid-item--removed { opacity: 0.6; }
+  .grid-item--replaced .grid-name { color: #d9820b; }
+  .grid-item--conflict { background: color-mix(in srgb, var(--danger, #e5484d) 8%, transparent); }
 
   .grid-name {
     font-size: 11px;

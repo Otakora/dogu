@@ -549,8 +549,18 @@ fn list_all_7z_entries(tool: &Path, archive_path: &Path) -> Result<Vec<(String, 
     let mut seen: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     let mut current_path: Option<String> = None;
     let mut current_is_dir = false;
+    // The entry listing begins after the "----------" separator; everything
+    // before it is the archive's own header (including a "Path = <archive>"
+    // line that must not be treated as an entry).
+    let mut in_entries = false;
 
     for line in text.lines() {
+        if !in_entries {
+            if line.trim_start().starts_with("----------") {
+                in_entries = true;
+            }
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("Path = ") {
             if let Some(p) = current_path.take() {
                 insert_with_ancestors(&mut seen, &p, current_is_dir);
@@ -558,7 +568,14 @@ fn list_all_7z_entries(tool: &Path, archive_path: &Path) -> Result<Vec<(String, 
             current_path = Some(rest.trim().to_string());
             current_is_dir = false;
         } else if let Some(rest) = line.strip_prefix("Folder = ") {
-            current_is_dir = rest.trim() == "+";
+            if rest.trim() == "+" {
+                current_is_dir = true;
+            }
+        } else if let Some(rest) = line.strip_prefix("Attributes = ") {
+            // Directories carry the 'D' attribute flag (files never do).
+            if rest.contains('D') {
+                current_is_dir = true;
+            }
         }
     }
     if let Some(p) = current_path.take() {
@@ -579,21 +596,49 @@ pub fn build_extraction_preview_deep(
     let mut rows = Vec::new();
     for archive in archives {
         let destination_root = extraction_destination_root(archive, options);
-        let entries = list_all_entries(app, archive)?;
-        let preview_entries = entries
-            .iter()
-            .map(|(rel, is_dir)| {
-                let dest = rel
-                    .split('/')
-                    .filter(|s| !s.is_empty())
-                    .fold(destination_root.clone(), |acc, seg| acc.join(seg));
-                ExtractionPreviewEntry {
-                    name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
-                    is_dir: *is_dir,
-                    destination_path: dest.to_string_lossy().to_string(),
-                }
-            })
-            .collect();
+        let raw = list_all_entries(app, archive)?;
+
+        // Apply `splitEntries` (each top-level file is moved into a folder named
+        // after its stem) and re-synthesise ancestor directories so every level
+        // — including any folders split introduces — is represented.
+        let mut final_map: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+        for (rel, is_dir) in &raw {
+            let final_rel = if options.split_entries && !is_dir && !rel.contains('/') {
+                format!("{}/{}", entry_stem_or_name(rel), rel)
+            } else {
+                rel.clone()
+            };
+            insert_with_ancestors(&mut final_map, &final_rel, *is_dir);
+        }
+
+        let mut preview_entries: Vec<ExtractionPreviewEntry> = Vec::new();
+
+        // "Extract to folder" wraps the contents in a new folder (destination_root
+        // itself). Emit that wrapper so it shows as a ghost in the parent folder
+        // and can be navigated into.
+        if options.individual_folders {
+            preview_entries.push(ExtractionPreviewEntry {
+                name: destination_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                is_dir: true,
+                destination_path: destination_root.to_string_lossy().to_string(),
+            });
+        }
+
+        for (rel, is_dir) in &final_map {
+            let dest = rel
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .fold(destination_root.clone(), |acc, seg| acc.join(seg));
+            preview_entries.push(ExtractionPreviewEntry {
+                name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
+                is_dir: *is_dir,
+                destination_path: dest.to_string_lossy().to_string(),
+            });
+        }
+
         rows.push(ExtractionPreviewRow {
             archive_path: archive.to_string_lossy().to_string(),
             destination_root: destination_root.to_string_lossy().to_string(),

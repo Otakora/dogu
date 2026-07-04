@@ -817,14 +817,16 @@
             >
               <div class="grid-icon" aria-hidden="true">
                 {#if entry.isGhost}
-                  <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="3 2" class="icon-ghost-lg">
-                    {#if entry.isDir}
+                  {#if entry.isDir}
+                    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="3 2" class="icon-ghost-dir-lg">
                       <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
-                    {:else}
+                    </svg>
+                  {:else}
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="3 2" class="icon-ghost-file-lg">
                       <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
                       <polyline points="13 2 13 9 20 9"/>
-                    {/if}
-                  </svg>
+                    </svg>
+                  {/if}
                 {:else if entry.isDir}
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" class="icon-dir-lg">
                     <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
@@ -1046,10 +1048,11 @@
   .grid-icon { display: flex; align-items: center; justify-content: center; }
   .icon-dir-lg { color: #e0a030; }
   .icon-file-lg { color: var(--text-muted); }
-  .icon-ghost-lg { color: var(--accent); opacity: 0.7; }
+  .icon-ghost-dir-lg  { color: #e0a030; opacity: 0.9; }
+  .icon-ghost-file-lg { color: var(--accent); opacity: 0.8; }
 
   .grid-item--ghost {
-    opacity: 0.72;
+    opacity: 0.78;
 
     .grid-name { font-style: italic; color: var(--text-muted); }
   }

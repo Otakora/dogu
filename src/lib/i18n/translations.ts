@@ -437,8 +437,7 @@ const en = {
   "queue.kind.compress": "Compress",
   "queue.kind.chdConvert": "CHD Conv",
   "queue.kind.chdRestore": "CHD Rest",
-  "queue.afterStep": "after step {n}",
-  "queue.dependencyBadge": "chained",
+  "queue.chainedAfter": "Chained · after step {n}",
   "queue.parallelDisabledDeps": "Sequential only — some steps use the output of earlier steps",
   "queue.removedWithDependents": "Removed {count} chained operations",
 
@@ -956,8 +955,7 @@ const es: Record<TranslationKey, string> = {
   "queue.kind.compress": "Comprimir",
   "queue.kind.chdConvert": "CHD Conv",
   "queue.kind.chdRestore": "CHD Rest",
-  "queue.afterStep": "tras el paso {n}",
-  "queue.dependencyBadge": "encadenada",
+  "queue.chainedAfter": "Encadenada · tras el paso {n}",
   "queue.parallelDisabledDeps": "Solo secuencial — hay pasos que usan la salida de pasos anteriores",
   "queue.removedWithDependents": "Se han quitado {count} operaciones encadenadas",
 

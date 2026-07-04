@@ -57,15 +57,14 @@
     return (op.kind === "delete" ? op.deletes : op.sources);
   }
 
-  /** 1-based positions of the ops this op depends on, e.g. "after step 1". */
+  /** 1-based step numbers this op depends on, e.g. "1" or "1, 2" (null if none). */
   function dependencyLabel(op: QueuedOp): string | null {
     if (op.dependsOn.length === 0) return null;
     const steps = op.dependsOn
       .map(id => app.opQueue.findIndex(o => o.id === id) + 1)
       .filter(n => n > 0)
       .sort((a, b) => a - b);
-    if (steps.length === 0) return null;
-    return t("queue.afterStep", { n: steps.join(", ") });
+    return steps.length ? steps.join(", ") : null;
   }
 
   function basename(p: string): string {
@@ -262,20 +261,24 @@
                       </svg>
                     </div>
 
-                    <!-- Number -->
-                    <span class="op-num" aria-hidden="true">{i + 1}</span>
-
-                    <!-- Kind badge -->
-                    <span class="kind-badge">{kindLabel(op.kind)}</span>
+                    <!-- Step block: big number + action -->
+                    <div class="op-step" class:op-step--chained={op.dependsOn.length > 0}>
+                      <span class="op-step-num">{i + 1}</span>
+                      <span class="op-step-kind">{kindLabel(op.kind)}</span>
+                    </div>
 
                     <!-- Content -->
                     <div class="op-content">
-                      <div class="op-title">
-                        {op.title}
-                        {#if dependencyLabel(op)}
-                          <span class="dep-badge" title={t("queue.parallelDisabledDeps")}>⛓ {dependencyLabel(op)}</span>
-                        {/if}
-                      </div>
+                      <div class="op-title">{op.title}</div>
+                      {#if dependencyLabel(op)}
+                        <div class="op-chain" title={t("queue.parallelDisabledDeps")}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                          </svg>
+                          <span>{t("queue.chainedAfter", { n: dependencyLabel(op) ?? "" })}</span>
+                        </div>
+                      {/if}
                       {#if opDisplaySources(op).length > 0}
                         <div class="op-paths">
                           {#each opDisplaySources(op).slice(0, 2) as src}
@@ -676,34 +679,53 @@
     &:active { cursor: grabbing; }
   }
 
-  .op-num {
+  /* Step block: prominent number + action on the left of each card */
+  .op-step {
     flex-shrink: 0;
-    min-width: 16px;
-    height: 16px;
+    width: 50px;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--kind-color) 15%, var(--surface));
-    color: var(--kind-color);
-    font-size: 10px;
-    font-weight: 700;
-    line-height: 1;
-    padding: 0 3px;
+    gap: 2px;
+    padding: 4px 2px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--kind-color) 14%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--kind-color) 28%, transparent);
   }
 
-  .kind-badge {
-    flex-shrink: 0;
-    padding: 1px 5px;
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--kind-color) 12%, var(--surface));
+  .op-step-num {
+    font-size: 19px;
+    font-weight: 800;
+    line-height: 1;
     color: var(--kind-color);
-    font-size: 9.5px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .op-step-kind {
+    font-size: 8.5px;
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
+    color: var(--kind-color);
     white-space: nowrap;
-    border: 1px solid color-mix(in srgb, var(--kind-color) 30%, transparent);
+  }
+
+  /* Chained cards get a link glyph on their step block */
+  .op-step--chained {
+    position: relative;
+
+    &::before {
+      content: '';
+      position: absolute;
+      top: -7px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 2px;
+      height: 7px;
+      background: var(--accent);
+      border-radius: 1px;
+    }
   }
 
   .op-content {
@@ -711,7 +733,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
   }
 
   .op-title {
@@ -723,16 +745,22 @@
     text-overflow: ellipsis;
   }
 
-  .dep-badge {
-    margin-left: 6px;
-    padding: 1px 5px;
-    border-radius: 7px;
-    font-size: 10px;
+  /* Chain indicator: clearly ties this op to an earlier step */
+  .op-chain {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    align-self: flex-start;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10.5px;
     font-weight: 600;
     color: var(--accent);
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
     white-space: nowrap;
+
+    svg { flex-shrink: 0; }
   }
 
   .op-paths {

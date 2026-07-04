@@ -65,13 +65,13 @@
   <div class="file-col file-col--name">
     <span class="file-icon" aria-hidden="true">
       {#if entry.isGhost}
-        <!-- Dashed outline = a file/folder that does not exist yet -->
+        <!-- Dashed outline = doesn't exist yet. Gold = folder, accent = file. -->
         {#if entry.isDir}
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2" class="icon-ghost">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="3 2" class="icon-ghost-dir">
             <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
           </svg>
         {:else}
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2" class="icon-ghost">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2" class="icon-ghost-file">
             <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
             <polyline points="13 2 13 9 20 9"/>
           </svg>
@@ -178,11 +178,13 @@
   .file-icon { flex-shrink: 0; display: flex; }
   .icon-dir  { color: #e0a030; }
   .icon-file { color: var(--text-muted); }
-  .icon-ghost { color: var(--accent); opacity: 0.7; }
+  /* Ghost icons: folder keeps the gold folder cue, file uses the accent. */
+  .icon-ghost-dir  { color: #e0a030; opacity: 0.9; }
+  .icon-ghost-file { color: var(--accent); opacity: 0.8; }
 
   /* Ghost (predicted, not-yet-existing) rows */
   .file-row--ghost {
-    opacity: 0.72;
+    opacity: 0.78;
 
     .file-name { font-style: italic; color: var(--text-muted); }
   }
@@ -191,8 +193,9 @@
 
   .ghost-badge {
     flex-shrink: 0;
-    margin-left: 6px;
-    padding: 0 5px;
+    margin-left: 8px;
+    margin-right: 10px;
+    padding: 0 6px;
     height: 15px;
     display: inline-flex;
     align-items: center;

@@ -28,6 +28,7 @@ decided at runtime), so its ghosts are flagged **approximate** (`≈ pending`).
 | CHD convert    | one `.chd` per source (see `build_chd_output_path`) | ✅ |
 | Extract        | the archive's **entire** tree — files and folders at every level (via deep backend preview) | ✅ |
 | CHD restore    | `<stem>.cue` + `<stem>.bin` (or `.iso`)        | ≈ approximate |
+| M3U            | one `.m3u` per selected playlist group         | ✅ |
 | Delete         | — (removes files)                              | — |
 
 Extraction outputs are predicted by calling `build_extraction_preview_deep` when

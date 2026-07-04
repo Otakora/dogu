@@ -151,6 +151,9 @@ pub struct ExtractionOptionsPayload {
     pub destination_path: Option<String>,
     pub delete_archives: bool,
     pub overwrite: bool,
+    /// When not overwriting and a name collides, auto-rename instead of failing/skipping.
+    #[serde(default)]
+    pub rename_on_conflict: bool,
     /// Remote destination path (virtual). When set output is written to temp then uploaded.
     #[serde(default)]
     pub remote_destination: Option<String>,
@@ -213,6 +216,9 @@ pub struct ChdConversionOptionsPayload {
     pub deposit_to_parent: bool,
     pub delete_original_subfolders: bool,
     pub overwrite: bool,
+    /// When not overwriting and a name collides, auto-rename instead of failing.
+    #[serde(default)]
+    pub rename_on_conflict: bool,
     /// Custom output stem (no extension). Only applied when there is exactly 1 source.
     pub custom_name: Option<String>,
     /// "same" (default) = write alongside source; "custom" = write to destination_path.
@@ -245,6 +251,9 @@ pub struct ChdRestoreOptionsPayload {
     pub delete_chd: bool,
     pub overwrite: bool,
     pub split_bin: bool,
+    /// When not overwriting and a name collides, auto-rename instead of failing.
+    #[serde(default)]
+    pub rename_on_conflict: bool,
     /// Remote destination path (virtual). When set the output is written to temp then uploaded.
     #[serde(default)]
     pub remote_destination: Option<String>,
@@ -376,6 +385,9 @@ pub struct CompressionOptionsPayload {
     pub compression_level: u8,
     pub delete_originals: bool,
     pub overwrite: bool,
+    /// When not overwriting and the archive name collides, auto-rename instead of failing.
+    #[serde(default)]
+    pub rename_on_conflict: bool,
     #[serde(default)]
     pub remote_destination: Option<String>,
     #[serde(default)]
@@ -455,6 +467,9 @@ pub struct M3uGenerateGroupPayload {
 pub struct M3uGeneratePayload {
     pub groups: Vec<M3uGenerateGroupPayload>,
     pub overwrite: bool,
+    /// When not overwriting and the .m3u already exists, auto-rename instead of skipping.
+    #[serde(default)]
+    pub rename_on_conflict: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

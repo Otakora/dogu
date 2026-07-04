@@ -314,7 +314,9 @@ pub fn start_copy_or_move_paths(
     destination: String,
     operation: String,
     overwrite: bool,
+    rename_on_conflict: Option<bool>,
 ) -> Result<(), String> {
+    let rename_on_conflict = rename_on_conflict.unwrap_or(false);
     let app_handle = app.clone();
     let remote_manager = remote_state.inner.clone();
     let parsed_paths = parse_paths(paths.clone());
@@ -344,6 +346,7 @@ pub fn start_copy_or_move_paths(
                 destination_path,
                 &operation,
                 overwrite,
+                rename_on_conflict,
             )
         };
         let message = match &result {
@@ -681,7 +684,7 @@ pub async fn generate_m3u_files(
     }
 
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(m3u::generate_all_local(&payload.groups, payload.overwrite))
+        Ok(m3u::generate_all_local(&payload.groups, payload.overwrite, payload.rename_on_conflict))
     })
     .await
     .map_err(|e| e.to_string())?

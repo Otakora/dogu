@@ -324,30 +324,41 @@ pub fn format_m3u_content(base_name: &str, entries: &[String]) -> String {
 // Local file generation
 // ------------------------------------------------------------------
 
-pub fn generate_local(payload: &M3uGenerateGroupPayload, overwrite: bool) -> Result<()> {
-    let out = Path::new(&payload.output_path);
+/// Writes one M3U. Returns the path actually written (which may carry a " (N)"
+/// suffix when `rename_on_conflict` resolved a collision).
+pub fn generate_local(
+    payload: &M3uGenerateGroupPayload,
+    overwrite: bool,
+    rename_on_conflict: bool,
+) -> Result<std::path::PathBuf> {
+    let mut out = std::path::PathBuf::from(&payload.output_path);
     if out.exists() && !overwrite {
-        return Err(anyhow::anyhow!("exists"));
+        if rename_on_conflict {
+            out = crate::ops::unique_path(&out);
+        } else {
+            return Err(anyhow::anyhow!("exists"));
+        }
     }
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let content = format_m3u_content(&payload.base_name, &payload.entries);
-    std::fs::write(out, content.as_bytes())?;
-    Ok(())
+    std::fs::write(&out, content.as_bytes())?;
+    Ok(out)
 }
 
 pub fn generate_all_local(
     groups: &[M3uGenerateGroupPayload],
     overwrite: bool,
+    rename_on_conflict: bool,
 ) -> M3uGenerateResultDto {
     let mut created = Vec::new();
     let mut skipped = Vec::new();
     let mut failed = Vec::new();
 
     for group in groups {
-        match generate_local(group, overwrite) {
-            Ok(()) => created.push(group.output_path.clone()),
+        match generate_local(group, overwrite, rename_on_conflict) {
+            Ok(path) => created.push(path.to_string_lossy().to_string()),
             Err(e) if e.to_string() == "exists" => skipped.push(group.output_path.clone()),
             Err(e) => failed.push(M3uFailureDto {
                 path: group.output_path.clone(),

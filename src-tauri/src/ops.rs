@@ -245,6 +245,63 @@ pub fn rename_path(path: &Path, new_name: &str) -> Result<String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Returns `desired` if it doesn't exist, otherwise the first non-existing
+/// "stem (N)" variant (N starting at 2), preserving any extension. Works for
+/// both files and directories. Used to standardize conflict handling: when an
+/// operation isn't overwriting, the output is renamed instead of failing.
+pub fn unique_path(desired: &Path) -> PathBuf {
+    if !desired.exists() {
+        return desired.to_path_buf();
+    }
+    let parent = desired.parent().map(Path::to_path_buf).unwrap_or_default();
+    let file_name = desired
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // Split "name.ext" into ("name", Some("ext")); directories/extension-less → (name, None).
+    let (stem, ext) = match desired.extension().and_then(OsStr::to_str) {
+        Some(e) if !e.is_empty() => {
+            let s = &file_name[..file_name.len() - e.len() - 1];
+            (s.to_string(), Some(e.to_string()))
+        }
+        _ => (file_name.clone(), None),
+    };
+    let mut n: u32 = 2;
+    loop {
+        let candidate_name = match &ext {
+            Some(e) => format!("{stem} ({n}).{e}"),
+            None => format!("{stem} ({n})"),
+        };
+        let candidate = parent.join(&candidate_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Finds a stem (with " (N)" suffix if needed) for which none of the CHD-restore
+/// outputs (`stem.cue`, `stem.bin`, `stem.iso`) already exist in `dir`. Keeps
+/// the .cue/.bin pair named consistently so the cue keeps referencing its bin.
+fn unique_restore_stem(dir: &Path, stem: &str) -> String {
+    let collides = |s: &str| {
+        dir.join(format!("{s}.cue")).exists()
+            || dir.join(format!("{s}.bin")).exists()
+            || dir.join(format!("{s}.iso")).exists()
+    };
+    if !collides(stem) {
+        return stem.to_string();
+    }
+    let mut n: u32 = 2;
+    loop {
+        let candidate = format!("{stem} ({n})");
+        if !collides(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 pub fn delete_paths(app: &AppHandle, job_id: &str, paths: Vec<PathBuf>) -> Result<()> {
     let total = paths.len().max(1) as f64;
     for (index, path) in paths.iter().enumerate() {
@@ -284,19 +341,23 @@ pub fn copy_or_move_paths(
     destination: PathBuf,
     operation: &str,
     overwrite: bool,
+    rename_on_conflict: bool,
 ) -> Result<()> {
     let total = paths.len().max(1) as f64;
     for (index, source) in paths.iter().enumerate() {
-        let target = destination.join(
+        let mut target = destination.join(
             source
                 .file_name()
                 .ok_or_else(|| anyhow!("Ruta invalida: {}", source.display()))?,
         );
         if target.exists() {
-            if !overwrite {
+            if overwrite {
+                remove_single_path(&target)?;
+            } else if rename_on_conflict {
+                target = unique_path(&target);
+            } else {
                 return Err(anyhow!("El destino ya existe: {}", target.display()));
             }
-            remove_single_path(&target)?;
         }
         emit_log(
             app,
@@ -895,13 +956,20 @@ fn do_extract_archive(
         .unwrap_or_default()
         .as_str()
     {
-        "zip" => extract_zip(archive, destination, options.overwrite)?,
+        "zip" => extract_zip(archive, destination, options.overwrite, options.rename_on_conflict)?,
         "7z" | "rar" => {
             let tool = seven_zip
                 .clone()
                 .ok_or_else(|| anyhow!("No se encontro 7zz/7z integrado ni en PATH."))?;
             ensure_executable(&tool)?;
-            let overwrite_flag = if options.overwrite { "-aoa" } else { "-aos" };
+            // -aoa overwrite, -aou auto-rename the extracted file, -aos skip existing.
+            let overwrite_flag = if options.overwrite {
+                "-aoa"
+            } else if options.rename_on_conflict {
+                "-aou"
+            } else {
+                "-aos"
+            };
             let output = Command::new(&tool)
                 .arg("x")
                 .arg(archive)
@@ -1276,13 +1344,17 @@ pub fn convert_to_chd(
                 },
             )?;
         } else {
-            let output_path = build_chd_output_path(
+            let mut output_path = build_chd_output_path(
                 &effective_source_path,
                 &container_dir,
                 selected_root.as_deref(),
                 &options,
                 is_single,
             );
+            // Not overwriting + collision → rename so chdman writes a fresh file.
+            if output_path.exists() && !options.overwrite && options.rename_on_conflict {
+                output_path = unique_path(&output_path);
+            }
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -1572,15 +1644,23 @@ pub fn restore_from_chd(
             };
             fs::create_dir_all(&destination)?;
 
+            // Not overwriting + collision → rename the output stem so the
+            // .cue/.bin pair lands on fresh names instead of failing.
+            let effective_stem = if !options.overwrite && options.rename_on_conflict {
+                unique_restore_stem(&destination, &stem)
+            } else {
+                stem.clone()
+            };
+
             emit_log(
                 app,
                 job_id,
                 format!("Recuperando contenido desde {} -> {}", effective_chd_path.display(), destination.display()),
             )?;
 
-            let cue_path = destination.join(format!("{stem}.cue"));
-            let bin_path = destination.join(format!("{stem}.bin"));
-            let iso_path = destination.join(format!("{stem}.iso"));
+            let cue_path = destination.join(format!("{effective_stem}.cue"));
+            let bin_path = destination.join(format!("{effective_stem}.bin"));
+            let iso_path = destination.join(format!("{effective_stem}.iso"));
 
             match run_extractcd(&chdman, &effective_chd_path, &cue_path, &bin_path, options.overwrite, options.split_bin) {
                 Ok(_) => {
@@ -1588,7 +1668,7 @@ pub fn restore_from_chd(
                 }
                 Err(error) => {
                     let first_error = error.to_string();
-                    cleanup_restore_outputs(&cue_path, &bin_path, &destination, &stem, &effective_chd_path)?;
+                    cleanup_restore_outputs(&cue_path, &bin_path, &destination, &effective_stem, &effective_chd_path)?;
                     run_extractdvd(&chdman, &effective_chd_path, &iso_path, options.overwrite).map_err(|dvd_error| {
                         anyhow!(
                             "No se pudo recuperar {} como CD ni como DVD.\nCD: {}\nDVD: {}",
@@ -1623,21 +1703,30 @@ pub fn restore_from_chd(
     Ok(())
 }
 
-fn extract_zip(archive_path: &Path, destination: &Path, overwrite: bool) -> Result<()> {
+fn extract_zip(
+    archive_path: &Path,
+    destination: &Path,
+    overwrite: bool,
+    rename_on_conflict: bool,
+) -> Result<()> {
     let file = fs::File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
     for index in 0..archive.len() {
         let mut item = archive.by_index(index)?;
-        let out_path = destination.join(item.mangled_name());
+        let mut out_path = destination.join(item.mangled_name());
         if item.name().ends_with('/') {
             fs::create_dir_all(&out_path)?;
             continue;
         }
         if out_path.exists() && !overwrite {
-            return Err(anyhow!(
-                "Ya existe un fichero y sobrescritura no esta permitida: {}",
-                out_path.display()
-            ));
+            if rename_on_conflict {
+                out_path = unique_path(&out_path);
+            } else {
+                return Err(anyhow!(
+                    "Ya existe un fichero y sobrescritura no esta permitida: {}",
+                    out_path.display()
+                ));
+            }
         }
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent)?;
@@ -2556,12 +2645,16 @@ pub fn compress_to_archive(
             },
         )?;
     } else {
-        let archive_path = dest_folder.join(&archive_filename);
+        let mut archive_path = dest_folder.join(&archive_filename);
         if archive_path.exists() && !options.overwrite {
-            return Err(anyhow!(
-                "El archivo '{}' ya existe. Activa la opción de sobreescribir.",
-                archive_filename
-            ));
+            if options.rename_on_conflict {
+                archive_path = unique_path(&archive_path);
+            } else {
+                return Err(anyhow!(
+                    "El archivo '{}' ya existe. Activa la opción de sobreescribir.",
+                    archive_filename
+                ));
+            }
         }
         emit_log(
             app, job_id,

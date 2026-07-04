@@ -191,6 +191,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   contentSortDirection: "asc",
   contentColumnWidths: DEFAULT_COLUMN_WIDTHS,
   chdScanDepth: 3,
+  defaultOverwriteOnConflict: false,
+  renameOnConflict: true,
 };
 
 function loadSettings(): AppSettings {

@@ -304,6 +304,11 @@ const en = {
   "settingsDialog.maxDepth": "Max depth for size calculation",
   "settingsDialog.chdConversion": "CHD Conversion",
   "settingsDialog.chdScanDepth": "Folder scan depth (1–10)",
+  "settingsDialog.fileConflicts": "File conflicts",
+  "settingsDialog.defaultOverwrite": "Replace existing files by default",
+  "settingsDialog.defaultOverwriteHint": "Used by copy/move (which have no dialog) and as the default for the replace option in operation dialogs.",
+  "settingsDialog.renameOnConflict": "Add a numeric suffix instead of failing",
+  "settingsDialog.renameOnConflictHint": "When not replacing and a name already exists, output as “name (2)”, “name (3)”… instead of stopping with an error.",
   "settingsDialog.done": "Done",
   "settingsDialog.credits": "Credits & Licenses",
 
@@ -826,6 +831,11 @@ const es: Record<TranslationKey, string> = {
   "settingsDialog.maxDepth": "Profundidad máxima para calcular el tamaño",
   "settingsDialog.chdConversion": "Conversión CHD",
   "settingsDialog.chdScanDepth": "Profundidad de escaneo de carpetas (1–10)",
+  "settingsDialog.fileConflicts": "Conflictos de ficheros",
+  "settingsDialog.defaultOverwrite": "Reemplazar ficheros existentes por defecto",
+  "settingsDialog.defaultOverwriteHint": "Lo usan copiar/mover (que no tienen diálogo) y como valor por defecto de la opción de reemplazar en los diálogos de operaciones.",
+  "settingsDialog.renameOnConflict": "Añadir un sufijo numérico en vez de fallar",
+  "settingsDialog.renameOnConflictHint": "Cuando no se reemplaza y ya existe un nombre, generar como «nombre (2)», «nombre (3)»… en lugar de detenerse con error.",
   "settingsDialog.done": "Listo",
   "settingsDialog.credits": "Créditos y licencias",
 

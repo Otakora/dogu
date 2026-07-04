@@ -318,6 +318,12 @@ export type AppSettings = {
   contentSortDirection: SortDirection;
   contentColumnWidths: ContentColumnWidths;
   chdScanDepth: number;
+  /** Default "replace existing" behavior for operations without a dialog (copy/move)
+   *  and the default state of the replace checkbox in operation dialogs. */
+  defaultOverwriteOnConflict: boolean;
+  /** When an operation does NOT overwrite and hits a name collision, append a
+   *  numeric suffix " (2)", " (3)"… instead of failing/skipping. */
+  renameOnConflict: boolean;
 };
 
 export type NotificationKind = "error" | "warn" | "info" | "success";

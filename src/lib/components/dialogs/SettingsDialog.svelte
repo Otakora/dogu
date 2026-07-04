@@ -122,6 +122,37 @@
           </div>
         </div>
 
+        <!-- File conflicts -->
+        <div class="setting-group">
+          <div class="setting-label">{t("settingsDialog.fileConflicts")}</div>
+          <div class="setting-row">
+            <div class="setting-name-block">
+              <span class="setting-name">{t("settingsDialog.defaultOverwrite")}</span>
+              <span class="setting-hint">{t("settingsDialog.defaultOverwriteHint")}</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={app.settings.defaultOverwriteOnConflict}
+              onchange={(e) => app.updateSettings({ defaultOverwriteOnConflict: (e.target as HTMLInputElement).checked })}
+              class="checkbox"
+              aria-label={t("settingsDialog.defaultOverwrite")}
+            />
+          </div>
+          <div class="setting-row">
+            <div class="setting-name-block">
+              <span class="setting-name">{t("settingsDialog.renameOnConflict")}</span>
+              <span class="setting-hint">{t("settingsDialog.renameOnConflictHint")}</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={app.settings.renameOnConflict}
+              onchange={(e) => app.updateSettings({ renameOnConflict: (e.target as HTMLInputElement).checked })}
+              class="checkbox"
+              aria-label={t("settingsDialog.renameOnConflict")}
+            />
+          </div>
+        </div>
+
         <!-- Weight / summary -->
         <div class="setting-group">
           <div class="setting-label">{t("settingsDialog.properties")}</div>
@@ -207,6 +238,20 @@
   .setting-name {
     font-size: 13px;
     color: var(--text);
+  }
+
+  .setting-name-block {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    padding-right: 12px;
+  }
+
+  .setting-hint {
+    font-size: 11px;
+    color: var(--text-subtle);
+    line-height: 1.35;
   }
 
   .setting-row-right {

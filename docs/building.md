@@ -12,6 +12,8 @@ La estrategia canonica de compilacion es:
 
 No forzamos cross-compilacion entre Windows y Linux como ruta principal.
 
+Para las releases oficiales automatizadas en GitHub estamos fijando, por ahora, el conjunto estable de artefactos: `Windows + Linux DEB + Linux Flatpak`. El AppImage sigue disponible en local, pero no forma parte del flujo oficial hasta resolver un fallo especifico de `linuxdeploy` en el runner de Ubuntu.
+
 ## Requisitos generales
 
 - Node.js 20+
@@ -76,6 +78,16 @@ Salida esperada:
 - `dist/dogu-linux-x86_64-<version>.deb`
 
 El script aplica permisos de ejecucion a los sidecars (`chdman`, `7zz`) antes de compilar.
+
+Si solo necesitas el paquete DEB, puedes usar:
+
+```bash
+python3 tools/release.py build-linux-deb
+```
+
+Salida esperada:
+
+- `dist/dogu-linux-x86_64-<version>.deb`
 
 Dependencias de sistema habituales para Tauri en Debian/Ubuntu:
 

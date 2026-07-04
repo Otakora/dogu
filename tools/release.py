@@ -180,6 +180,17 @@ def build_linux_native() -> tuple[Path, Path]:
     return appimage, deb
 
 
+def build_linux_deb() -> Path:
+    if host_os() != "linux":
+        raise RuntimeError(
+            "El build Linux DEB debe ejecutarse en Linux. Para Windows usa la maquina Windows o CI."
+        )
+
+    ensure_linux_sidecars_permissions()
+    run_tauri(["build", "--bundles", "deb"])
+    return copy_latest("deb/*.deb", versioned_filename("linux-deb"))
+
+
 def flatpak_build_commands() -> list[list[str]]:
     build_root = BUILD_DIR / "flatpak-builder"
     repo_dir = DIST_DIR / "flatpak-repo"
@@ -211,6 +222,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Release tooling for Dogu (Tauri edition).")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("build-windows", help="Genera el instalador NSIS de Windows.")
+    subparsers.add_parser("build-linux-deb", help="Genera solo el paquete DEB de Linux.")
     subparsers.add_parser("build-linux-native", help="Genera AppImage y DEB en Linux.")
     subparsers.add_parser("build-linux-flatpak", help="Genera el bundle Flatpak en Linux.")
 
@@ -218,6 +230,9 @@ def main() -> None:
 
     if args.command == "build-windows":
         print(build_windows())
+        return
+    if args.command == "build-linux-deb":
+        print(build_linux_deb())
         return
     if args.command == "build-linux-native":
         artifacts = build_linux_native()

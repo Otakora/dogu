@@ -1,8 +1,8 @@
 <div align="center">
 
-# 道具 · Dogu
+<img src="assets/Dogu-logo.png" alt="Dogu" width="280" />
 
-**A single workbench for the messy work of managing a ROM collection.**
+### 道具 · A single workbench for the messy work of managing a ROM collection.
 
 *Dōgu (道具) — Japanese for "tool" or "implement".*
 

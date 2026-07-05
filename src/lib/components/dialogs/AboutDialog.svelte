@@ -4,6 +4,7 @@
   import Button from "../ui/Button.svelte";
   import { t } from "../../i18n/index.js";
   import pkg from "../../../../package.json";
+  import logoUrl from "../../../../assets/Dogu-logo.png";
 
   type Props = { onclose: () => void };
   let { onclose }: Props = $props();
@@ -50,11 +51,8 @@
 
       <!-- Hero -->
       <div class="hero">
-        <div class="hero-kanji" aria-hidden="true">道具</div>
-        <div class="hero-info">
-          <span class="hero-name">Dogu</span>
-          <span class="hero-version">v{version}</span>
-        </div>
+        <img class="hero-logo" src={logoUrl} alt="Dogu" />
+        <span class="hero-version">v{version}</span>
         <p class="hero-tagline">{t("about.tagline")}</p>
       </div>
 
@@ -127,34 +125,20 @@
     text-align: center;
   }
 
-  .hero-kanji {
-    font-size: 52px;
-    line-height: 1;
-    color: var(--accent);
-    opacity: 0.85;
-    font-weight: 400;
-    letter-spacing: -0.02em;
-    background: var(--accent-soft);
-    width: 80px;
-    height: 80px;
-    border-radius: 18px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  .hero-logo {
+    width: 200px;
+    max-width: 70%;
+    height: auto;
+    display: block;
   }
 
-  .hero-info {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-  }
-
-  .hero-name {
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--text);
-    letter-spacing: -0.01em;
+  /* The logo is navy; on dark surfaces give it a light plate so it stays legible. */
+  :global([data-theme="dark"]) .hero-logo {
+    background: rgba(255, 255, 255, 0.94);
+    padding: 12px 20px;
+    border-radius: 14px;
+    box-sizing: border-box;
+    width: 240px;
   }
 
   .hero-version {

@@ -27,6 +27,7 @@
   const parallelConflicts   = $derived(app.queueConflicts.filter(c => c.severity === 'parallel-only'));
   const hasConflicts        = $derived(app.queueConflicts.length > 0);
   const hasBlockingConflicts= $derived(blockingConflicts.length > 0);
+  const hasQueueWarnings    = $derived(hasConflicts || app.queueHasDependencies);
   // Parallel is only safe with NO conflicts AND no chained dependencies
   // (a consumer must wait for the producer that creates its input).
   const canRunParallel      = $derived(hasQueue && !hasConflicts && !app.queueHasDependencies && !app.queueRunning);
@@ -182,8 +183,8 @@
             <span class="badge" aria-label="{runningCount} running">{runningCount}</span>
           {/if}
         {/if}
-        {#if hasConflicts}
-          <span class="badge badge--warn" aria-label="conflicts">!</span>
+        {#if hasQueueWarnings}
+          <span class="badge badge--warn" aria-label="queue warnings">!</span>
         {/if}
       </button>
 
@@ -343,6 +344,29 @@
                   </div>
                 {/each}
               </div>
+
+              {#if app.queueHasDependencies}
+                <div class="conflicts-box conflicts-box--dependencies">
+                  <div class="conflicts-header">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                    </svg>
+                    <strong>{t("queue.dependencies.sequentialOnly")}</strong>
+                    <span class="conflicts-sep" aria-hidden="true">—</span>
+                    <span class="conflicts-safe-label">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                        <polyline points="20 6 9 17 4 12"/>
+                      </svg>
+                      {t("queue.dependencies.sequentialSafe")}
+                    </span>
+                  </div>
+                  <div class="conflict-row">
+                    <span class="conflict-severity-badge conflict-severity-badge--dependency">{t("queue.conflict.badge.dependency")}</span>
+                    <span class="conflict-text">{t("queue.dependencies.description")}</span>
+                  </div>
+                </div>
+              {/if}
 
               <!-- Conflicts: blocking first, then parallel-only -->
               {#if hasBlockingConflicts}
@@ -861,6 +885,14 @@
     .conflict-row     { color: var(--text, #111); }
   }
 
+  .conflicts-box--dependencies {
+    background: color-mix(in srgb, var(--accent) 8%, var(--surface-alt));
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+
+    .conflicts-header { color: var(--accent); svg { stroke: var(--accent); } }
+    .conflict-row     { color: var(--text, #111); }
+  }
+
   /* Override header's svg rule for the safe-label checkmark */
   .conflicts-header .conflicts-safe-label svg { stroke: var(--success, #16a34a); }
 
@@ -930,6 +962,12 @@
     background: color-mix(in srgb, #f59e0b 15%, transparent);
     color: #b45309;
     border: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+  }
+
+  .conflict-severity-badge--dependency {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   }
 
   .conflict-text {

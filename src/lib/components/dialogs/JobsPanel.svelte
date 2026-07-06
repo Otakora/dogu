@@ -73,6 +73,11 @@
     return p.split(/[/\\]/).filter(Boolean).pop() ?? p;
   }
 
+  /** Final output file names for an op after the queue's rename resolution. */
+  function outputNames(op: QueuedOp): string[] {
+    return app.resolvedOutputsFor(op.id).map(g => g.name);
+  }
+
   // ── Conflict descriptions ─────────────────────────────────
   type ConflictParts = {
     pre: string; labelA: string; colorA: string;
@@ -291,7 +296,11 @@
                           {/if}
                         </div>
                       {/if}
-                      {#if op.destinations.length > 0 && op.kind !== "delete"}
+                      {#if outputNames(op).length > 0}
+                        <div class="op-dest" title={app.resolvedOutputsFor(op.id).map(g => g.path).join('\n')}>
+                          → {outputNames(op).slice(0, 2).join(', ')}{outputNames(op).length > 2 ? ` +${outputNames(op).length - 2}` : ''}
+                        </div>
+                      {:else if op.destinations.length > 0 && op.kind !== "delete"}
                         <div class="op-dest" title={op.destinations[0]}>→ {basename(op.destinations[0])}</div>
                       {/if}
                     </div>

@@ -23,7 +23,7 @@ import type {
   GhostEntry,
   JobPausedDto,
 } from "../types/index.js";
-import { normalizePath } from "../utils/ghosts.js";
+import { normalizePath, uniqueDisplayPath, basenameOf } from "../utils/ghosts.js";
 
 // ─── Local types ───────────────────────────────────────────
 type ConfirmDialogState = {
@@ -365,8 +365,36 @@ function pathsOverlap(a: string, b: string): boolean {
   return pathContainsOther(a, b) || pathContainsOther(b, a);
 }
 
+/**
+ * Resolves the final output paths of every queued op against the outputs of
+ * earlier ops (in queue order), applying the rename-on-conflict policy. This is
+ * the single source of truth for "what each op's files will actually be called":
+ * when two ops would produce the same name, the later one gets a " (2)" suffix
+ * (if it renames), so it no longer collides. Returns opId → resolved outputs.
+ */
+function resolveQueueOutputs(ops: QueuedOp[]): Map<string, GhostEntry[]> {
+  const taken = new Set<string>();
+  const map = new Map<string, GhostEntry[]>();
+  for (const op of ops) {
+    const resolved: GhostEntry[] = [];
+    for (const g of op.produces) {
+      let path = g.path;
+      if (taken.has(normalizePath(path)) && !op.overwrite && op.renameOnConflict) {
+        path = uniqueDisplayPath(g.path, taken);
+      }
+      taken.add(normalizePath(path));
+      resolved.push(path === g.path ? g : { ...g, path, name: basenameOf(path) });
+    }
+    map.set(op.id, resolved);
+  }
+  return map;
+}
+
 function detectConflicts(ops: QueuedOp[]): QueueConflict[] {
   const conflicts: QueueConflict[] = [];
+  // Compare against RESOLVED outputs so two ops that would produce the same name
+  // but rename around it are not reported as colliding.
+  const resolvedOutputs = resolveQueueOutputs(ops);
 
   function push(opAId: string, opBId: string, kind: ConflictKind, severity: ConflictSeverity, pathA: string, pathB: string) {
     if (!conflicts.some(c => c.opAId === opAId && c.opBId === opBId && c.kind === kind)) {
@@ -377,7 +405,8 @@ function detectConflicts(ops: QueuedOp[]): QueueConflict[] {
   // Conflicts are computed against the actual output FILES each op creates
   // (`produces`), not the destination folders — deleting or writing a different
   // file inside a shared folder is not a conflict.
-  const outputsOf = (op: QueuedOp): string[] => op.produces.map((g) => g.path);
+  const outputsOf = (op: QueuedOp): string[] =>
+    (resolvedOutputs.get(op.id) ?? op.produces).map((g) => g.path);
 
   for (let i = 0; i < ops.length; i++) {
     for (let j = i + 1; j < ops.length; j++) {
@@ -489,6 +518,8 @@ function createAppState() {
   let queueRunning = $state(false);
   let queueRunStats = $state<QueueRunStats | null>(null);
   const queueConflicts = $derived(detectConflicts(opQueue));
+  // Final output names per op after applying rename-on-conflict across the queue.
+  const resolvedOutputs = $derived(resolveQueueOutputs(opQueue));
   // Any op consuming another op's ghost output forces ordered (sequential) execution.
   const queueHasDependencies = $derived(opQueue.some((o) => o.dependsOn.length > 0));
 
@@ -1121,6 +1152,12 @@ function createAppState() {
      * opQueue as a dependency. This getter is for one-shot, non-reactive checks.
      */
     get queueGhosts(): GhostEntry[] { return opQueue.flatMap((o) => o.produces); },
+
+    /** Final (rename-resolved) output files for a queued op — what its files
+     *  will actually be called after the queue's cross-op conflict resolution. */
+    resolvedOutputsFor(opId: string): GhostEntry[] {
+      return resolvedOutputs.get(opId) ?? [];
+    },
 
     toggleQueueMode() { queueMode = !queueMode; },
 

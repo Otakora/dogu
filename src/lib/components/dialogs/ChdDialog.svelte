@@ -12,6 +12,7 @@
   import DestinationField from "./DestinationField.svelte";
   import { t } from "../../i18n/index.js";
   import { app } from "../../stores/app.svelte.js";
+  import { dirnameOf, joinPath, basenameOf } from "../../utils/ghosts.js";
 
   type Mode = "convert" | "restore";
   type NamingMode = "container" | "source" | "custom";
@@ -66,6 +67,27 @@
   let convOnError       = $state<RemoteTransferOnError>("abort");
   const isConvRemoteDest  = $derived(convRemoteDest != null);
   const hasConvCustomDest = $derived(convDestMode === "custom" || isConvRemoteDest);
+
+  // Base output path for a source (before conflict resolution), mirroring
+  // predictChdConvert / build_chd_output_path.
+  function baseChdOutputPath(src: ChdSourceDto): string {
+    const fileName = `${effectiveStem(src)}.chd`;
+    if (convDestMode === "custom" && convDestPath) return joinPath(convDestPath, fileName);
+    if (convRemoteDest) return joinPath(convRemoteDest, fileName);
+    const srcDir = dirnameOf(src.sourcePath);
+    const outDir = convDestMode === "parent" ? dirnameOf(srcDir) : srcDir;
+    return joinPath(outDir, fileName);
+  }
+
+  // Preview names AFTER the rename-on-conflict resolution (sourcePath → final name).
+  const convertPreview = $derived.by(() => {
+    void app.opQueue.length; // re-resolve when the queue changes
+    const valid = analysis.chdSources.filter(s => s.missingFiles.length === 0);
+    const resolved = app.resolvePreviewNames(valid.map(baseChdOutputPath), overwriteChd);
+    const map = new Map<string, string>();
+    valid.forEach((s, i) => map.set(s.sourcePath, basenameOf(resolved[i])));
+    return map;
+  });
 
   function handleConvDestChange(path: string, label: string) {
     if (path.startsWith("remote://")) {
@@ -372,7 +394,7 @@
               {:else}
                 <div class="src-preview">
                   <span class="preview-arrow">→</span>
-                  <span class="preview-name">{stem}.chd</span>
+                  <span class="preview-name">{convertPreview.get(src.sourcePath) ?? `${stem}.chd`}</span>
                 </div>
               {/if}
             </div>

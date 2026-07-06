@@ -1159,6 +1159,34 @@ function createAppState() {
       return resolvedOutputs.get(opId) ?? [];
     },
 
+    /**
+     * Resolves candidate output paths (in order) against everything already
+     * spoken for — queued ops' outputs and real files the app currently knows
+     * about — returning the paths they'll actually get after the rename policy.
+     * For dialog previews so they show the real " (2)"/" (3)" names. `overwrite`
+     * mirrors the dialog's replace option (no rename when replacing).
+     */
+    resolvePreviewNames(basePaths: string[], overwrite: boolean): string[] {
+      const taken = new Set<string>();
+      for (const pane of panes) {
+        for (const tab of pane.tabs) {
+          for (const e of tab.entries) taken.add(normalizePath(e.path));
+        }
+      }
+      for (const outs of resolvedOutputs.values()) {
+        for (const g of outs) taken.add(normalizePath(g.path));
+      }
+      const rename = settings.renameOnConflict;
+      return basePaths.map((base) => {
+        let path = base;
+        if (taken.has(normalizePath(base)) && !overwrite && rename) {
+          path = uniqueDisplayPath(base, taken);
+        }
+        taken.add(normalizePath(path));
+        return path;
+      });
+    },
+
     toggleQueueMode() { queueMode = !queueMode; },
 
     addToQueue(op: QueuedOp) {

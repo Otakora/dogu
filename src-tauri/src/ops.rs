@@ -848,6 +848,8 @@ pub fn extract_archives(
     let total = archives.len().max(1) as f64;
 
     for (index, archive) in archives.iter().enumerate() {
+        let prog_base = index as f64 / total;
+        let prog_span = 1.0 / total;
         let source_name = archive.file_name().unwrap_or(archive.as_os_str()).to_string_lossy().to_string();
         let archive_is_remote = remote::RemoteManager::is_remote_path(&archive.to_string_lossy());
 
@@ -904,7 +906,7 @@ pub fn extract_archives(
                     } else {
                         temp_dir.to_path_buf()
                     };
-                    do_extract_archive(app, job_id, &effective_archive_c, &extract_target, &options_c, &seven_zip_c)?;
+                    do_extract_archive(app, job_id, prog_base, prog_span, &effective_archive_c, &extract_target, &options_c, &seven_zip_c)?;
                     collect_dir_entries(temp_dir)
                 },
             )?;
@@ -916,7 +918,7 @@ pub fn extract_archives(
                 job_id,
                 format!("Descomprimiendo {} -> {}", effective_archive.display(), destination.display()),
             )?;
-            do_extract_archive(app, job_id, &effective_archive, &destination, &options, &seven_zip)?;
+            do_extract_archive(app, job_id, prog_base, prog_span, &effective_archive, &destination, &options, &seven_zip)?;
         }
 
         if options.delete_archives {
@@ -944,6 +946,8 @@ pub fn extract_archives(
 fn do_extract_archive(
     app: &AppHandle,
     job_id: &str,
+    base: f64,
+    span: f64,
     archive: &Path,
     destination: &Path,
     options: &ExtractionOptionsPayload,
@@ -956,7 +960,7 @@ fn do_extract_archive(
         .unwrap_or_default()
         .as_str()
     {
-        "zip" => extract_zip(archive, destination, options.overwrite, options.rename_on_conflict)?,
+        "zip" => extract_zip(app, job_id, base, span, archive, destination, options.overwrite, options.rename_on_conflict)?,
         "7z" | "rar" => {
             let tool = seven_zip
                 .clone()
@@ -970,33 +974,15 @@ fn do_extract_archive(
             } else {
                 "-aos"
             };
-            let output = Command::new(&tool)
-                .arg("x")
+            let mut cmd = Command::new(&tool);
+            cmd.arg("x")
                 .arg(archive)
                 .arg(format!("-o{}", destination.to_string_lossy()))
                 .arg(overwrite_flag)
                 .arg("-y")
-                .output()
-                .map_err(|e| anyhow!("No se pudo lanzar 7-zip ({}): {}", tool.display(), e))?;
-            // Emit 7-zip stdout as log lines so users can read progress.
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            for line in combined.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    let _ = emit_log(app, job_id, format!("[7z] {}", trimmed));
-                }
-            }
-            if !output.status.success() {
-                return Err(anyhow!(
-                    "7-zip fallo al extraer '{}' (codigo: {:?}). Revisa los logs [7z] arriba para el detalle.",
-                    archive.display(),
-                    output.status.code()
-                ));
-            }
+                .arg("-bsp1"); // stream progress percentage to stdout
+            run_command_streaming(app, job_id, base, span, cmd)
+                .map_err(|e| anyhow!("7-zip fallo al extraer '{}': {}", archive.display(), e))?;
         }
         _ => return Err(anyhow!("Formato no soportado: {}", archive.display())),
     }
@@ -1258,6 +1244,8 @@ pub fn convert_to_chd(
     let is_single = valid_sources.len() == 1;
 
     for (index, source) in valid_sources.iter().enumerate() {
+        let prog_base = index as f64 / total;
+        let prog_span = 1.0 / total;
         let source_path = PathBuf::from(&source.source_path);
         let source_is_remote = remote::RemoteManager::is_remote_path(&source.source_path);
 
@@ -1339,7 +1327,7 @@ pub fn convert_to_chd(
                 app, job_id, &rm, pr, remote_dest, &policy, &source_name,
                 |temp_dir| {
                     let output_path = temp_dir.join(&chd_name);
-                    run_chdman_convert(&chdman_c, &source_cmd, &effective_source_c, &output_path, overwrite)?;
+                    run_chdman_convert(app, job_id, prog_base, prog_span, &chdman_c, &source_cmd, &effective_source_c, &output_path, overwrite)?;
                     Ok(vec![output_path])
                 },
             )?;
@@ -1358,7 +1346,7 @@ pub fn convert_to_chd(
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            run_chdman_convert(&chdman, &local_source.command, &effective_source_path, &output_path, options.overwrite)
+            run_chdman_convert(app, job_id, prog_base, prog_span, &chdman, &local_source.command, &effective_source_path, &output_path, options.overwrite)
                 .map_err(|e| { let _ = emit_log(app, job_id, e.to_string()); e })?;
             emit_log(app, job_id, format!("CHD creado: {}", output_path.display()))?;
         }
@@ -1409,6 +1397,10 @@ pub fn convert_to_chd(
 }
 
 fn run_chdman_convert(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
     chdman: &Path,
     command: &str,
     source: &Path,
@@ -1417,16 +1409,12 @@ fn run_chdman_convert(
 ) -> Result<()> {
     let mut cmd = Command::new(chdman);
     cmd.arg(command).arg("-i").arg(source).arg("-o").arg(output);
-    if overwrite { cmd.arg("-f"); }
-    let out = cmd.output()?;
-    if !out.stdout.is_empty() {
-        // swallow stdout — callers may emit it separately
+    if overwrite {
+        cmd.arg("-f");
     }
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(anyhow!(if err.is_empty() { "chdman devolvio un error".to_string() } else { err }));
-    }
-    Ok(())
+    // chdman prints "Compressing, NN.N% complete..." to stderr, updated with \r.
+    run_command_streaming(app, job_id, base, span, cmd)
+        .map_err(|e| anyhow!(if e.to_string().is_empty() { "chdman devolvio un error".to_string() } else { e.to_string() }))
 }
 
 /// Returns just the filename (not the full path) for a CHD output file.
@@ -1514,6 +1502,8 @@ pub fn restore_from_chd(
     let is_single = analysis.restorable_chds.len() == 1;
 
     for (index, source) in analysis.restorable_chds.iter().enumerate() {
+        let prog_base = index as f64 / total;
+        let prog_span = 1.0 / total;
         let chd_path = PathBuf::from(source);
         let chd_is_remote = remote::RemoteManager::is_remote_path(source);
 
@@ -1616,11 +1606,11 @@ pub fn restore_from_chd(
                     let bin_path = write_dir.join(format!("{stem_c}.bin"));
                     let iso_path = write_dir.join(format!("{stem_c}.iso"));
 
-                    match run_extractcd(&chdman_c, &effective_chd_c, &cue_path, &bin_path, overwrite, split_bin) {
+                    match run_extractcd(app, job_id, prog_base, prog_span, &chdman_c, &effective_chd_c, &cue_path, &bin_path, overwrite, split_bin) {
                         Ok(_) => {},
                         Err(first_err) => {
                             cleanup_restore_outputs(&cue_path, &bin_path, &write_dir, &stem_c, &effective_chd_c)?;
-                            run_extractdvd(&chdman_c, &effective_chd_c, &iso_path, overwrite).map_err(|dvd_err| {
+                            run_extractdvd(app, job_id, prog_base, prog_span, &chdman_c, &effective_chd_c, &iso_path, overwrite).map_err(|dvd_err| {
                                 anyhow!(
                                     "No se pudo recuperar como CD ni DVD.\nCD: {}\nDVD: {}",
                                     first_err, dvd_err
@@ -1662,14 +1652,14 @@ pub fn restore_from_chd(
             let bin_path = destination.join(format!("{effective_stem}.bin"));
             let iso_path = destination.join(format!("{effective_stem}.iso"));
 
-            match run_extractcd(&chdman, &effective_chd_path, &cue_path, &bin_path, options.overwrite, options.split_bin) {
+            match run_extractcd(app, job_id, prog_base, prog_span, &chdman, &effective_chd_path, &cue_path, &bin_path, options.overwrite, options.split_bin) {
                 Ok(_) => {
                     emit_log(app, job_id, format!("Extraido como CD: {}", cue_path.display()))?;
                 }
                 Err(error) => {
                     let first_error = error.to_string();
                     cleanup_restore_outputs(&cue_path, &bin_path, &destination, &effective_stem, &effective_chd_path)?;
-                    run_extractdvd(&chdman, &effective_chd_path, &iso_path, options.overwrite).map_err(|dvd_error| {
+                    run_extractdvd(app, job_id, prog_base, prog_span, &chdman, &effective_chd_path, &iso_path, options.overwrite).map_err(|dvd_error| {
                         anyhow!(
                             "No se pudo recuperar {} como CD ni como DVD.\nCD: {}\nDVD: {}",
                             effective_chd_path.display(), first_error, dvd_error
@@ -1704,6 +1694,10 @@ pub fn restore_from_chd(
 }
 
 fn extract_zip(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
     archive_path: &Path,
     destination: &Path,
     overwrite: bool,
@@ -1711,6 +1705,7 @@ fn extract_zip(
 ) -> Result<()> {
     let file = fs::File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
+    let count = archive.len().max(1) as f64;
     for index in 0..archive.len() {
         let mut item = archive.by_index(index)?;
         let mut out_path = destination.join(item.mangled_name());
@@ -1733,6 +1728,8 @@ fn extract_zip(
         }
         let mut output = fs::File::create(&out_path)?;
         std::io::copy(&mut item, &mut output)?;
+        let frac = (index + 1) as f64 / count;
+        let _ = emit_progress(app, job_id, (base + span * frac).clamp(0.0, 1.0), format!("{}", out_path.display()));
     }
     Ok(())
 }
@@ -2109,6 +2106,10 @@ fn build_chd_output_path(
 }
 
 fn run_extractcd(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
     chdman: &Path,
     input: &Path,
     cue_path: &Path,
@@ -2126,24 +2127,20 @@ fn run_extractcd(
     if overwrite {
         command.arg("-f");
     }
-    let output = command.output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Err(anyhow!(if stderr.is_empty() {
-        if stdout.is_empty() {
-            "extractcd devolvio un error".to_string()
-        } else {
-            stdout
-        }
-    } else {
-        stderr
-    }))
+    run_command_streaming(app, job_id, base, span, command)
+        .map_err(|e| anyhow!(if e.to_string().is_empty() { "extractcd devolvio un error".to_string() } else { e.to_string() }))
 }
 
-fn run_extractdvd(chdman: &Path, input: &Path, iso_path: &Path, overwrite: bool) -> Result<()> {
+fn run_extractdvd(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    chdman: &Path,
+    input: &Path,
+    iso_path: &Path,
+    overwrite: bool,
+) -> Result<()> {
     let mut command = Command::new(chdman);
     command
         .arg("extractdvd")
@@ -2154,21 +2151,8 @@ fn run_extractdvd(chdman: &Path, input: &Path, iso_path: &Path, overwrite: bool)
     if overwrite {
         command.arg("-f");
     }
-    let output = command.output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Err(anyhow!(if stderr.is_empty() {
-        if stdout.is_empty() {
-            "extractdvd devolvio un error".to_string()
-        } else {
-            stdout
-        }
-    } else {
-        stderr
-    }))
+    run_command_streaming(app, job_id, base, span, command)
+        .map_err(|e| anyhow!(if e.to_string().is_empty() { "extractdvd devolvio un error".to_string() } else { e.to_string() }))
 }
 
 fn cleanup_restore_outputs(
@@ -2230,6 +2214,121 @@ pub fn emit_progress(app: &AppHandle, job_id: &str, progress: f64, message: Stri
         },
     )?;
     Ok(())
+}
+
+/// Parses the first "NN%" / "NN.N%" in a line into a 0..1 fraction.
+fn first_percent_fraction(line: &str) -> Option<f64> {
+    let pct = line.find('%')?;
+    let num: String = line[..pct]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let v: f64 = num.parse().ok()?;
+    if (0.0..=100.0).contains(&v) {
+        Some(v / 100.0)
+    } else {
+        None
+    }
+}
+
+/// Reads `reader` byte-by-byte, splitting on '\n' and '\r' (so tools that redraw
+/// a line with carriage returns are handled), emits progress for any line with a
+/// percentage, and returns the full captured text.
+fn stream_progress_lines<R: std::io::Read>(
+    reader: R,
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+) -> String {
+    use std::io::{BufReader, Read};
+    let mut reader = BufReader::new(reader);
+    let mut captured = String::new();
+    let mut seg: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    let mut last_emitted = -1.0_f64; // throttle: tools redraw progress very frequently
+    loop {
+        match reader.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                let b = byte[0];
+                if b == b'\n' || b == b'\r' {
+                    if !seg.is_empty() {
+                        let line = String::from_utf8_lossy(&seg).to_string();
+                        captured.push_str(&line);
+                        captured.push('\n');
+                        if let Some(frac) = first_percent_fraction(&line) {
+                            let p = (base + span * frac).clamp(0.0, 1.0);
+                            if (p - last_emitted).abs() >= 0.005 || p >= 0.999 {
+                                last_emitted = p;
+                                let _ = emit_progress(app, job_id, p, line.trim().to_string());
+                            }
+                        }
+                        seg.clear();
+                    }
+                } else {
+                    seg.push(b);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if !seg.is_empty() {
+        captured.push_str(&String::from_utf8_lossy(&seg));
+    }
+    captured
+}
+
+/// Spawns `command` and streams live progress from BOTH of its output streams
+/// (different tools print progress to stdout or stderr) into `emit_progress` as
+/// `base + span * fraction`. Returns Ok on success, or Err with the captured
+/// output on failure.
+fn run_command_streaming(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    mut command: Command,
+) -> Result<()> {
+    use std::process::Stdio;
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+
+    // Read stderr on a worker thread (needs owned clones), stdout on this thread.
+    let stderr_handle = child.stderr.take().map(|pipe| {
+        let app_c = app.clone();
+        let job_c = job_id.to_string();
+        std::thread::spawn(move || stream_progress_lines(pipe, &app_c, &job_c, base, span))
+    });
+
+    let out_captured = match child.stdout.take() {
+        Some(pipe) => stream_progress_lines(pipe, app, job_id, base, span),
+        None => String::new(),
+    };
+    let err_captured = stderr_handle.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        let mut msg = err_captured.trim().to_string();
+        let out = out_captured.trim();
+        if !out.is_empty() {
+            if !msg.is_empty() {
+                msg.push('\n');
+            }
+            msg.push_str(out);
+        }
+        if msg.is_empty() {
+            msg = "El proceso devolvió un error".to_string();
+        }
+        Err(anyhow!(msg))
+    }
 }
 
 pub fn emit_log(app: &AppHandle, job_id: &str, line: String) -> Result<()> {
@@ -2640,7 +2739,7 @@ pub fn compress_to_archive(
             app, job_id, &rm, pr, remote_dest, &policy, &archive_filename,
             |temp_dir| {
                 let archive_path = temp_dir.join(&archive_filename_c);
-                do_compress(app, &effective_sources_c, &archive_path, &options_c)?;
+                do_compress(app, job_id, 0.0, 0.9, &effective_sources_c, &archive_path, &options_c)?;
                 Ok(vec![archive_path])
             },
         )?;
@@ -2660,7 +2759,7 @@ pub fn compress_to_archive(
             app, job_id,
             format!("Comprimiendo {} elemento(s) → {}", effective_sources.len(), archive_path.display()),
         )?;
-        do_compress(app, &effective_sources, &archive_path, &options)?;
+        do_compress(app, job_id, 0.0, 0.9, &effective_sources, &archive_path, &options)?;
         emit_log(app, job_id, format!("Archivo creado: {}", archive_path.display()))?;
     }
 
@@ -2689,22 +2788,46 @@ pub fn compress_to_archive(
 
 fn do_compress(
     app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
     sources: &[PathBuf],
     archive_path: &Path,
     options: &CompressionOptionsPayload,
 ) -> Result<()> {
     match options.format.as_str() {
-        "7z" => compress_via_7z(app, sources, archive_path, options.compression_level),
+        "7z" => compress_via_7z(app, job_id, base, span, sources, archive_path, options.compression_level),
         "rar" => {
             let rar = find_rar_binary()
                 .ok_or_else(|| anyhow!("RAR no está disponible en este sistema"))?;
             compress_via_rar(&rar, sources, archive_path, options.compression_level)
         }
-        _ => compress_to_zip(sources, archive_path, options.compression_level),
+        _ => compress_to_zip(app, job_id, base, span, sources, archive_path, options.compression_level),
     }
 }
 
-fn compress_to_zip(sources: &[PathBuf], archive_path: &Path, level: u8) -> Result<()> {
+/// Counts regular files under `path` (1 if `path` is itself a file).
+fn count_files_under(path: &Path) -> u64 {
+    if path.is_file() {
+        1
+    } else {
+        WalkDir::new(path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .count() as u64
+    }
+}
+
+fn compress_to_zip(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    sources: &[PathBuf],
+    archive_path: &Path,
+    level: u8,
+) -> Result<()> {
     let file = fs::File::create(archive_path)?;
     let mut zip = zip::ZipWriter::new(file);
 
@@ -2717,34 +2840,46 @@ fn compress_to_zip(sources: &[PathBuf], archive_path: &Path, level: u8) -> Resul
         .compression_method(method)
         .compression_level(zip_level);
 
+    let total: u64 = sources.iter().map(|s| count_files_under(s)).sum::<u64>().max(1);
+    let mut done: u64 = 0;
+
     for source in sources {
-        let base = source.parent().unwrap_or(source);
-        add_path_to_zip(&mut zip, source, base, options)?;
+        let src_base = source.parent().unwrap_or(source);
+        add_path_to_zip(app, job_id, base, span, total, &mut done, &mut zip, source, src_base, options)?;
     }
     zip.finish()?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_path_to_zip<W: Write + Seek>(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    total: u64,
+    done: &mut u64,
     zip: &mut zip::ZipWriter<W>,
     path: &Path,
-    base: &Path,
+    base_dir: &Path,
     options: zip::write::SimpleFileOptions,
 ) -> Result<()> {
     if path.is_file() {
         let name = path
-            .strip_prefix(base)
+            .strip_prefix(base_dir)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
         zip.start_file(&name, options)?;
         let mut f = fs::File::open(path)?;
         io::copy(&mut f, zip)?;
+        *done += 1;
+        let _ = emit_progress(app, job_id, (base + span * (*done as f64 / total as f64)).clamp(0.0, 1.0), name);
     } else if path.is_dir() {
         for entry in WalkDir::new(path).min_depth(0).into_iter().filter_map(|e| e.ok()) {
             let entry_path = entry.path();
             let name = entry_path
-                .strip_prefix(base)
+                .strip_prefix(base_dir)
                 .unwrap_or(entry_path)
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -2757,27 +2892,35 @@ fn add_path_to_zip<W: Write + Seek>(
                 zip.start_file(&name, options)?;
                 let mut f = fs::File::open(entry_path)?;
                 io::copy(&mut f, zip)?;
+                *done += 1;
+                let _ = emit_progress(app, job_id, (base + span * (*done as f64 / total as f64)).clamp(0.0, 1.0), name);
             }
         }
     }
     Ok(())
 }
 
-fn compress_via_7z(app: &AppHandle, sources: &[PathBuf], archive_path: &Path, level: u8) -> Result<()> {
+fn compress_via_7z(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    sources: &[PathBuf],
+    archive_path: &Path,
+    level: u8,
+) -> Result<()> {
     let tool = seven_zip_path(app)
         .ok_or_else(|| anyhow!("No se encontró 7zz/7z integrado ni en PATH."))?;
     ensure_executable(&tool)?;
-    let status = Command::new(&tool)
-        .arg("a")
+    let mut cmd = Command::new(&tool);
+    cmd.arg("a")
         .arg(archive_path)
         .args(sources)
         .arg(format!("-mx={level}"))
         .arg("-y")
-        .status()?;
-    if !status.success() {
-        return Err(anyhow!("7zz devolvió un error al comprimir"));
-    }
-    Ok(())
+        .arg("-bsp1"); // stream progress percentage to stdout
+    run_command_streaming(app, job_id, base, span, cmd)
+        .map_err(|e| anyhow!("7zz devolvió un error al comprimir: {}", e))
 }
 
 fn compress_via_rar(rar_binary: &Path, sources: &[PathBuf], archive_path: &Path, level: u8) -> Result<()> {

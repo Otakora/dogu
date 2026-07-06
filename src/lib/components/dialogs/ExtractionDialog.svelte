@@ -83,7 +83,7 @@
   let showFullPreview = $state(false);
 
   function archiveStem(path: string): string {
-    return path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? path;
+    return path.split(/[\\/]/).pop()?.replace(/\.[A-Za-z0-9]{1,8}$/, "") ?? path;
   }
 
   const isSingleArchive = $derived(archives.length === 1);

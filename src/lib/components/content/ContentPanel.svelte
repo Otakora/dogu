@@ -608,7 +608,7 @@
     }
 
     if (hasArchives) {
-      const archiveStem = archivePaths[0].split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? archivePaths[0];
+      const archiveStem = archivePaths[0].split(/[\\/]/).pop()?.replace(/\.[A-Za-z0-9]{1,8}$/, "") ?? archivePaths[0];
       const extractToFolderLabel = archivePaths.length === 1
         ? t("menu.extractToNamed", { name: archiveStem })
         : t("menu.extractToSeparateFolders");

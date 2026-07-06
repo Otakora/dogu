@@ -634,7 +634,7 @@
   // ── Compress ──────────────────────────────────────────────
   function handleCompressQuick(paths: string[]) {
     if (paths.length === 0) return;
-    const stem = paths[0].replace(/\\/g, "/").split("/").filter(Boolean).pop()?.replace(/\.[^.]+$/, "") ?? "archive";
+    const stem = paths[0].replace(/\\/g, "/").split("/").filter(Boolean).pop()?.replace(/\.[A-Za-z0-9]{1,8}$/, "") ?? "archive";
     const opts: CompressionOptionsPayload = {
       format: "zip",
       archiveName: paths.length === 1 ? stem : "archive",

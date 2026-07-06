@@ -27,7 +27,9 @@
   function defaultName(): string {
     if (sources.length === 1) {
       const leaf = sources[0].replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? "archive";
-      return leaf.replace(/\.[^.]+$/, "");
+      // Strip only a real trailing extension (alphanumeric, ≤8 chars). This avoids
+      // mangling version-dotted names/folders like "Game (v1.1)".
+      return leaf.replace(/\.[A-Za-z0-9]{1,8}$/, "");
     }
     const parent = sources[0].replace(/\\/g, "/").split("/").filter(Boolean);
     return parent.length >= 2 ? parent[parent.length - 2] : "archive";

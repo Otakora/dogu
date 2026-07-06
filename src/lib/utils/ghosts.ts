@@ -175,12 +175,9 @@ export function predictCompress(opts: CompressionOptionsPayload, destDir: string
 
 /**
  * CHD convert: one `.chd` per source. Ported from `build_chd_output_path`
- * (src-tauri/src/ops.rs). `containerDir` is the folder holding the source disc
- * image; here we approximate it as the source's parent directory.
- *
- * The `depositToParent` option can relocate the output to the originally
- * selected root, which we can't know at prediction time — in that case the
- * ghost is flagged approximate so the overlay doesn't over-promise its folder.
+ * (src-tauri/src/ops.rs). The container is the folder holding the source disc
+ * image (the source's parent). `depositToParent` places the output one level up
+ * (the container's parent) — deterministic, matching the backend.
  */
 export function predictChdConvert(
   sources: string[],
@@ -210,8 +207,8 @@ export function predictChdConvert(
     if (opts.remoteDestination) {
       return makeGhost(joinPath(opts.remoteDestination, fileName), false, opId, false);
     }
-    // depositToParent relocates to the selected root — unknown here.
-    return makeGhost(joinPath(srcDir, fileName), false, opId, opts.depositToParent);
+    const outDir = opts.depositToParent ? dirnameOf(srcDir) : srcDir;
+    return makeGhost(joinPath(outDir, fileName), false, opId, false);
   });
 }
 

@@ -2094,14 +2094,17 @@ fn build_chd_output_path(
         }
     }
 
+    // Normally the CHD lands in the folder holding the source disc image
+    // (its container). "Deposit to parent" places it one level up — the parent
+    // of that container — which is deterministic and matches the ghost.
     let mut output_dir = source_path.parent().unwrap_or(source_path).to_path_buf();
     if options.deposit_to_parent {
-        if let Some(root) = selected_root {
-            if source_path.starts_with(root) && source_path.parent().unwrap_or(source_path) != root {
-                output_dir = root.to_path_buf();
-            }
-        }
+        output_dir = output_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(output_dir);
     }
+    let _ = selected_root; // no longer used for placement
     output_dir.join(format!("{raw_stem}.chd"))
 }
 

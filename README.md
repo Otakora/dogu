@@ -138,7 +138,7 @@ license texts travel with the app and are credited in **Settings → Credits & L
 | Tool | Source | License | Platforms |
 |------|--------|---------|-----------|
 | chdman v0.288 | [MAME](https://mamedev.org/) | GPL-2.0 | Windows, Linux |
-| 7-Zip | [7-zip.org](https://7-zip.org/) | LGPL-2.1 | Windows (`7za`), Linux (`7zz`) |
+| 7-Zip | [7-zip.org](https://7-zip.org/) | LGPL-2.1 | Windows (`7z`/`7za`), Linux (`7zz`) |
 
 See [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) for the full attribution.
 
@@ -280,7 +280,7 @@ Sus textos de licencia viajan con la app y se acreditan en **Configuración → 
 | Herramienta | Fuente | Licencia | Plataformas |
 |------------|--------|----------|-------------|
 | chdman v0.288 | [MAME](https://mamedev.org/) | GPL-2.0 | Windows, Linux |
-| 7-Zip | [7-zip.org](https://7-zip.org/) | LGPL-2.1 | Windows (`7za`), Linux (`7zz`) |
+| 7-Zip | [7-zip.org](https://7-zip.org/) | LGPL-2.1 | Windows (`7z`/`7za`), Linux (`7zz`) |
 
 Consulta [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) para la atribución completa.
 

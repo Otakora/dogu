@@ -121,6 +121,22 @@ def ensure_linux_sidecars_permissions() -> None:
             binary.chmod(current | 0o755)
 
 
+def ensure_windows_rar_extraction_sidecars() -> None:
+    if host_os() != "windows":
+        return
+    required = (
+        PROJECT_ROOT / "third_party" / "7zip" / "windows" / "7z.exe",
+        PROJECT_ROOT / "third_party" / "7zip" / "windows" / "7z.dll",
+    )
+    missing = [path for path in required if not path.exists()]
+    if missing:
+        names = ", ".join(str(path.relative_to(PROJECT_ROOT)) for path in missing)
+        raise RuntimeError(
+            "Faltan sidecars necesarios para extraccion RAR nativa en Windows: "
+            f"{names}"
+        )
+
+
 def run_tauri(args: list[str]) -> None:
     env = build_env()
     ensure_node_modules()
@@ -162,6 +178,7 @@ def build_windows() -> Path:
             "El build de Windows debe ejecutarse en Windows. Para obtener el artefacto desde Linux usa CI."
         )
 
+    ensure_windows_rar_extraction_sidecars()
     run_tauri(["build", "--bundles", "nsis"])
     return copy_latest("nsis/*-setup.exe", versioned_filename("windows"))
 

@@ -191,6 +191,14 @@ Los binarios de terceros se incluyen en `third_party/` y Tauri los empaqueta com
 | Binario | Windows | Linux |
 |---------|---------|-------|
 | chdman | `third_party/chdman/chdman.exe` | `third_party/chdman/linux/chdman` |
-| 7-Zip | `third_party/7zip/7za.exe` | `third_party/7zip/linux/7zz` |
+| 7-Zip | `third_party/7zip/windows/7z.exe` + `7z.dll` para RAR; `7za.exe` + `7za.dll` legado | `third_party/7zip/linux/7zz` |
 
 En Linux el script de release aplica `chmod +x` a estos binarios antes de compilar. En Windows no es necesario.
+
+La extraccion `.rar` debe funcionar sin depender de una instalacion externa de
+7-Zip. Por eso el build de Windows comprueba que `7z.exe` y `7z.dll` esten
+presentes antes de generar el instalador. `7za.exe` por si solo no basta para
+listar ni extraer RAR modernos.
+
+La compresion `.rar` no se empaqueta con Dogu. Se habilita solo cuando el
+sistema del usuario aporta `rar`/WinRAR.

@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use tauri::{AppHandle, Manager};
 
@@ -58,26 +61,102 @@ pub fn chdman_path(app: &AppHandle) -> Option<PathBuf> {
 }
 
 pub fn seven_zip_path(app: &AppHandle) -> Option<PathBuf> {
+    generic_seven_zip_candidates(app).into_iter().next()
+}
+
+pub fn rar_capable_seven_zip_path(app: &AppHandle) -> Option<PathBuf> {
+    rar_seven_zip_candidates(app)
+        .into_iter()
+        .find(|path| seven_zip_supports_rar(path))
+}
+
+fn generic_seven_zip_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    build_seven_zip_candidates(app, false)
+}
+
+fn rar_seven_zip_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    build_seven_zip_candidates(app, true)
+}
+
+fn build_seven_zip_candidates(
+    app: &AppHandle,
+    prefer_rar_capable_path_tools: bool,
+) -> Vec<PathBuf> {
     let root = runtime_root(app);
-    let candidate = root
+    let bundled_7zz = root
         .join("third_party")
         .join("7zip")
         .join(platform_name())
         .join(exe_name("7zz"));
-    if candidate.exists() {
-        return Some(candidate);
-    }
-    let windows_fallback = root
+    let bundled_7z = root
+        .join("third_party")
+        .join("7zip")
+        .join(platform_name())
+        .join(exe_name("7z"));
+    let bundled_7za = root
         .join("third_party")
         .join("7zip")
         .join(platform_name())
         .join(exe_name("7za"));
-    if windows_fallback.exists() {
-        return Some(windows_fallback);
+
+    let mut candidates = Vec::new();
+    let ordered = if prefer_rar_capable_path_tools {
+        vec![
+            Some(bundled_7zz),
+            Some(bundled_7z),
+            which_in_path(&exe_name("7zz")),
+            which_in_path(&exe_name("7z")),
+            Some(bundled_7za),
+            which_in_path(&exe_name("7za")),
+        ]
+    } else {
+        vec![
+            Some(bundled_7zz),
+            Some(bundled_7za),
+            Some(bundled_7z),
+            which_in_path(&exe_name("7zz")),
+            which_in_path(&exe_name("7z")),
+            which_in_path(&exe_name("7za")),
+        ]
+    };
+
+    for candidate in ordered.into_iter().flatten() {
+        if candidate.exists() && !candidates.iter().any(|p| p == &candidate) {
+            candidates.push(candidate);
+        }
     }
-    which_in_path(&exe_name("7zz"))
-        .or_else(|| which_in_path(&exe_name("7z")))
-        .or_else(|| which_in_path(&exe_name("7za")))
+
+    candidates
+}
+
+fn seven_zip_supports_rar(path: &Path) -> bool {
+    match tool_stem(path).as_deref() {
+        Some("7z") | Some("7zz") => true,
+        Some("7za") | Some("7zr") => false,
+        _ => probe_seven_zip_for_rar_support(path),
+    }
+}
+
+fn tool_stem(path: &Path) -> Option<String> {
+    path.file_stem()
+        .or_else(|| path.file_name())
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+}
+
+fn probe_seven_zip_for_rar_support(path: &Path) -> bool {
+    let Ok(output) = Command::new(path).arg("i").output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    stdout.contains(" rar      rar ")
+        || stdout.contains(" rar5     rar ")
+        || stdout.contains(" rar1")
+        || stdout.contains(" rar2")
+        || stdout.contains(" rar3")
+        || stdout.contains(" rar5")
 }
 
 fn which_in_path(binary_name: &str) -> Option<PathBuf> {
@@ -89,4 +168,26 @@ fn which_in_path(binary_name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_stem;
+    use std::path::Path;
+
+    #[test]
+    fn tool_stem_handles_common_executables() {
+        assert_eq!(
+            tool_stem(Path::new("C:\\tools\\7z.exe")).as_deref(),
+            Some("7z")
+        );
+        assert_eq!(
+            tool_stem(Path::new("C:\\tools\\7zz.exe")).as_deref(),
+            Some("7zz")
+        );
+        assert_eq!(
+            tool_stem(Path::new("C:\\tools\\7za.exe")).as_deref(),
+            Some("7za")
+        );
+    }
 }

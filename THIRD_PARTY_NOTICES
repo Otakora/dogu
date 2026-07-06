@@ -21,6 +21,11 @@ Official documentation: https://docs.mamedev.org/tools/chdman.html
 Copyright (C) 1999-2026 Igor Pavlov.
 
 Licenses:
+  - 7z.exe / 7z.dll (Windows): GNU LGPL 2.1, BSD 3-clause,
+                       BSD 2-clause, unRAR license restriction
+                       (decompression only; the unRAR sources may
+                       not be used to re-create the RAR compression
+                       algorithm)
   - 7za.exe (Windows): GNU LGPL 2.1, BSD 3-clause, BSD 2-clause
   - 7zz (Linux):       GNU LGPL 2.1, BSD 3-clause, BSD 2-clause,
                        unRAR license restriction (decompression only;

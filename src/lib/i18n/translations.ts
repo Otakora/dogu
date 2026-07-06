@@ -353,7 +353,7 @@ const en = {
   "compressDialog.overwrite": "Overwrite if archive already exists",
   "compressDialog.compressCountSingle": "Create archive ({count} item)",
   "compressDialog.compressCountPlural": "Create archive ({count} items)",
-  "compressDialog.rarNotAvailable": "RAR not available — install WinRAR or rar from your package manager.",
+  "compressDialog.rarNotAvailable": "RAR compression requires WinRAR/rar installed on this system.",
 
   // ── ExtractionPreviewModal ──────────────────────────────
   "extractionPreviewModal.title": "Full preview",
@@ -426,6 +426,7 @@ const en = {
   "queue.runSequential": "Run sequentially",
   "queue.clearQueue": "Clear queue",
   "queue.operationQueued": "Added to queue",
+  "queue.extractGhostPreviewFailed": "The extraction was queued, but ghost outputs could not be predicted: {error}",
   "queue.remove": "Remove",
   "queue.conflicts.blocking": "Blocking conflicts — cannot run in any mode",
   "queue.conflicts.parallelOnly.warn": "Parallel-only conflicts",
@@ -886,7 +887,7 @@ const es: Record<TranslationKey, string> = {
   "compressDialog.overwrite": "Sobreescribir si el archivo ya existe",
   "compressDialog.compressCountSingle": "Crear archivo ({count} elemento)",
   "compressDialog.compressCountPlural": "Crear archivo ({count} elementos)",
-  "compressDialog.rarNotAvailable": "RAR no disponible — instala WinRAR o rar desde tu gestor de paquetes.",
+  "compressDialog.rarNotAvailable": "La compresión RAR requiere WinRAR/rar instalado en este sistema.",
 
   // ── ExtractionPreviewModal ──────────────────────────────
   "extractionPreviewModal.title": "Vista previa completa",
@@ -1066,6 +1067,7 @@ const es: Record<TranslationKey, string> = {
   "jobPause.retry": "Reintentar",
   "jobPause.skip": "Omitir",
   "jobPause.abort": "Abortar",
+  "queue.extractGhostPreviewFailed": "La extracción se añadió a la cola, pero no se pudieron predecir los fantasmas: {error}",
 };
 
 export const translations: Record<Locale, Record<TranslationKey, string>> = { en, es };

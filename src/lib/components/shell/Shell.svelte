@@ -427,8 +427,8 @@
             .filter(e => e.destinationPath)
             .map(e => buildGhost(e.destinationPath, e.isDir, op.id, false)),
         );
-      } catch {
-        // Leave produces empty if the preview fails — the op still runs fine.
+      } catch (e) {
+        app.notify("warn", t("queue.extractGhostPreviewFailed", { error: String(e) }));
       }
     }
     app.addToQueue(op);

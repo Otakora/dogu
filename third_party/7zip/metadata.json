@@ -5,12 +5,15 @@
   "author": "Igor Pavlov and contributors",
   "urls": {
     "download_page": "https://www.7-zip.org/download.html",
+    "windows_x64": "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-x64.exe",
     "windows_extra": "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-extra.7z",
     "linux_x64": "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-linux-x64.tar.xz",
     "standalone_extractor": "https://github.com/ip7z/7zip/releases/download/26.01/7zr.exe"
   },
   "windows": {
-    "path": "third_party/7zip/windows/7za.exe",
+    "path": "third_party/7zip/windows/7z.exe",
+    "dll": "third_party/7zip/windows/7z.dll",
+    "legacy_path": "third_party/7zip/windows/7za.exe",
     "bundled": true
   },
   "linux": {

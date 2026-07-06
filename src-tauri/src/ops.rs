@@ -1,11 +1,14 @@
 use std::{
-    sync::{Arc, atomic::{AtomicU64, Ordering}},
     collections::BTreeSet,
     ffi::OsStr,
     fs,
-    io::{self, Write, Seek},
+    io::{self, Seek, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -32,21 +35,67 @@ impl Drop for TempGuard {
 use crate::{
     models::{
         ChdConversionOptionsPayload, ChdRestoreOptionsPayload, ChdSourceDto,
-        CompressionCapabilitiesDto, CompressionOptionsPayload,
-        EntryDto,
-        ExtractionOptionsPayload, ExtractionPreviewEntry, ExtractionPreviewRow, JobFinishedDto,
-        JobLogDto, JobProgressDto, KnownFoldersDto, PreflightCheckResult, PreflightWarning,
-        RemoteTransferPolicy, PropertiesSummaryDto, SelectionAnalysisDto, SummaryOptionsPayload, VolumeDto,
+        CompressionCapabilitiesDto, CompressionOptionsPayload, EntryDto, ExtractionOptionsPayload,
+        ExtractionPreviewEntry, ExtractionPreviewRow, JobFinishedDto, JobLogDto, JobProgressDto,
+        KnownFoldersDto, PreflightCheckResult, PreflightWarning, PropertiesSummaryDto,
+        RemoteTransferPolicy, SelectionAnalysisDto, SummaryOptionsPayload, VolumeDto,
     },
-    pause,
-    remote,
-    sidecars::{chdman_path, runtime_root, seven_zip_path},
+    pause, remote,
+    sidecars::{chdman_path, rar_capable_seven_zip_path, runtime_root, seven_zip_path},
 };
 
 const ARCHIVE_EXTENSIONS: &[&str] = &[".zip", ".7z", ".rar"];
 const CD_SOURCE_EXTENSIONS: &[&str] = &[".cue", ".gdi", ".toc"];
 const DVD_SOURCE_EXTENSIONS: &[&str] = &[".iso"];
 const PAIRABLE_BIN_EXTENSIONS: &[&str] = &[".bin"];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArchiveFormat {
+    Zip,
+    SevenZip,
+    Rar,
+}
+
+fn archive_format(path: &Path) -> Result<ArchiveFormat> {
+    match path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default()
+        .as_str()
+    {
+        "zip" => Ok(ArchiveFormat::Zip),
+        "7z" => Ok(ArchiveFormat::SevenZip),
+        "rar" => Ok(ArchiveFormat::Rar),
+        _ => Err(anyhow!("Formato no soportado: {}", path.display())),
+    }
+}
+
+fn archive_tool(app: &AppHandle, format: ArchiveFormat) -> Result<PathBuf> {
+    match format {
+        ArchiveFormat::Zip => Err(anyhow!("ZIP no requiere herramienta externa")),
+        ArchiveFormat::SevenZip => {
+            seven_zip_path(app).ok_or_else(|| anyhow!("No se encontro 7-Zip integrado ni en PATH."))
+        }
+        ArchiveFormat::Rar => rar_capable_seven_zip_path(app).ok_or_else(|| {
+            anyhow!(
+                "No se encontro una herramienta compatible con archivos .rar. \
+El bundle de Dogu debe incluir 7z.exe/7z.dll en Windows o 7zz en Linux; 7za.exe no soporta RAR."
+            )
+        }),
+    }
+}
+
+fn command_output_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("{stderr}\n{stdout}"),
+        (false, true) => stderr,
+        (true, false) => stdout,
+        (true, true) => "El proceso devolvio un error".to_string(),
+    }
+}
 
 pub fn entry_from_path(path: &Path) -> Result<EntryDto> {
     let metadata = fs::metadata(path)?;
@@ -127,7 +176,10 @@ pub fn search_entries(root: &Path, query: &str, recursive: bool) -> Result<Vec<E
 
     let mut results = Vec::new();
     if recursive {
-        for item in WalkDir::new(root).into_iter().filter_map(|entry| entry.ok()) {
+        for item in WalkDir::new(root)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
             let path = item.path();
             if path == root {
                 continue;
@@ -364,7 +416,11 @@ pub fn copy_or_move_paths(
             job_id,
             format!(
                 "{} {} -> {}",
-                if operation == "cut" { "Moviendo" } else { "Copiando" },
+                if operation == "cut" {
+                    "Moviendo"
+                } else {
+                    "Copiando"
+                },
                 source.display(),
                 target.display()
             ),
@@ -382,7 +438,11 @@ pub fn copy_or_move_paths(
             (index + 1) as f64 / total,
             format!(
                 "{} {}",
-                if operation == "cut" { "Moviendo" } else { "Copiando" },
+                if operation == "cut" {
+                    "Moviendo"
+                } else {
+                    "Copiando"
+                },
                 source.display()
             ),
         )?;
@@ -407,7 +467,9 @@ pub fn open_with_dialog(path: &Path) -> Result<()> {
         // OpenWith.exe is the native "Open With" dialog in Windows 8+.
         // rundll32 shell32.dll,OpenAs_RunDLL is deprecated and silently fails on Win10/11.
         let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-        let open_with = PathBuf::from(system_root).join("System32").join("OpenWith.exe");
+        let open_with = PathBuf::from(system_root)
+            .join("System32")
+            .join("OpenWith.exe");
         if open_with.exists() {
             Command::new(&open_with).arg(path).spawn()?;
         } else {
@@ -460,21 +522,14 @@ fn entry_stem_or_name(name: &str) -> String {
 /// without extracting it. Used both to build the extraction preview and to know which
 /// entries to split into their own folders when `split_entries` is enabled.
 fn list_top_level_entries(app: &AppHandle, archive_path: &Path) -> Result<Vec<(String, bool)>> {
-    match archive_path
-        .extension()
-        .and_then(OsStr::to_str)
-        .map(|value| value.to_ascii_lowercase())
-        .unwrap_or_default()
-        .as_str()
-    {
-        "zip" => list_top_level_zip_entries(archive_path),
-        "7z" | "rar" => {
-            let tool = seven_zip_path(app)
-                .ok_or_else(|| anyhow!("No se encontro 7zz/7z integrado ni en PATH."))?;
+    let format = archive_format(archive_path)?;
+    match format {
+        ArchiveFormat::Zip => list_top_level_zip_entries(archive_path),
+        ArchiveFormat::SevenZip | ArchiveFormat::Rar => {
+            let tool = archive_tool(app, format)?;
             ensure_executable(&tool)?;
             list_top_level_7z_entries(&tool, archive_path)
         }
-        _ => Err(anyhow!("Formato no soportado: {}", archive_path.display())),
     }
 }
 
@@ -492,50 +547,39 @@ fn list_top_level_zip_entries(archive_path: &Path) -> Result<Vec<(String, bool)>
                 continue;
             }
             let is_dir = components.next().is_some() || item.name().ends_with('/');
-            seen.entry(name).and_modify(|d| *d = *d || is_dir).or_insert(is_dir);
+            seen.entry(name)
+                .and_modify(|d| *d = *d || is_dir)
+                .or_insert(is_dir);
         }
     }
     Ok(seen.into_iter().collect())
 }
 
 fn list_top_level_7z_entries(tool: &Path, archive_path: &Path) -> Result<Vec<(String, bool)>> {
-    let output = Command::new(tool).arg("l").arg("-slt").arg(archive_path).output()?;
+    let output = Command::new(tool)
+        .arg("l")
+        .arg("-slt")
+        .arg(archive_path)
+        .output()?;
     if !output.status.success() {
         return Err(anyhow!(
-            "No se pudo listar el contenido de {}",
-            archive_path.display()
+            "No se pudo listar el contenido de {} con {}.\n{}",
+            archive_path.display(),
+            tool.display(),
+            command_output_message(&output),
         ));
     }
-    let text = String::from_utf8_lossy(&output.stdout);
     let mut seen: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
-    let mut current_path: Option<String> = None;
-    let mut current_is_dir = false;
-
-    let flush = |path: Option<String>, is_dir: bool, seen: &mut std::collections::BTreeMap<String, bool>| {
-        if let Some(path) = path {
-            let normalized = path.replace('\\', "/");
-            let mut parts = normalized.split('/').filter(|p| !p.is_empty());
-            if let Some(first) = parts.next() {
-                let has_more = parts.next().is_some();
-                let entry_is_dir = has_more || is_dir;
-                seen
-                    .entry(first.to_string())
-                    .and_modify(|d| *d = *d || entry_is_dir)
-                    .or_insert(entry_is_dir);
-            }
-        }
-    };
-
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("Path = ") {
-            flush(current_path.take(), current_is_dir, &mut seen);
-            current_path = Some(rest.trim().to_string());
-            current_is_dir = false;
-        } else if let Some(rest) = line.strip_prefix("Folder = ") {
-            current_is_dir = rest.trim() == "+";
+    for (normalized, is_dir) in parse_7z_slt_entries(&String::from_utf8_lossy(&output.stdout)) {
+        let mut parts = normalized.split('/').filter(|p| !p.is_empty());
+        if let Some(first) = parts.next() {
+            let has_more = parts.next().is_some();
+            let entry_is_dir = has_more || is_dir;
+            seen.entry(first.to_string())
+                .and_modify(|d| *d = *d || entry_is_dir)
+                .or_insert(entry_is_dir);
         }
     }
-    flush(current_path.take(), current_is_dir, &mut seen);
 
     Ok(seen.into_iter().collect())
 }
@@ -567,21 +611,14 @@ fn insert_with_ancestors(
 /// archive, synthesising intermediate directories that aren't listed explicitly.
 /// Used to build the deep extraction preview that powers nested ghost trees.
 fn list_all_entries(app: &AppHandle, archive_path: &Path) -> Result<Vec<(String, bool)>> {
-    match archive_path
-        .extension()
-        .and_then(OsStr::to_str)
-        .map(|value| value.to_ascii_lowercase())
-        .unwrap_or_default()
-        .as_str()
-    {
-        "zip" => list_all_zip_entries(archive_path),
-        "7z" | "rar" => {
-            let tool = seven_zip_path(app)
-                .ok_or_else(|| anyhow!("No se encontro 7zz/7z integrado ni en PATH."))?;
+    let format = archive_format(archive_path)?;
+    match format {
+        ArchiveFormat::Zip => list_all_zip_entries(archive_path),
+        ArchiveFormat::SevenZip | ArchiveFormat::Rar => {
+            let tool = archive_tool(app, format)?;
             ensure_executable(&tool)?;
             list_all_7z_entries(&tool, archive_path)
         }
-        _ => Err(anyhow!("Formato no soportado: {}", archive_path.display())),
     }
 }
 
@@ -599,21 +636,44 @@ fn list_all_zip_entries(archive_path: &Path) -> Result<Vec<(String, bool)>> {
 }
 
 fn list_all_7z_entries(tool: &Path, archive_path: &Path) -> Result<Vec<(String, bool)>> {
-    let output = Command::new(tool).arg("l").arg("-slt").arg(archive_path).output()?;
+    let output = Command::new(tool)
+        .arg("l")
+        .arg("-slt")
+        .arg(archive_path)
+        .output()?;
     if !output.status.success() {
         return Err(anyhow!(
-            "No se pudo listar el contenido de {}",
-            archive_path.display()
+            "No se pudo listar el contenido de {} con {}.\n{}",
+            archive_path.display(),
+            tool.display(),
+            command_output_message(&output),
         ));
     }
-    let text = String::from_utf8_lossy(&output.stdout);
     let mut seen: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    for (path, is_dir) in parse_7z_slt_entries(&String::from_utf8_lossy(&output.stdout)) {
+        insert_with_ancestors(&mut seen, &path, is_dir);
+    }
+
+    Ok(seen.into_iter().collect())
+}
+
+fn parse_7z_slt_entries(text: &str) -> Vec<(String, bool)> {
+    let mut entries = Vec::new();
     let mut current_path: Option<String> = None;
     let mut current_is_dir = false;
-    // The entry listing begins after the "----------" separator; everything
-    // before it is the archive's own header (including a "Path = <archive>"
-    // line that must not be treated as an entry).
     let mut in_entries = false;
+
+    let flush =
+        |path: &mut Option<String>, is_dir: &mut bool, entries: &mut Vec<(String, bool)>| {
+            if let Some(raw) = path.take() {
+                let normalized = raw.replace('\\', "/");
+                let trimmed = normalized.trim_matches('/').to_string();
+                if !trimmed.is_empty() {
+                    entries.push((trimmed, *is_dir));
+                }
+            }
+            *is_dir = false;
+        };
 
     for line in text.lines() {
         if !in_entries {
@@ -623,27 +683,19 @@ fn list_all_7z_entries(tool: &Path, archive_path: &Path) -> Result<Vec<(String, 
             continue;
         }
         if let Some(rest) = line.strip_prefix("Path = ") {
-            if let Some(p) = current_path.take() {
-                insert_with_ancestors(&mut seen, &p, current_is_dir);
-            }
+            flush(&mut current_path, &mut current_is_dir, &mut entries);
             current_path = Some(rest.trim().to_string());
-            current_is_dir = false;
         } else if let Some(rest) = line.strip_prefix("Folder = ") {
-            if rest.trim() == "+" {
-                current_is_dir = true;
-            }
+            current_is_dir = rest.trim() == "+";
         } else if let Some(rest) = line.strip_prefix("Attributes = ") {
-            // Directories carry the 'D' attribute flag (files never do).
             if rest.contains('D') {
                 current_is_dir = true;
             }
         }
     }
-    if let Some(p) = current_path.take() {
-        insert_with_ancestors(&mut seen, &p, current_is_dir);
-    }
+    flush(&mut current_path, &mut current_is_dir, &mut entries);
 
-    Ok(seen.into_iter().collect())
+    entries
 }
 
 /// Builds a deep extraction preview: one entry per file/folder at every level of
@@ -662,7 +714,8 @@ pub fn build_extraction_preview_deep(
         // Apply `splitEntries` (each top-level file is moved into a folder named
         // after its stem) and re-synthesise ancestor directories so every level
         // — including any folders split introduces — is represented.
-        let mut final_map: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+        let mut final_map: std::collections::BTreeMap<String, bool> =
+            std::collections::BTreeMap::new();
         for (rel, is_dir) in &raw {
             let final_rel = if options.split_entries && !is_dir && !rel.contains('/') {
                 format!("{}/{}", entry_stem_or_name(rel), rel)
@@ -792,7 +845,11 @@ fn remote_parent_of(path: &Path) -> Option<String> {
     let logical = &rest[slash..];
     let trimmed = logical.trim_end_matches('/');
     let parent_slash = trimmed.rfind('/')?;
-    let parent = if parent_slash == 0 { "/" } else { &trimmed[..parent_slash] };
+    let parent = if parent_slash == 0 {
+        "/"
+    } else {
+        &trimmed[..parent_slash]
+    };
     Some(format!("remote://{session_id}{parent}"))
 }
 
@@ -844,25 +901,34 @@ pub fn extract_archives(
     remote_manager: Option<Arc<remote::RemoteManager>>,
     pause_registry: Option<pause::PauseRegistry>,
 ) -> Result<()> {
-    let seven_zip = seven_zip_path(app);
     let total = archives.len().max(1) as f64;
 
     for (index, archive) in archives.iter().enumerate() {
         let prog_base = index as f64 / total;
         let prog_span = 1.0 / total;
-        let source_name = archive.file_name().unwrap_or(archive.as_os_str()).to_string_lossy().to_string();
+        let source_name = archive
+            .file_name()
+            .unwrap_or(archive.as_os_str())
+            .to_string_lossy()
+            .to_string();
         let archive_is_remote = remote::RemoteManager::is_remote_path(&archive.to_string_lossy());
 
         // Download remote archive to a temp dir so tools can open it as a local file.
         // TempGuard ensures the dir is removed even if this iteration returns early via `?`.
         let (effective_archive, _guard) = if archive_is_remote {
-            let rm = remote_manager.as_ref()
+            let rm = remote_manager
+                .as_ref()
                 .ok_or_else(|| anyhow!("Se necesita el gestor remoto para descargar el archivo"))?;
             let dl_dir = temp_download_dir(app, job_id)?;
             emit_log(app, job_id, format!("Descargando {}...", source_name))?;
-            let (local, bytes) = rm.download_file_to_dir(&archive.to_string_lossy(), &dl_dir)
+            let (local, bytes) = rm
+                .download_file_to_dir(&archive.to_string_lossy(), &dl_dir)
                 .map_err(|e| anyhow!("Fallo al descargar '{}': {}", source_name, e))?;
-            emit_log(app, job_id, format!("{} descargado ({} bytes)", source_name, bytes))?;
+            emit_log(
+                app,
+                job_id,
+                format!("{} descargado ({} bytes)", source_name, bytes),
+            )?;
             (local, Some(TempGuard(dl_dir)))
         } else {
             (archive.clone(), None)
@@ -877,22 +943,30 @@ pub fn extract_archives(
             None
         };
 
-        let use_remote = remote_manager.is_some()
-            && pause_registry.is_some()
-            && effective_remote_dest.is_some();
+        let use_remote =
+            remote_manager.is_some() && pause_registry.is_some() && effective_remote_dest.is_some();
 
         if use_remote {
             let rm = Arc::clone(remote_manager.as_ref().unwrap());
             let pr = pause_registry.as_ref().unwrap();
             let remote_dest = effective_remote_dest.as_deref().unwrap();
             emit_log(app, job_id, format!("Extrayendo {}...", source_name))?;
-            let policy = options.remote_transfer.clone()
-                .unwrap_or_else(|| RemoteTransferPolicy { on_error: "abort".to_string() });
+            let policy = options
+                .remote_transfer
+                .clone()
+                .unwrap_or_else(|| RemoteTransferPolicy {
+                    on_error: "abort".to_string(),
+                });
             let options_c = options.clone();
-            let seven_zip_c = seven_zip.clone();
             let effective_archive_c = effective_archive.clone();
             run_remote_file_cycle(
-                app, job_id, &rm, pr, remote_dest, &policy, &source_name,
+                app,
+                job_id,
+                &rm,
+                pr,
+                remote_dest,
+                &policy,
+                &source_name,
                 |temp_dir| {
                     let extract_target = if options_c.individual_folders {
                         let stem = effective_archive_c
@@ -906,7 +980,15 @@ pub fn extract_archives(
                     } else {
                         temp_dir.to_path_buf()
                     };
-                    do_extract_archive(app, job_id, prog_base, prog_span, &effective_archive_c, &extract_target, &options_c, &seven_zip_c)?;
+                    do_extract_archive(
+                        app,
+                        job_id,
+                        prog_base,
+                        prog_span,
+                        &effective_archive_c,
+                        &extract_target,
+                        &options_c,
+                    )?;
                     collect_dir_entries(temp_dir)
                 },
             )?;
@@ -916,20 +998,40 @@ pub fn extract_archives(
             emit_log(
                 app,
                 job_id,
-                format!("Descomprimiendo {} -> {}", effective_archive.display(), destination.display()),
+                format!(
+                    "Descomprimiendo {} -> {}",
+                    effective_archive.display(),
+                    destination.display()
+                ),
             )?;
-            do_extract_archive(app, job_id, prog_base, prog_span, &effective_archive, &destination, &options, &seven_zip)?;
+            do_extract_archive(
+                app,
+                job_id,
+                prog_base,
+                prog_span,
+                &effective_archive,
+                &destination,
+                &options,
+            )?;
         }
 
         if options.delete_archives {
             if archive_is_remote {
                 if let Some(ref rm) = remote_manager {
                     rm.delete_entry(app, job_id, &archive.to_string_lossy())?;
-                    emit_log(app, job_id, format!("Archivo remoto eliminado: {}", archive.display()))?;
+                    emit_log(
+                        app,
+                        job_id,
+                        format!("Archivo remoto eliminado: {}", archive.display()),
+                    )?;
                 }
             } else {
                 fs::remove_file(archive)?;
-                emit_log(app, job_id, format!("Archivo comprimido eliminado: {}", archive.display()))?;
+                emit_log(
+                    app,
+                    job_id,
+                    format!("Archivo comprimido eliminado: {}", archive.display()),
+                )?;
             }
         }
 
@@ -951,20 +1053,21 @@ fn do_extract_archive(
     archive: &Path,
     destination: &Path,
     options: &ExtractionOptionsPayload,
-    seven_zip: &Option<PathBuf>,
 ) -> Result<()> {
-    match archive
-        .extension()
-        .and_then(OsStr::to_str)
-        .map(|v| v.to_ascii_lowercase())
-        .unwrap_or_default()
-        .as_str()
-    {
-        "zip" => extract_zip(app, job_id, base, span, archive, destination, options.overwrite, options.rename_on_conflict)?,
-        "7z" | "rar" => {
-            let tool = seven_zip
-                .clone()
-                .ok_or_else(|| anyhow!("No se encontro 7zz/7z integrado ni en PATH."))?;
+    let format = archive_format(archive)?;
+    match format {
+        ArchiveFormat::Zip => extract_zip(
+            app,
+            job_id,
+            base,
+            span,
+            archive,
+            destination,
+            options.overwrite,
+            options.rename_on_conflict,
+        )?,
+        ArchiveFormat::SevenZip | ArchiveFormat::Rar => {
+            let tool = archive_tool(app, format)?;
             ensure_executable(&tool)?;
             // -aoa overwrite, -aou auto-rename the extracted file, -aos skip existing.
             let overwrite_flag = if options.overwrite {
@@ -984,7 +1087,6 @@ fn do_extract_archive(
             run_command_streaming(app, job_id, base, span, cmd)
                 .map_err(|e| anyhow!("7-zip fallo al extraer '{}': {}", archive.display(), e))?;
         }
-        _ => return Err(anyhow!("Formato no soportado: {}", archive.display())),
     }
     if options.split_entries {
         let entries = list_top_level_entries(app, archive)?;
@@ -992,7 +1094,10 @@ fn do_extract_archive(
         emit_log(
             app,
             job_id,
-            format!("Elementos de {} separados en carpetas individuales", archive.display()),
+            format!(
+                "Elementos de {} separados en carpetas individuales",
+                archive.display()
+            ),
         )?;
     }
     Ok(())
@@ -1042,7 +1147,9 @@ pub fn scan_selection(
                 // No recognised file extension — treat as a remote directory.
                 if let Some(ref rm) = remote_manager {
                     has_directories = true;
-                    let file_paths = rm.list_remote_files_recursive(&path_str, max_depth).unwrap_or_default();
+                    let file_paths = rm
+                        .list_remote_files_recursive(&path_str, max_depth)
+                        .unwrap_or_default();
                     for file_path in file_paths {
                         let file_pb = PathBuf::from(&file_path);
                         let fext = file_pb
@@ -1095,8 +1202,16 @@ pub fn scan_selection(
 
         if path.is_dir() {
             has_directories = true;
-            let walk_depth = if max_depth == 0 { usize::MAX } else { max_depth };
-            for item in WalkDir::new(path).max_depth(walk_depth).into_iter().filter_map(|entry| entry.ok()) {
+            let walk_depth = if max_depth == 0 {
+                usize::MAX
+            } else {
+                max_depth
+            };
+            for item in WalkDir::new(path)
+                .max_depth(walk_depth)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+            {
                 let candidate = item.path().to_path_buf();
                 if is_chd_file(&candidate) {
                     let key = candidate.to_string_lossy().to_lowercase();
@@ -1115,7 +1230,9 @@ pub fn scan_selection(
                     }
                     None => {
                         // No source found — check if this is an orphan .bin (no matching .cue)
-                        let ext = candidate.extension().and_then(OsStr::to_str)
+                        let ext = candidate
+                            .extension()
+                            .and_then(OsStr::to_str)
                             .map(|e| format!(".{}", e.to_ascii_lowercase()))
                             .unwrap_or_default();
                         if PAIRABLE_BIN_EXTENSIONS.contains(&ext.as_str()) {
@@ -1150,7 +1267,9 @@ pub fn scan_selection(
                 }
             }
             None => {
-                let ext = path.extension().and_then(OsStr::to_str)
+                let ext = path
+                    .extension()
+                    .and_then(OsStr::to_str)
                     .map(|e| format!(".{}", e.to_ascii_lowercase()))
                     .unwrap_or_default();
                 if PAIRABLE_BIN_EXTENSIONS.contains(&ext.as_str()) {
@@ -1225,19 +1344,29 @@ pub fn convert_to_chd(
     let mut touched_directories = BTreeSet::new();
 
     // Separate sources with missing files so they don't affect the progress denominator.
-    for source in analysis.chd_sources.iter().filter(|s| !s.missing_files.is_empty()) {
+    for source in analysis
+        .chd_sources
+        .iter()
+        .filter(|s| !s.missing_files.is_empty())
+    {
         let name = PathBuf::from(&source.source_path)
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        emit_log(app, job_id, format!(
-            "Saltando '{}': faltan ficheros requeridos — {}",
-            name,
-            source.missing_files.join(", ")
-        ))?;
+        emit_log(
+            app,
+            job_id,
+            format!(
+                "Saltando '{}': faltan ficheros requeridos — {}",
+                name,
+                source.missing_files.join(", ")
+            ),
+        )?;
     }
-    let valid_sources: Vec<_> = analysis.chd_sources.iter()
+    let valid_sources: Vec<_> = analysis
+        .chd_sources
+        .iter()
         .filter(|s| s.missing_files.is_empty())
         .collect();
     let total = valid_sources.len().max(1) as f64;
@@ -1252,12 +1381,18 @@ pub fn convert_to_chd(
         // Download the container directory for remote sources so chdman can access all required files.
         // TempGuard ensures cleanup even on early return via `?`.
         let (effective_source_path, _guard) = if source_is_remote {
-            let rm = remote_manager.as_ref()
+            let rm = remote_manager
+                .as_ref()
                 .ok_or_else(|| anyhow!("Se necesita el gestor remoto para descargar el archivo"))?;
             let dl_dir = temp_download_dir(app, job_id)?;
             rm.download_remote_dir_to_local(&source.container_dir, &dl_dir)?;
-            emit_log(app, job_id, format!("Directorio remoto descargado: {}", source.container_dir))?;
-            let leaf = source_path.file_name()
+            emit_log(
+                app,
+                job_id,
+                format!("Directorio remoto descargado: {}", source.container_dir),
+            )?;
+            let leaf = source_path
+                .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             (dl_dir.join(&leaf), Some(TempGuard(dl_dir)))
@@ -1271,7 +1406,8 @@ pub fn convert_to_chd(
             .flatten()
             .unwrap_or_else(|| ChdSourceDto {
                 source_path: effective_source_path.to_string_lossy().to_string(),
-                container_dir: effective_source_path.parent()
+                container_dir: effective_source_path
+                    .parent()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default(),
                 command: source.command.clone(),
@@ -1307,16 +1443,19 @@ pub fn convert_to_chd(
             None
         };
 
-        let use_remote = remote_manager.is_some()
-            && pause_registry.is_some()
-            && effective_remote_dest.is_some();
+        let use_remote =
+            remote_manager.is_some() && pause_registry.is_some() && effective_remote_dest.is_some();
 
         if use_remote {
             let rm = Arc::clone(remote_manager.as_ref().unwrap());
             let pr = pause_registry.as_ref().unwrap();
             let remote_dest = effective_remote_dest.as_deref().unwrap();
-            let policy = options.remote_transfer.clone()
-                .unwrap_or_else(|| RemoteTransferPolicy { on_error: "abort".to_string() });
+            let policy = options
+                .remote_transfer
+                .clone()
+                .unwrap_or_else(|| RemoteTransferPolicy {
+                    on_error: "abort".to_string(),
+                });
             let chd_name = build_chd_output_filename(&effective_source_path, &options, is_single);
             let chdman_c = chdman.clone();
             let source_cmd = local_source.command.clone();
@@ -1324,10 +1463,26 @@ pub fn convert_to_chd(
             let overwrite = options.overwrite;
 
             run_remote_file_cycle(
-                app, job_id, &rm, pr, remote_dest, &policy, &source_name,
+                app,
+                job_id,
+                &rm,
+                pr,
+                remote_dest,
+                &policy,
+                &source_name,
                 |temp_dir| {
                     let output_path = temp_dir.join(&chd_name);
-                    run_chdman_convert(app, job_id, prog_base, prog_span, &chdman_c, &source_cmd, &effective_source_c, &output_path, overwrite)?;
+                    run_chdman_convert(
+                        app,
+                        job_id,
+                        prog_base,
+                        prog_span,
+                        &chdman_c,
+                        &source_cmd,
+                        &effective_source_c,
+                        &output_path,
+                        overwrite,
+                    )?;
                     Ok(vec![output_path])
                 },
             )?;
@@ -1346,9 +1501,26 @@ pub fn convert_to_chd(
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            run_chdman_convert(app, job_id, prog_base, prog_span, &chdman, &local_source.command, &effective_source_path, &output_path, options.overwrite)
-                .map_err(|e| { let _ = emit_log(app, job_id, e.to_string()); e })?;
-            emit_log(app, job_id, format!("CHD creado: {}", output_path.display()))?;
+            run_chdman_convert(
+                app,
+                job_id,
+                prog_base,
+                prog_span,
+                &chdman,
+                &local_source.command,
+                &effective_source_path,
+                &output_path,
+                options.overwrite,
+            )
+            .map_err(|e| {
+                let _ = emit_log(app, job_id, e.to_string());
+                e
+            })?;
+            emit_log(
+                app,
+                job_id,
+                format!("CHD creado: {}", output_path.display()),
+            )?;
         }
 
         if options.delete_originals {
@@ -1356,13 +1528,21 @@ pub fn convert_to_chd(
                 if source_is_remote {
                     if let Some(ref rm) = remote_manager {
                         rm.delete_entry(app, job_id, original)?;
-                        emit_log(app, job_id, format!("Original remoto eliminado: {original}"))?;
+                        emit_log(
+                            app,
+                            job_id,
+                            format!("Original remoto eliminado: {original}"),
+                        )?;
                     }
                 } else {
                     let original_path = PathBuf::from(original);
                     if original_path.exists() {
                         remove_single_path(&original_path)?;
-                        emit_log(app, job_id, format!("Original eliminado: {}", original_path.display()))?;
+                        emit_log(
+                            app,
+                            job_id,
+                            format!("Original eliminado: {}", original_path.display()),
+                        )?;
                     }
                 }
             }
@@ -1388,7 +1568,11 @@ pub fn convert_to_chd(
         for directory in directories {
             if directory.exists() && fs::read_dir(&directory)?.next().is_none() {
                 fs::remove_dir(&directory)?;
-                emit_log(app, job_id, format!("Carpeta original eliminada: {}", directory.display()))?;
+                emit_log(
+                    app,
+                    job_id,
+                    format!("Carpeta original eliminada: {}", directory.display()),
+                )?;
             }
         }
     }
@@ -1413,8 +1597,13 @@ fn run_chdman_convert(
         cmd.arg("-f");
     }
     // chdman prints "Compressing, NN.N% complete..." to stderr, updated with \r.
-    run_command_streaming(app, job_id, base, span, cmd)
-        .map_err(|e| anyhow!(if e.to_string().is_empty() { "chdman devolvio un error".to_string() } else { e.to_string() }))
+    run_command_streaming(app, job_id, base, span, cmd).map_err(|e| {
+        anyhow!(if e.to_string().is_empty() {
+            "chdman devolvio un error".to_string()
+        } else {
+            e.to_string()
+        })
+    })
 }
 
 /// Returns just the filename (not the full path) for a CHD output file.
@@ -1440,7 +1629,10 @@ fn build_chd_output_filename(
 }
 
 pub fn load_chdman_metadata(app: &AppHandle) -> serde_json::Value {
-    let metadata_path = runtime_root(app).join("third_party").join("chdman").join("metadata.json");
+    let metadata_path = runtime_root(app)
+        .join("third_party")
+        .join("chdman")
+        .join("metadata.json");
     fs::read_to_string(metadata_path)
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
@@ -1467,13 +1659,18 @@ pub fn probe_chdman_runtime(app: &AppHandle) -> crate::models::ToolRuntimeDto {
         Ok(output) => {
             // The binary ran (even if exit code != 0 — chdman exits 1 with no args).
             // Grab the first non-empty line from stdout or stderr as the version hint.
-            let version = [&output.stdout, &output.stderr]
-                .iter()
-                .find_map(|b| {
-                    let s = String::from_utf8_lossy(b);
-                    s.lines().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string())
-                });
-            ToolRuntimeDto { available: true, path: Some(path_str), version, error: None }
+            let version = [&output.stdout, &output.stderr].iter().find_map(|b| {
+                let s = String::from_utf8_lossy(b);
+                s.lines()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|l| l.trim().to_string())
+            });
+            ToolRuntimeDto {
+                available: true,
+                path: Some(path_str),
+                version,
+                error: None,
+            }
         }
         Err(e) => {
             // OS-level failure — missing shared lib, wrong architecture, etc.
@@ -1510,13 +1707,19 @@ pub fn restore_from_chd(
         // Download remote .chd to a temp dir so chdman can read it locally.
         // TempGuard ensures cleanup even on early return via `?`.
         let (effective_chd_path, _guard) = if chd_is_remote {
-            let rm = remote_manager.as_ref()
+            let rm = remote_manager
+                .as_ref()
                 .ok_or_else(|| anyhow!("Se necesita el gestor remoto para descargar el CHD"))?;
             let dl_dir = temp_download_dir(app, job_id)?;
             emit_log(app, job_id, format!("[Descarga] CHD remoto: {source}"))?;
-            let (local, bytes) = rm.download_file_to_dir(source, &dl_dir)
+            let (local, bytes) = rm
+                .download_file_to_dir(source, &dl_dir)
                 .map_err(|e| anyhow!("Fallo al descargar CHD remoto '{source}': {e}"))?;
-            emit_log(app, job_id, format!("[Descarga] OK: {} bytes → {}", bytes, local.display()))?;
+            emit_log(
+                app,
+                job_id,
+                format!("[Descarga] OK: {} bytes → {}", bytes, local.display()),
+            )?;
             (local, Some(TempGuard(dl_dir)))
         } else {
             (chd_path.clone(), None)
@@ -1542,15 +1745,25 @@ pub fn restore_from_chd(
                 .destination_path
                 .as_ref()
                 .map(PathBuf::from)
-                .unwrap_or_else(|| effective_chd_path.parent().unwrap_or(&effective_chd_path).to_path_buf())
+                .unwrap_or_else(|| {
+                    effective_chd_path
+                        .parent()
+                        .unwrap_or(&effective_chd_path)
+                        .to_path_buf()
+                })
         } else {
-            effective_chd_path.parent().unwrap_or(&effective_chd_path).to_path_buf()
+            effective_chd_path
+                .parent()
+                .unwrap_or(&effective_chd_path)
+                .to_path_buf()
         };
 
         // Folder naming: custom only for single-CHD operations
         let folder_name = if options.individual_folders {
             let name = if is_single && options.folder_naming_mode == "custom" {
-                options.custom_folder_name.as_deref()
+                options
+                    .custom_folder_name
+                    .as_deref()
                     .map(str::trim)
                     .filter(|n| !n.is_empty())
                     .unwrap_or(&chd_stem)
@@ -1565,7 +1778,9 @@ pub fn restore_from_chd(
 
         // Output file stem: custom only for single-CHD operations
         let stem = if is_single && options.output_naming_mode == "custom" {
-            options.custom_output_name.as_deref()
+            options
+                .custom_output_name
+                .as_deref()
                 .map(str::trim)
                 .filter(|n| !n.is_empty())
                 .unwrap_or(&chd_stem)
@@ -1574,26 +1789,39 @@ pub fn restore_from_chd(
             chd_stem.clone()
         };
 
-        let use_remote_dest = remote_manager.is_some()
-            && pause_registry.is_some()
-            && effective_remote_dest.is_some();
+        let use_remote_dest =
+            remote_manager.is_some() && pause_registry.is_some() && effective_remote_dest.is_some();
 
         if use_remote_dest {
             let rm = Arc::clone(remote_manager.as_ref().unwrap());
             let pr = pause_registry.as_ref().unwrap();
             let remote_dest = effective_remote_dest.as_deref().unwrap();
-            let policy = options.remote_transfer.clone()
-                .unwrap_or_else(|| RemoteTransferPolicy { on_error: "abort".to_string() });
+            let policy = options
+                .remote_transfer
+                .clone()
+                .unwrap_or_else(|| RemoteTransferPolicy {
+                    on_error: "abort".to_string(),
+                });
             let chdman_c = chdman.clone();
             let effective_chd_c = effective_chd_path.clone();
             let stem_c = stem.clone();
             let overwrite = options.overwrite;
             let split_bin = options.split_bin;
             let folder_name_c = folder_name.clone();
-            let source_name = effective_chd_path.file_name().unwrap_or(effective_chd_path.as_os_str()).to_string_lossy().to_string();
+            let source_name = effective_chd_path
+                .file_name()
+                .unwrap_or(effective_chd_path.as_os_str())
+                .to_string_lossy()
+                .to_string();
 
             run_remote_file_cycle(
-                app, job_id, &rm, pr, remote_dest, &policy, &source_name,
+                app,
+                job_id,
+                &rm,
+                pr,
+                remote_dest,
+                &policy,
+                &source_name,
                 |temp_dir| {
                     let write_dir = if let Some(ref name) = folder_name_c {
                         let d = temp_dir.join(name);
@@ -1606,14 +1834,42 @@ pub fn restore_from_chd(
                     let bin_path = write_dir.join(format!("{stem_c}.bin"));
                     let iso_path = write_dir.join(format!("{stem_c}.iso"));
 
-                    match run_extractcd(app, job_id, prog_base, prog_span, &chdman_c, &effective_chd_c, &cue_path, &bin_path, overwrite, split_bin) {
-                        Ok(_) => {},
+                    match run_extractcd(
+                        app,
+                        job_id,
+                        prog_base,
+                        prog_span,
+                        &chdman_c,
+                        &effective_chd_c,
+                        &cue_path,
+                        &bin_path,
+                        overwrite,
+                        split_bin,
+                    ) {
+                        Ok(_) => {}
                         Err(first_err) => {
-                            cleanup_restore_outputs(&cue_path, &bin_path, &write_dir, &stem_c, &effective_chd_c)?;
-                            run_extractdvd(app, job_id, prog_base, prog_span, &chdman_c, &effective_chd_c, &iso_path, overwrite).map_err(|dvd_err| {
+                            cleanup_restore_outputs(
+                                &cue_path,
+                                &bin_path,
+                                &write_dir,
+                                &stem_c,
+                                &effective_chd_c,
+                            )?;
+                            run_extractdvd(
+                                app,
+                                job_id,
+                                prog_base,
+                                prog_span,
+                                &chdman_c,
+                                &effective_chd_c,
+                                &iso_path,
+                                overwrite,
+                            )
+                            .map_err(|dvd_err| {
                                 anyhow!(
                                     "No se pudo recuperar como CD ni DVD.\nCD: {}\nDVD: {}",
-                                    first_err, dvd_err
+                                    first_err,
+                                    dvd_err
                                 )
                             })?;
                         }
@@ -1645,27 +1901,68 @@ pub fn restore_from_chd(
             emit_log(
                 app,
                 job_id,
-                format!("Recuperando contenido desde {} -> {}", effective_chd_path.display(), destination.display()),
+                format!(
+                    "Recuperando contenido desde {} -> {}",
+                    effective_chd_path.display(),
+                    destination.display()
+                ),
             )?;
 
             let cue_path = destination.join(format!("{effective_stem}.cue"));
             let bin_path = destination.join(format!("{effective_stem}.bin"));
             let iso_path = destination.join(format!("{effective_stem}.iso"));
 
-            match run_extractcd(app, job_id, prog_base, prog_span, &chdman, &effective_chd_path, &cue_path, &bin_path, options.overwrite, options.split_bin) {
+            match run_extractcd(
+                app,
+                job_id,
+                prog_base,
+                prog_span,
+                &chdman,
+                &effective_chd_path,
+                &cue_path,
+                &bin_path,
+                options.overwrite,
+                options.split_bin,
+            ) {
                 Ok(_) => {
-                    emit_log(app, job_id, format!("Extraido como CD: {}", cue_path.display()))?;
+                    emit_log(
+                        app,
+                        job_id,
+                        format!("Extraido como CD: {}", cue_path.display()),
+                    )?;
                 }
                 Err(error) => {
                     let first_error = error.to_string();
-                    cleanup_restore_outputs(&cue_path, &bin_path, &destination, &effective_stem, &effective_chd_path)?;
-                    run_extractdvd(app, job_id, prog_base, prog_span, &chdman, &effective_chd_path, &iso_path, options.overwrite).map_err(|dvd_error| {
+                    cleanup_restore_outputs(
+                        &cue_path,
+                        &bin_path,
+                        &destination,
+                        &effective_stem,
+                        &effective_chd_path,
+                    )?;
+                    run_extractdvd(
+                        app,
+                        job_id,
+                        prog_base,
+                        prog_span,
+                        &chdman,
+                        &effective_chd_path,
+                        &iso_path,
+                        options.overwrite,
+                    )
+                    .map_err(|dvd_error| {
                         anyhow!(
                             "No se pudo recuperar {} como CD ni como DVD.\nCD: {}\nDVD: {}",
-                            effective_chd_path.display(), first_error, dvd_error
+                            effective_chd_path.display(),
+                            first_error,
+                            dvd_error
                         )
                     })?;
-                    emit_log(app, job_id, format!("Extraido como DVD: {}", iso_path.display()))?;
+                    emit_log(
+                        app,
+                        job_id,
+                        format!("Extraido como DVD: {}", iso_path.display()),
+                    )?;
                 }
             }
         }
@@ -1678,7 +1975,14 @@ pub fn restore_from_chd(
                 }
             } else {
                 fs::remove_file(&chd_path)?;
-                emit_log(app, job_id, format!("CHD eliminado tras recuperar contenido: {}", chd_path.display()))?;
+                emit_log(
+                    app,
+                    job_id,
+                    format!(
+                        "CHD eliminado tras recuperar contenido: {}",
+                        chd_path.display()
+                    ),
+                )?;
             }
         }
 
@@ -1729,7 +2033,12 @@ fn extract_zip(
         let mut output = fs::File::create(&out_path)?;
         std::io::copy(&mut item, &mut output)?;
         let frac = (index + 1) as f64 / count;
-        let _ = emit_progress(app, job_id, (base + span * frac).clamp(0.0, 1.0), format!("{}", out_path.display()));
+        let _ = emit_progress(
+            app,
+            job_id,
+            (base + span * frac).clamp(0.0, 1.0),
+            format!("{}", out_path.display()),
+        );
     }
     Ok(())
 }
@@ -1773,7 +2082,11 @@ fn compute_directory_stats(
     if let Some(limit) = max_depth {
         walker = walker.max_depth(limit + 1);
     }
-    for (index, entry) in walker.into_iter().filter_map(|entry| entry.ok()).enumerate() {
+    for (index, entry) in walker
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .enumerate()
+    {
         if index % 128 == 0 {
             ensure_summary_not_cancelled(cancel_state)?;
         }
@@ -1873,7 +2186,8 @@ fn detect_chd_source_remote(path: &Path) -> Option<ChdSourceDto> {
     // container = everything up to and including the last '/'
     let container_dir = {
         let s = path_str.as_str();
-        s.rfind('/').map(|i| s[..=i].trim_end_matches('/').to_string())
+        s.rfind('/')
+            .map(|i| s[..=i].trim_end_matches('/').to_string())
             .unwrap_or_else(|| path_str.clone())
     };
     if CD_SOURCE_EXTENSIONS.contains(&ext.as_str()) {
@@ -1920,11 +2234,7 @@ fn detect_chd_source(path: &Path) -> Result<Option<ChdSourceDto>> {
         let missing_files = check_required_paths(&required_paths);
         return Ok(Some(ChdSourceDto {
             source_path: path.to_string_lossy().to_string(),
-            container_dir: path
-                .parent()
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string(),
+            container_dir: path.parent().unwrap_or(path).to_string_lossy().to_string(),
             command: "createcd".to_string(),
             display_extensions: vec![extension],
             required_paths: required_paths
@@ -1938,11 +2248,7 @@ fn detect_chd_source(path: &Path) -> Result<Option<ChdSourceDto>> {
     if DVD_SOURCE_EXTENSIONS.contains(&extension.as_str()) {
         return Ok(Some(ChdSourceDto {
             source_path: path.to_string_lossy().to_string(),
-            container_dir: path
-                .parent()
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string(),
+            container_dir: path.parent().unwrap_or(path).to_string_lossy().to_string(),
             command: "createdvd".to_string(),
             display_extensions: vec![extension],
             required_paths: vec![path.to_string_lossy().to_string()],
@@ -2016,7 +2322,8 @@ fn parse_cue_references(path: &Path) -> Result<Vec<PathBuf>> {
         } else {
             // Unquoted: the last whitespace-separated token is the type keyword (BINARY, WAVE…),
             // everything before it is the filename.
-            after_file.rfind(char::is_whitespace)
+            after_file
+                .rfind(char::is_whitespace)
                 .map(|pos| after_file[..pos].trim())
                 .filter(|s| !s.is_empty())
         };
@@ -2073,18 +2380,41 @@ fn build_chd_output_path(
 ) -> PathBuf {
     // Priority: custom_name (single-source only) → nameAsContainer → source file stem
     let raw_stem = if is_single {
-        if let Some(name) = options.custom_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        if let Some(name) = options
+            .custom_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
             // Strip .chd suffix if the user accidentally typed it
-            name.trim_end_matches(".chd").trim_end_matches(".CHD").to_string()
+            name.trim_end_matches(".chd")
+                .trim_end_matches(".CHD")
+                .to_string()
         } else if options.name_as_container {
-            container_dir.file_name().unwrap_or_else(|| container_dir.as_os_str()).to_string_lossy().to_string()
+            container_dir
+                .file_name()
+                .unwrap_or_else(|| container_dir.as_os_str())
+                .to_string_lossy()
+                .to_string()
         } else {
-            source_path.file_stem().unwrap_or_else(|| source_path.as_os_str()).to_string_lossy().to_string()
+            source_path
+                .file_stem()
+                .unwrap_or_else(|| source_path.as_os_str())
+                .to_string_lossy()
+                .to_string()
         }
     } else if options.name_as_container {
-        container_dir.file_name().unwrap_or_else(|| container_dir.as_os_str()).to_string_lossy().to_string()
+        container_dir
+            .file_name()
+            .unwrap_or_else(|| container_dir.as_os_str())
+            .to_string_lossy()
+            .to_string()
     } else {
-        source_path.file_stem().unwrap_or_else(|| source_path.as_os_str()).to_string_lossy().to_string()
+        source_path
+            .file_stem()
+            .unwrap_or_else(|| source_path.as_os_str())
+            .to_string_lossy()
+            .to_string()
     };
 
     // Explicit local destination overrides all other placement logic
@@ -2121,7 +2451,12 @@ fn run_extractcd(
     split_bin: bool,
 ) -> Result<()> {
     let mut command = Command::new(chdman);
-    command.arg("extractcd").arg("-i").arg(input).arg("-o").arg(cue_path);
+    command
+        .arg("extractcd")
+        .arg("-i")
+        .arg(input)
+        .arg("-o")
+        .arg(cue_path);
     if !split_bin {
         command.arg("-ob").arg(bin_path);
     } else {
@@ -2130,8 +2465,13 @@ fn run_extractcd(
     if overwrite {
         command.arg("-f");
     }
-    run_command_streaming(app, job_id, base, span, command)
-        .map_err(|e| anyhow!(if e.to_string().is_empty() { "extractcd devolvio un error".to_string() } else { e.to_string() }))
+    run_command_streaming(app, job_id, base, span, command).map_err(|e| {
+        anyhow!(if e.to_string().is_empty() {
+            "extractcd devolvio un error".to_string()
+        } else {
+            e.to_string()
+        })
+    })
 }
 
 fn run_extractdvd(
@@ -2154,8 +2494,13 @@ fn run_extractdvd(
     if overwrite {
         command.arg("-f");
     }
-    run_command_streaming(app, job_id, base, span, command)
-        .map_err(|e| anyhow!(if e.to_string().is_empty() { "extractdvd devolvio un error".to_string() } else { e.to_string() }))
+    run_command_streaming(app, job_id, base, span, command).map_err(|e| {
+        anyhow!(if e.to_string().is_empty() {
+            "extractdvd devolvio un error".to_string()
+        } else {
+            e.to_string()
+        })
+    })
 }
 
 fn cleanup_restore_outputs(
@@ -2313,7 +2658,9 @@ fn run_command_streaming(
         Some(pipe) => stream_progress_lines(pipe, app, job_id, base, span),
         None => String::new(),
     };
-    let err_captured = stderr_handle.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+    let err_captured = stderr_handle
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
 
     let status = child.wait()?;
     if status.success() {
@@ -2388,7 +2735,11 @@ pub fn list_volumes() -> Result<Vec<VolumeDto>> {
             let mount = disk.mount_point().to_string_lossy().to_string();
             let mount_trimmed = mount.trim_end_matches(['/', '\\']).to_string();
             let label = disk.name().to_string_lossy().to_string();
-            let display_label = if label.is_empty() { "Local Disk".to_string() } else { label.clone() };
+            let display_label = if label.is_empty() {
+                "Local Disk".to_string()
+            } else {
+                label.clone()
+            };
             let name = if mount_trimmed.is_empty() {
                 display_label.clone()
             } else {
@@ -2461,8 +2812,15 @@ where
     let output_files = produce(&temp_dir)?;
 
     // Ensure the remote destination directory exists
-    remote_manager.ensure_remote_dir(remote_dest_dir)
-        .map_err(|e| anyhow!("No se pudo verificar el directorio remoto '{}': {}", remote_dest_dir, e))?;
+    remote_manager
+        .ensure_remote_dir(remote_dest_dir)
+        .map_err(|e| {
+            anyhow!(
+                "No se pudo verificar el directorio remoto '{}': {}",
+                remote_dest_dir,
+                e
+            )
+        })?;
 
     for file in &output_files {
         let file_name = file
@@ -2539,8 +2897,12 @@ pub fn free_space_at(path: &Path) -> Result<u64> {
             }
         })
         .max_by_key(|(prefix_len, _)| *prefix_len);
-    best.map(|(_, free)| free)
-        .ok_or_else(|| anyhow!("No se pudo determinar el espacio libre en: {}", path.display()))
+    best.map(|(_, free)| free).ok_or_else(|| {
+        anyhow!(
+            "No se pudo determinar el espacio libre en: {}",
+            path.display()
+        )
+    })
 }
 
 /// Rough estimate of the output size for a single source file given the operation kind.
@@ -2675,12 +3037,15 @@ pub fn compress_to_archive(
     };
     let archive_filename = format!("{}.{}", options.archive_name.trim(), ext);
 
-    let any_source_is_remote = sources.iter().any(|p| remote::RemoteManager::is_remote_path(&p.to_string_lossy()));
+    let any_source_is_remote = sources
+        .iter()
+        .any(|p| remote::RemoteManager::is_remote_path(&p.to_string_lossy()));
 
     // Download remote sources to a temp dir so compression tools can access them.
     // TempGuard ensures cleanup even on early return via `?`.
     let (effective_sources, _guard) = if any_source_is_remote {
-        let rm = remote_manager.as_ref()
+        let rm = remote_manager
+            .as_ref()
             .ok_or_else(|| anyhow!("Se necesita el gestor remoto para descargar los archivos"))?;
         let dl_dir = temp_download_dir(app, job_id)?;
         let mut local_sources = Vec::with_capacity(sources.len());
@@ -2688,9 +3053,14 @@ pub fn compress_to_archive(
             if remote::RemoteManager::is_remote_path(&src.to_string_lossy()) {
                 let src_str = src.to_string_lossy();
                 emit_log(app, job_id, format!("[Descarga] {}", src_str))?;
-                let (local, bytes) = rm.download_file_to_dir(&src_str, &dl_dir)
+                let (local, bytes) = rm
+                    .download_file_to_dir(&src_str, &dl_dir)
                     .map_err(|e| anyhow!("Fallo al descargar '{}': {e}", src_str))?;
-                emit_log(app, job_id, format!("[Descarga] OK: {} bytes → {}", bytes, local.display()))?;
+                emit_log(
+                    app,
+                    job_id,
+                    format!("[Descarga] OK: {} bytes → {}", bytes, local.display()),
+                )?;
                 local_sources.push(local);
             } else {
                 local_sources.push(src.clone());
@@ -2723,9 +3093,8 @@ pub fn compress_to_archive(
             .ok_or_else(|| anyhow!("No se pudo determinar la carpeta de destino"))?,
     };
 
-    let use_remote = remote_manager.is_some()
-        && pause_registry.is_some()
-        && effective_remote_dest.is_some();
+    let use_remote =
+        remote_manager.is_some() && pause_registry.is_some() && effective_remote_dest.is_some();
 
     if use_remote {
         let rm = Arc::clone(remote_manager.as_ref().unwrap());
@@ -2734,15 +3103,31 @@ pub fn compress_to_archive(
         let policy = options
             .remote_transfer
             .clone()
-            .unwrap_or_else(|| RemoteTransferPolicy { on_error: "abort".to_string() });
+            .unwrap_or_else(|| RemoteTransferPolicy {
+                on_error: "abort".to_string(),
+            });
         let effective_sources_c = effective_sources.clone();
         let options_c = options.clone();
         let archive_filename_c = archive_filename.clone();
         run_remote_file_cycle(
-            app, job_id, &rm, pr, remote_dest, &policy, &archive_filename,
+            app,
+            job_id,
+            &rm,
+            pr,
+            remote_dest,
+            &policy,
+            &archive_filename,
             |temp_dir| {
                 let archive_path = temp_dir.join(&archive_filename_c);
-                do_compress(app, job_id, 0.0, 0.9, &effective_sources_c, &archive_path, &options_c)?;
+                do_compress(
+                    app,
+                    job_id,
+                    0.0,
+                    0.9,
+                    &effective_sources_c,
+                    &archive_path,
+                    &options_c,
+                )?;
                 Ok(vec![archive_path])
             },
         )?;
@@ -2759,28 +3144,62 @@ pub fn compress_to_archive(
             }
         }
         emit_log(
-            app, job_id,
-            format!("Comprimiendo {} elemento(s) → {}", effective_sources.len(), archive_path.display()),
+            app,
+            job_id,
+            format!(
+                "Comprimiendo {} elemento(s) → {}",
+                effective_sources.len(),
+                archive_path.display()
+            ),
         )?;
-        do_compress(app, job_id, 0.0, 0.9, &effective_sources, &archive_path, &options)?;
-        emit_log(app, job_id, format!("Archivo creado: {}", archive_path.display()))?;
+        do_compress(
+            app,
+            job_id,
+            0.0,
+            0.9,
+            &effective_sources,
+            &archive_path,
+            &options,
+        )?;
+        emit_log(
+            app,
+            job_id,
+            format!("Archivo creado: {}", archive_path.display()),
+        )?;
     }
 
-    emit_progress(app, job_id, 0.9, format!("Comprimiendo {}", archive_filename))?;
+    emit_progress(
+        app,
+        job_id,
+        0.9,
+        format!("Comprimiendo {}", archive_filename),
+    )?;
 
     if options.delete_originals {
         for source in &sources {
             if remote::RemoteManager::is_remote_path(&source.to_string_lossy()) {
                 if let Some(ref rm) = remote_manager {
                     rm.delete_entry(app, job_id, &source.to_string_lossy())?;
-                    emit_log(app, job_id, format!("Original remoto eliminado: {}", source.display()))?;
+                    emit_log(
+                        app,
+                        job_id,
+                        format!("Original remoto eliminado: {}", source.display()),
+                    )?;
                 }
             } else if source.is_dir() {
                 fs::remove_dir_all(source)?;
-                emit_log(app, job_id, format!("Original eliminado: {}", source.display()))?;
+                emit_log(
+                    app,
+                    job_id,
+                    format!("Original eliminado: {}", source.display()),
+                )?;
             } else {
                 fs::remove_file(source)?;
-                emit_log(app, job_id, format!("Original eliminado: {}", source.display()))?;
+                emit_log(
+                    app,
+                    job_id,
+                    format!("Original eliminado: {}", source.display()),
+                )?;
             }
         }
     }
@@ -2799,13 +3218,29 @@ fn do_compress(
     options: &CompressionOptionsPayload,
 ) -> Result<()> {
     match options.format.as_str() {
-        "7z" => compress_via_7z(app, job_id, base, span, sources, archive_path, options.compression_level),
+        "7z" => compress_via_7z(
+            app,
+            job_id,
+            base,
+            span,
+            sources,
+            archive_path,
+            options.compression_level,
+        ),
         "rar" => {
             let rar = find_rar_binary()
                 .ok_or_else(|| anyhow!("RAR no está disponible en este sistema"))?;
             compress_via_rar(&rar, sources, archive_path, options.compression_level)
         }
-        _ => compress_to_zip(app, job_id, base, span, sources, archive_path, options.compression_level),
+        _ => compress_to_zip(
+            app,
+            job_id,
+            base,
+            span,
+            sources,
+            archive_path,
+            options.compression_level,
+        ),
     }
 }
 
@@ -2843,12 +3278,18 @@ fn compress_to_zip(
         .compression_method(method)
         .compression_level(zip_level);
 
-    let total: u64 = sources.iter().map(|s| count_files_under(s)).sum::<u64>().max(1);
+    let total: u64 = sources
+        .iter()
+        .map(|s| count_files_under(s))
+        .sum::<u64>()
+        .max(1);
     let mut done: u64 = 0;
 
     for source in sources {
         let src_base = source.parent().unwrap_or(source);
-        add_path_to_zip(app, job_id, base, span, total, &mut done, &mut zip, source, src_base, options)?;
+        add_path_to_zip(
+            app, job_id, base, span, total, &mut done, &mut zip, source, src_base, options,
+        )?;
     }
     zip.finish()?;
     Ok(())
@@ -2877,9 +3318,18 @@ fn add_path_to_zip<W: Write + Seek>(
         let mut f = fs::File::open(path)?;
         io::copy(&mut f, zip)?;
         *done += 1;
-        let _ = emit_progress(app, job_id, (base + span * (*done as f64 / total as f64)).clamp(0.0, 1.0), name);
+        let _ = emit_progress(
+            app,
+            job_id,
+            (base + span * (*done as f64 / total as f64)).clamp(0.0, 1.0),
+            name,
+        );
     } else if path.is_dir() {
-        for entry in WalkDir::new(path).min_depth(0).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(path)
+            .min_depth(0)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             let entry_path = entry.path();
             let name = entry_path
                 .strip_prefix(base_dir)
@@ -2896,7 +3346,12 @@ fn add_path_to_zip<W: Write + Seek>(
                 let mut f = fs::File::open(entry_path)?;
                 io::copy(&mut f, zip)?;
                 *done += 1;
-                let _ = emit_progress(app, job_id, (base + span * (*done as f64 / total as f64)).clamp(0.0, 1.0), name);
+                let _ = emit_progress(
+                    app,
+                    job_id,
+                    (base + span * (*done as f64 / total as f64)).clamp(0.0, 1.0),
+                    name,
+                );
             }
         }
     }
@@ -2926,7 +3381,12 @@ fn compress_via_7z(
         .map_err(|e| anyhow!("7zz devolvió un error al comprimir: {}", e))
 }
 
-fn compress_via_rar(rar_binary: &Path, sources: &[PathBuf], archive_path: &Path, level: u8) -> Result<()> {
+fn compress_via_rar(
+    rar_binary: &Path,
+    sources: &[PathBuf],
+    archive_path: &Path,
+    level: u8,
+) -> Result<()> {
     // RAR levels: 0=store, 1=fastest, 2=fast, 3=normal, 4=good, 5=best
     let rar_level = match level {
         0 => 0u8,
@@ -2947,4 +3407,60 @@ fn compress_via_rar(rar_binary: &Path, sources: &[PathBuf], archive_path: &Path,
         return Err(anyhow!("rar devolvió un error al comprimir"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_7z_slt_entries;
+
+    #[test]
+    fn parse_7z_slt_entries_skips_archive_header_and_keeps_entries() {
+        let sample = r#"Path = C:\archives\game.rar
+Type = Rar5
+Physical Size = 12345
+----------
+Path = Disc 1
+Folder = +
+
+Path = Disc 1\game.cue
+Folder = -
+Attributes = A
+
+Path = Disc 1\Track 01.bin
+Folder = -
+Attributes = A
+"#;
+
+        let parsed = parse_7z_slt_entries(sample);
+        assert_eq!(
+            parsed,
+            vec![
+                ("Disc 1".to_string(), true),
+                ("Disc 1/game.cue".to_string(), false),
+                ("Disc 1/Track 01.bin".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_7z_slt_entries_detects_directory_via_attributes() {
+        let sample = r#"Path = archive.7z
+Type = 7z
+----------
+Path = saves
+Attributes = D_ drwxr-xr-x
+
+Path = saves\slot1.srm
+Attributes = A_ -rw-r--r--
+"#;
+
+        let parsed = parse_7z_slt_entries(sample);
+        assert_eq!(
+            parsed,
+            vec![
+                ("saves".to_string(), true),
+                ("saves/slot1.srm".to_string(), false),
+            ]
+        );
+    }
 }

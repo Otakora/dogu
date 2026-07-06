@@ -374,24 +374,33 @@ function detectConflicts(ops: QueuedOp[]): QueueConflict[] {
     }
   }
 
+  // Conflicts are computed against the actual output FILES each op creates
+  // (`produces`), not the destination folders — deleting or writing a different
+  // file inside a shared folder is not a conflict.
+  const outputsOf = (op: QueuedOp): string[] => op.produces.map((g) => g.path);
+
   for (let i = 0; i < ops.length; i++) {
     for (let j = i + 1; j < ops.length; j++) {
       const a = ops[i], b = ops[j];
+      const outA = outputsOf(a);
+      const outB = outputsOf(b);
 
-      for (const wa of a.destinations) {
-        for (const wb of b.destinations) {
-          if (pathsOverlap(wa, wb)) push(a.id, b.id, "dest-collision", "parallel-only", wa, wb);
+      // Both ops create the exact same output file.
+      for (const pa of outA) {
+        for (const pb of outB) {
+          if (normalizePath(pa) === normalizePath(pb)) push(a.id, b.id, "dest-collision", "parallel-only", pa, pb);
         }
       }
 
+      // `a` deletes something `b` needs as input, or is going to create.
       for (const d of a.deletes) {
-        for (const s of b.sources)      { if (pathsOverlap(d, s)) push(a.id, b.id, "source-deleted", "blocking",      d, s); }
-        for (const w of b.destinations) { if (pathsOverlap(d, w)) push(a.id, b.id, "dest-deleted",   "blocking",      d, w); }
+        for (const s of b.sources) { if (pathsOverlap(d, s)) push(a.id, b.id, "source-deleted", "blocking", d, s); }
+        for (const p of outB)      { if (pathsOverlap(d, p)) push(a.id, b.id, "dest-deleted",   "blocking", d, p); }
       }
 
       for (const d of b.deletes) {
-        for (const s of a.sources)      { if (pathsOverlap(d, s)) push(b.id, a.id, "source-deleted", "parallel-only", d, s); }
-        for (const w of a.destinations) { if (pathsOverlap(d, w)) push(b.id, a.id, "dest-deleted",   "parallel-only", d, w); }
+        for (const s of a.sources) { if (pathsOverlap(d, s)) push(b.id, a.id, "source-deleted", "parallel-only", d, s); }
+        for (const p of outA)      { if (pathsOverlap(d, p)) push(b.id, a.id, "dest-deleted",   "parallel-only", d, p); }
       }
     }
   }

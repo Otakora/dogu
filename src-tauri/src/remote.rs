@@ -5,46 +5,50 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, SystemTime},
-    sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Local};
 use remotefs::{
-    File as RemoteFile, RemoteFs,
     fs::{
         FileType, Metadata as RemoteMetadata, ReadStream, RemoteError, RemoteErrorType, UnixPex,
         UnixPexClass, Welcome,
     },
+    File as RemoteFile, RemoteFs,
 };
+#[cfg(target_family = "windows")]
+use remotefs_smb::SmbCredentials;
 use remotefs_smb::SmbFs;
 #[cfg(target_family = "unix")]
 use remotefs_smb::{SmbCredentials, SmbOptions};
-#[cfg(target_family = "windows")]
-use remotefs_smb::SmbCredentials;
 use remotefs_ssh::{LibSsh2Session, ScpFs, SftpFs, SshOpts};
 use rustls::{
-    ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
     client::{
-        WebPkiServerVerifier,
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        WebPkiServerVerifier,
     },
     pki_types::{CertificateDer, ServerName, UnixTime},
+    ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
 use serde::{Deserialize, Serialize};
 use ssh2::Session as Ssh2Session;
 use suppaftp::{
-    RustlsConnector, RustlsFtpStream,
     list::{File as FtpListFile, PosixPexQuery},
+    RustlsConnector, RustlsFtpStream,
 };
 use tauri::{AppHandle, Manager};
 use webpki_roots::TLS_SERVER_ROOTS;
 
 use crate::{
     models::{
-        ActiveConnectionDto, ConnectionOpenResultDto, ConnectionProfileDto, ConnectionProfilePayload,
-        EntryDto, PropertiesSummaryDto, RemoteDiskUsageDto, SummaryOptionsPayload,
+        ActiveConnectionDto, ConnectionOpenResultDto, ConnectionProfileDto,
+        ConnectionProfilePayload, EntryDto, PropertiesSummaryDto, RemoteDiskUsageDto,
+        SummaryOptionsPayload,
     },
     ops,
 };
@@ -161,7 +165,8 @@ impl RemoteManager {
             .find(|profile| profile.id == profile_id)
             .map(|profile| profile.trusted_fingerprints.clone())
             .unwrap_or_default();
-        let profile = build_profile_from_payload(payload, profile_id.clone(), trusted_fingerprints)?;
+        let profile =
+            build_profile_from_payload(payload, profile_id.clone(), trusted_fingerprints)?;
         if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile_id) {
             *existing = profile.clone();
         } else {
@@ -186,7 +191,11 @@ impl RemoteManager {
             .collect())
     }
 
-    pub fn connect_profile(&self, profile_id: &str, trust_current_fingerprint: bool) -> Result<ConnectionOpenResultDto> {
+    pub fn connect_profile(
+        &self,
+        profile_id: &str,
+        trust_current_fingerprint: bool,
+    ) -> Result<ConnectionOpenResultDto> {
         if let Some(existing) = self
             .lock_sessions()?
             .values()
@@ -211,16 +220,27 @@ impl RemoteManager {
             .ok_or_else(|| anyhow!("No se encontro el perfil remoto solicitado."))?;
 
         if profile.protocol == "ssh" {
-            if let Some(fingerprint) = probe_ssh_fingerprint(&profile)
-                .map_err(|error| anyhow!(friendly_connection_error(&profile, "fingerprint", &error.to_string())))?
-            {
-                if !profile.trusted_fingerprints.iter().any(|item| item == &fingerprint) {
+            if let Some(fingerprint) = probe_ssh_fingerprint(&profile).map_err(|error| {
+                anyhow!(friendly_connection_error(
+                    &profile,
+                    "fingerprint",
+                    &error.to_string()
+                ))
+            })? {
+                if !profile
+                    .trusted_fingerprints
+                    .iter()
+                    .any(|item| item == &fingerprint)
+                {
                     if !trust_current_fingerprint {
                         return Ok(ConnectionOpenResultDto {
                             connected: false,
                             requires_trust: true,
                             fingerprint: Some(fingerprint),
-                            message: Some("La huella SSH del host no esta guardada como confiable.".to_string()),
+                            message: Some(
+                                "La huella SSH del host no esta guardada como confiable."
+                                    .to_string(),
+                            ),
                             connection: None,
                             write_access: None,
                         });
@@ -231,12 +251,20 @@ impl RemoteManager {
         }
 
         let session_id = format!("session-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
-        let (mut remote_fs, provider_root) = self
-            .build_remote_fs(&profile)
-            .map_err(|error| anyhow!(friendly_connection_error(&profile, "connect", &error.to_string())))?;
-        remote_fs
-            .connect()
-            .map_err(|error| anyhow!(friendly_connection_error(&profile, "connect", &error.to_string())))?;
+        let (mut remote_fs, provider_root) = self.build_remote_fs(&profile).map_err(|error| {
+            anyhow!(friendly_connection_error(
+                &profile,
+                "connect",
+                &error.to_string()
+            ))
+        })?;
+        remote_fs.connect().map_err(|error| {
+            anyhow!(friendly_connection_error(
+                &profile,
+                "connect",
+                &error.to_string()
+            ))
+        })?;
         validate_remote_root(&profile, &mut *remote_fs, &provider_root)?;
         let connection = ActiveConnectionDto {
             session_id: session_id.clone(),
@@ -273,22 +301,24 @@ impl RemoteManager {
         trust_current_fingerprint: bool,
     ) -> Result<ConnectionOpenResultDto> {
         validate_connection_profile_payload(&payload)?;
-        let profile = build_profile_from_payload(
-            payload,
-            "draft-profile".to_string(),
-            Vec::new(),
-        )?;
+        let profile = build_profile_from_payload(payload, "draft-profile".to_string(), Vec::new())?;
 
         if profile.protocol == "ssh" {
-            if let Some(fingerprint) = probe_ssh_fingerprint(&profile)
-                .map_err(|error| anyhow!(friendly_connection_error(&profile, "fingerprint", &error.to_string())))?
-            {
+            if let Some(fingerprint) = probe_ssh_fingerprint(&profile).map_err(|error| {
+                anyhow!(friendly_connection_error(
+                    &profile,
+                    "fingerprint",
+                    &error.to_string()
+                ))
+            })? {
                 if !trust_current_fingerprint {
                     return Ok(ConnectionOpenResultDto {
                         connected: false,
                         requires_trust: true,
                         fingerprint: Some(fingerprint),
-                        message: Some("La huella SSH del host no esta guardada como confiable.".to_string()),
+                        message: Some(
+                            "La huella SSH del host no esta guardada como confiable.".to_string(),
+                        ),
                         connection: None,
                         write_access: None,
                     });
@@ -296,12 +326,20 @@ impl RemoteManager {
             }
         }
 
-        let (mut remote_fs, provider_root) = self
-            .build_remote_fs(&profile)
-            .map_err(|error| anyhow!(friendly_connection_error(&profile, "connect", &error.to_string())))?;
-        remote_fs
-            .connect()
-            .map_err(|error| anyhow!(friendly_connection_error(&profile, "connect", &error.to_string())))?;
+        let (mut remote_fs, provider_root) = self.build_remote_fs(&profile).map_err(|error| {
+            anyhow!(friendly_connection_error(
+                &profile,
+                "connect",
+                &error.to_string()
+            ))
+        })?;
+        remote_fs.connect().map_err(|error| {
+            anyhow!(friendly_connection_error(
+                &profile,
+                "connect",
+                &error.to_string()
+            ))
+        })?;
         validate_remote_root(&profile, &mut *remote_fs, &provider_root)?;
         let write_access = check_write_access(&mut *remote_fs, &provider_root);
         let _ = remote_fs.disconnect();
@@ -315,7 +353,11 @@ impl RemoteManager {
         })
     }
 
-    pub fn test_profile(&self, profile_id: &str, trust_current_fingerprint: bool) -> Result<ConnectionOpenResultDto> {
+    pub fn test_profile(
+        &self,
+        profile_id: &str,
+        trust_current_fingerprint: bool,
+    ) -> Result<ConnectionOpenResultDto> {
         let profile = self
             .lock_profiles()?
             .iter()
@@ -324,16 +366,27 @@ impl RemoteManager {
             .ok_or_else(|| anyhow!("No se encontro el perfil remoto solicitado."))?;
 
         if profile.protocol == "ssh" {
-            if let Some(fingerprint) = probe_ssh_fingerprint(&profile)
-                .map_err(|error| anyhow!(friendly_connection_error(&profile, "fingerprint", &error.to_string())))?
-            {
-                if !profile.trusted_fingerprints.iter().any(|item| item == &fingerprint) {
+            if let Some(fingerprint) = probe_ssh_fingerprint(&profile).map_err(|error| {
+                anyhow!(friendly_connection_error(
+                    &profile,
+                    "fingerprint",
+                    &error.to_string()
+                ))
+            })? {
+                if !profile
+                    .trusted_fingerprints
+                    .iter()
+                    .any(|item| item == &fingerprint)
+                {
                     if !trust_current_fingerprint {
                         return Ok(ConnectionOpenResultDto {
                             connected: false,
                             requires_trust: true,
                             fingerprint: Some(fingerprint),
-                            message: Some("La huella SSH del host no esta guardada como confiable.".to_string()),
+                            message: Some(
+                                "La huella SSH del host no esta guardada como confiable."
+                                    .to_string(),
+                            ),
                             connection: None,
                             write_access: None,
                         });
@@ -343,12 +396,20 @@ impl RemoteManager {
             }
         }
 
-        let (mut remote_fs, provider_root) = self
-            .build_remote_fs(&profile)
-            .map_err(|error| anyhow!(friendly_connection_error(&profile, "connect", &error.to_string())))?;
-        remote_fs
-            .connect()
-            .map_err(|error| anyhow!(friendly_connection_error(&profile, "connect", &error.to_string())))?;
+        let (mut remote_fs, provider_root) = self.build_remote_fs(&profile).map_err(|error| {
+            anyhow!(friendly_connection_error(
+                &profile,
+                "connect",
+                &error.to_string()
+            ))
+        })?;
+        remote_fs.connect().map_err(|error| {
+            anyhow!(friendly_connection_error(
+                &profile,
+                "connect",
+                &error.to_string()
+            ))
+        })?;
         validate_remote_root(&profile, &mut *remote_fs, &provider_root)?;
         let write_access = check_write_access(&mut *remote_fs, &provider_root);
         let _ = remote_fs.disconnect();
@@ -386,7 +447,11 @@ impl RemoteManager {
         })
     }
 
-    pub fn get_disk_usage(&self, virtual_path: &str, force_refresh: bool) -> Result<RemoteDiskUsageDto> {
+    pub fn get_disk_usage(
+        &self,
+        virtual_path: &str,
+        force_refresh: bool,
+    ) -> Result<RemoteDiskUsageDto> {
         let (session_id, logical_path) = parse_remote_virtual_path(virtual_path)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
         let cache_key = build_remote_disk_usage_cache_key(&session_id, &logical_path);
@@ -401,7 +466,10 @@ impl RemoteManager {
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| anyhow!("La sesion remota ya no esta activa."))?;
-            (session.profile.clone(), session.resolve_provider_path(&logical_path))
+            (
+                session.profile.clone(),
+                session.resolve_provider_path(&logical_path),
+            )
         };
 
         let usage = match profile.protocol.as_str() {
@@ -455,12 +523,23 @@ impl RemoteManager {
         Ok(entries)
     }
 
-    pub fn list_remote_files_recursive(&self, virtual_path: &str, max_depth: usize) -> Result<Vec<String>> {
+    pub fn list_remote_files_recursive(
+        &self,
+        virtual_path: &str,
+        max_depth: usize,
+    ) -> Result<Vec<String>> {
         let (session_id, logical_path) = parse_remote_virtual_path(virtual_path)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
         let mut session = self.get_session_mut(&session_id)?;
         let mut results = Vec::new();
-        collect_remote_files_recursive(&mut session, &session_id, &logical_path, max_depth, 0, &mut results)?;
+        collect_remote_files_recursive(
+            &mut session,
+            &session_id,
+            &logical_path,
+            max_depth,
+            0,
+            &mut results,
+        )?;
         Ok(results)
     }
 
@@ -493,7 +572,12 @@ impl RemoteManager {
         session.entry_from_remote_file(file, &logical_path)
     }
 
-    pub fn search_entries(&self, path: &str, query: &str, recursive: bool) -> Result<Vec<EntryDto>> {
+    pub fn search_entries(
+        &self,
+        path: &str,
+        query: &str,
+        recursive: bool,
+    ) -> Result<Vec<EntryDto>> {
         let lowered = query.trim().to_lowercase();
         if lowered.is_empty() {
             return Ok(Vec::new());
@@ -502,7 +586,13 @@ impl RemoteManager {
             .ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
         let mut session = self.get_session_mut(&session_id)?;
         let mut results = Vec::new();
-        collect_remote_matches(&mut session, &logical_path, &lowered, recursive, &mut results)?;
+        collect_remote_matches(
+            &mut session,
+            &logical_path,
+            &lowered,
+            recursive,
+            &mut results,
+        )?;
         results.sort_by(|left, right| {
             left.is_dir
                 .cmp(&right.is_dir)
@@ -512,9 +602,16 @@ impl RemoteManager {
         Ok(results)
     }
 
-    pub fn summarize_paths(&self, paths: &[String], options: &SummaryOptionsPayload) -> Result<PropertiesSummaryDto> {
-        let first = paths.first().ok_or_else(|| anyhow!("No hay rutas para resumir."))?;
-        let (session_id, _) = parse_remote_virtual_path(first).ok_or_else(|| anyhow!("Ruta remota invalida."))?;
+    pub fn summarize_paths(
+        &self,
+        paths: &[String],
+        options: &SummaryOptionsPayload,
+    ) -> Result<PropertiesSummaryDto> {
+        let first = paths
+            .first()
+            .ok_or_else(|| anyhow!("No hay rutas para resumir."))?;
+        let (session_id, _) =
+            parse_remote_virtual_path(first).ok_or_else(|| anyhow!("Ruta remota invalida."))?;
         let mut session = self.get_session_mut(&session_id)?;
 
         let mut files = 0usize;
@@ -522,7 +619,8 @@ impl RemoteManager {
         let mut total_size = 0u64;
         let mut lines = Vec::new();
         for path in paths {
-            let (_, logical_path) = parse_remote_virtual_path(path).ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
+            let (_, logical_path) = parse_remote_virtual_path(path)
+                .ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
             let provider_path = session.resolve_provider_path(&logical_path);
             let item = session
                 .fs
@@ -591,7 +689,11 @@ impl RemoteManager {
         let metadata = empty_file_metadata();
         session
             .fs
-            .create_file(Path::new(&provider_path), &metadata, Box::new(Cursor::new(Vec::<u8>::new())))
+            .create_file(
+                Path::new(&provider_path),
+                &metadata,
+                Box::new(Cursor::new(Vec::<u8>::new())),
+            )
             .map_err(|error| anyhow!(error.to_string()))?;
         Ok(build_remote_virtual_path(&session_id, &logical_path))
     }
@@ -644,7 +746,14 @@ impl RemoteManager {
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("No se pudo obtener el nombre del fichero local."))?;
         let entry_logical = join_logical_path(&dest_logical, name);
-        self.copy_local_entry_to_remote_path(app, job_id, local, &session_id, &entry_logical, true)?;
+        self.copy_local_entry_to_remote_path(
+            app,
+            job_id,
+            local,
+            &session_id,
+            &entry_logical,
+            true,
+        )?;
         Ok(build_remote_virtual_path(&session_id, &entry_logical))
     }
 
@@ -658,7 +767,11 @@ impl RemoteManager {
     fn ensure_remote_dir_logical(&self, session_id: &str, logical_path: &str) -> Result<()> {
         let mut session = self.get_session_mut(session_id)?;
         let provider_path = session.resolve_provider_path(logical_path);
-        if session.fs.exists(Path::new(&provider_path)).unwrap_or(false) {
+        if session
+            .fs
+            .exists(Path::new(&provider_path))
+            .unwrap_or(false)
+        {
             return Ok(());
         }
         drop(session);
@@ -731,7 +844,11 @@ impl RemoteManager {
                 job_id,
                 format!(
                     "{} {} -> {}",
-                    if operation == "cut" { "Moviendo" } else { "Copiando" },
+                    if operation == "cut" {
+                        "Moviendo"
+                    } else {
+                        "Copiando"
+                    },
                     source,
                     destination
                 ),
@@ -739,10 +856,29 @@ impl RemoteManager {
             let source_is_remote = Self::is_remote_path(source);
             let destination_is_remote = Self::is_remote_path(&destination);
             match (source_is_remote, destination_is_remote) {
-                (true, true) => self.transfer_remote_to_remote(source, &destination, operation == "cut", overwrite)?,
-                (true, false) => self.transfer_remote_to_local(source, &destination, operation == "cut", overwrite)?,
-                (false, true) => self.transfer_local_to_remote(app, job_id, source, &destination, operation == "cut", overwrite)?,
-                (false, false) => return Err(anyhow!("La operacion no requiere el gestor remoto.")),
+                (true, true) => self.transfer_remote_to_remote(
+                    source,
+                    &destination,
+                    operation == "cut",
+                    overwrite,
+                )?,
+                (true, false) => self.transfer_remote_to_local(
+                    source,
+                    &destination,
+                    operation == "cut",
+                    overwrite,
+                )?,
+                (false, true) => self.transfer_local_to_remote(
+                    app,
+                    job_id,
+                    source,
+                    &destination,
+                    operation == "cut",
+                    overwrite,
+                )?,
+                (false, false) => {
+                    return Err(anyhow!("La operacion no requiere el gestor remoto."))
+                }
             }
             ops::emit_progress(
                 app,
@@ -750,7 +886,11 @@ impl RemoteManager {
                 (index + 1) as f64 / total,
                 format!(
                     "{} {}",
-                    if operation == "cut" { "Moviendo" } else { "Copiando" },
+                    if operation == "cut" {
+                        "Moviendo"
+                    } else {
+                        "Copiando"
+                    },
                     source
                 ),
             )?;
@@ -770,7 +910,12 @@ impl RemoteManager {
         let source_name = logical_leaf_name(&source_logical);
         let target_root = PathBuf::from(destination);
         let target_path = target_root.join(&source_name);
-        self.copy_remote_entry_to_local_path(&session_id, &source_logical, &target_path, overwrite)?;
+        self.copy_remote_entry_to_local_path(
+            &session_id,
+            &source_logical,
+            &target_path,
+            overwrite,
+        )?;
         if move_after {
             let mut session = self.get_session_mut(&session_id)?;
             let source_provider = session.resolve_provider_path(&source_logical);
@@ -790,7 +935,10 @@ impl RemoteManager {
     ) -> Result<()> {
         let source_path = PathBuf::from(source);
         if !source_path.exists() {
-            return Err(anyhow!("La ruta local no existe: {}", source_path.display()));
+            return Err(anyhow!(
+                "La ruta local no existe: {}",
+                source_path.display()
+            ));
         }
         let (session_id, destination_logical) = parse_remote_virtual_path(destination)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {destination}"))?;
@@ -799,7 +947,14 @@ impl RemoteManager {
             .and_then(|value| value.to_str())
             .ok_or_else(|| anyhow!("No se pudo resolver el nombre del elemento local."))?;
         let target_logical = join_logical_path(&destination_logical, source_name);
-        self.copy_local_entry_to_remote_path(app, job_id, &source_path, &session_id, &target_logical, overwrite)?;
+        self.copy_local_entry_to_remote_path(
+            app,
+            job_id,
+            &source_path,
+            &session_id,
+            &target_logical,
+            overwrite,
+        )?;
         if move_after {
             remove_local_target(&source_path)?;
         }
@@ -877,7 +1032,13 @@ impl RemoteManager {
         Ok(())
     }
 
-    fn transfer_remote_to_remote(&self, source: &str, destination: &str, move_after: bool, overwrite: bool) -> Result<()> {
+    fn transfer_remote_to_remote(
+        &self,
+        source: &str,
+        destination: &str,
+        move_after: bool,
+        overwrite: bool,
+    ) -> Result<()> {
         let (source_session_id, source_logical) = parse_remote_virtual_path(source)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {source}"))?;
         let (destination_session_id, destination_logical) = parse_remote_virtual_path(destination)
@@ -889,7 +1050,12 @@ impl RemoteManager {
             let mut session = self.get_session_mut(&source_session_id)?;
             let source_provider = session.resolve_provider_path(&source_logical);
             let target_provider = session.resolve_provider_path(&target_logical);
-            if overwrite && session.fs.exists(Path::new(&target_provider)).unwrap_or(false) {
+            if overwrite
+                && session
+                    .fs
+                    .exists(Path::new(&target_provider))
+                    .unwrap_or(false)
+            {
                 remove_remote_target(&mut *session.fs, Path::new(&target_provider))?;
             }
             if move_after {
@@ -916,9 +1082,21 @@ impl RemoteManager {
                 .is_dir()
         };
         if is_directory {
-            self.copy_remote_dir_between_sessions(&source_session_id, &source_logical, &destination_session_id, &target_logical, overwrite)?;
+            self.copy_remote_dir_between_sessions(
+                &source_session_id,
+                &source_logical,
+                &destination_session_id,
+                &target_logical,
+                overwrite,
+            )?;
         } else {
-            self.copy_remote_file_between_sessions(&source_session_id, &source_logical, &destination_session_id, &target_logical, overwrite)?;
+            self.copy_remote_file_between_sessions(
+                &source_session_id,
+                &source_logical,
+                &destination_session_id,
+                &target_logical,
+                overwrite,
+            )?;
         }
         if move_after {
             let mut session = self.get_session_mut(&source_session_id)?;
@@ -939,14 +1117,21 @@ impl RemoteManager {
         {
             let mut session = self.get_session_mut(destination_session_id)?;
             let target_provider = session.resolve_provider_path(destination_logical);
-            if !session.fs.exists(Path::new(&target_provider)).unwrap_or(false) {
+            if !session
+                .fs
+                .exists(Path::new(&target_provider))
+                .unwrap_or(false)
+            {
                 session
                     .fs
                     .create_dir(Path::new(&target_provider), UnixPex::from(0o755))
                     .map_err(|error| anyhow!(error.to_string()))?;
             }
         }
-        let children = self.list_children(&build_remote_virtual_path(source_session_id, source_logical))?;
+        let children = self.list_children(&build_remote_virtual_path(
+            source_session_id,
+            source_logical,
+        ))?;
         for child in children {
             let child_logical = parse_remote_virtual_path(&child.path)
                 .map(|(_, logical)| logical)
@@ -988,7 +1173,12 @@ impl RemoteManager {
         };
         let mut session = self.get_session_mut(destination_session_id)?;
         let destination_provider = session.resolve_provider_path(destination_logical);
-        if overwrite && session.fs.exists(Path::new(&destination_provider)).unwrap_or(false) {
+        if overwrite
+            && session
+                .fs
+                .exists(Path::new(&destination_provider))
+                .unwrap_or(false)
+        {
             remove_remote_target(&mut *session.fs, Path::new(&destination_provider))?;
         }
         session
@@ -1023,14 +1213,18 @@ impl RemoteManager {
 
         if local_target.exists() {
             if !overwrite {
-                return Err(anyhow!("El destino local ya existe: {}", local_target.display()));
+                return Err(anyhow!(
+                    "El destino local ya existe: {}",
+                    local_target.display()
+                ));
             }
             remove_local_target(local_target)?;
         }
 
         if is_directory {
             fs::create_dir_all(local_target)?;
-            let children = self.list_children(&build_remote_virtual_path(session_id, source_logical))?;
+            let children =
+                self.list_children(&build_remote_virtual_path(session_id, source_logical))?;
             for child in children {
                 let child_logical = parse_remote_virtual_path(&child.path)
                     .map(|(_, logical)| logical)
@@ -1068,23 +1262,37 @@ impl RemoteManager {
     ) -> Result<()> {
         let mut session = self.get_session_mut(session_id)?;
         let destination_provider = session.resolve_provider_path(destination_logical);
-        let destination_exists = session.fs.exists(Path::new(&destination_provider)).unwrap_or(false);
+        let destination_exists = session
+            .fs
+            .exists(Path::new(&destination_provider))
+            .unwrap_or(false);
         if destination_exists {
             if !overwrite {
-                return Err(anyhow!("El destino remoto ya existe: {destination_logical}"));
+                return Err(anyhow!(
+                    "El destino remoto ya existe: {destination_logical}"
+                ));
             }
             remove_remote_target(&mut *session.fs, Path::new(&destination_provider))?;
         }
 
         if local_source.is_dir() {
-            if let Err(create_err) = session.fs.create_dir(Path::new(&destination_provider), UnixPex::from(0o755)) {
+            if let Err(create_err) = session
+                .fs
+                .create_dir(Path::new(&destination_provider), UnixPex::from(0o755))
+            {
                 // Some SFTP servers return error 4 (generic failure) when mkdir is called on an
                 // already-existing directory. Check and proceed if it's already there.
-                let already_exists = session.fs.exists(Path::new(&destination_provider)).unwrap_or(false);
+                let already_exists = session
+                    .fs
+                    .exists(Path::new(&destination_provider))
+                    .unwrap_or(false);
                 if !already_exists {
                     return Err(sftp_permission_error(
                         &create_err.to_string(),
-                        &format!("No se pudo crear la carpeta '{}' en el servidor", destination_logical),
+                        &format!(
+                            "No se pudo crear la carpeta '{}' en el servidor",
+                            destination_logical
+                        ),
                     ));
                 }
             }
@@ -1097,18 +1305,30 @@ impl RemoteManager {
                     .and_then(|value| value.to_str())
                     .ok_or_else(|| anyhow!("No se pudo leer el nombre de una entrada local."))?;
                 let child_target = join_logical_path(destination_logical, name);
-                self.copy_local_entry_to_remote_path(app, job_id, &entry_path, session_id, &child_target, overwrite)?;
+                self.copy_local_entry_to_remote_path(
+                    app,
+                    job_id,
+                    &entry_path,
+                    session_id,
+                    &child_target,
+                    overwrite,
+                )?;
             }
             return Ok(());
         }
 
-        let file_size = local_source
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let file_name = local_source.file_name().unwrap_or_default().to_string_lossy();
-        let file = fs::File::open(local_source)
-            .map_err(|e| anyhow!("No se pudo abrir el archivo local '{}': {}", local_source.display(), e))?;
+        let file_size = local_source.metadata().map(|m| m.len()).unwrap_or(0);
+        let file_name = local_source
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let file = fs::File::open(local_source).map_err(|e| {
+            anyhow!(
+                "No se pudo abrir el archivo local '{}': {}",
+                local_source.display(),
+                e
+            )
+        })?;
         session
             .fs
             .create_file(
@@ -1116,15 +1336,24 @@ impl RemoteManager {
                 &file_metadata(file_size),
                 Box::new(file),
             )
-            .map_err(|error| sftp_permission_error(
-                &error.to_string(),
-                &format!("No se pudo subir '{file_name}' al servidor"),
-            ))?;
-        let _ = ops::emit_log(app, job_id, format!("{file_name} subido ({file_size} bytes)"));
+            .map_err(|error| {
+                sftp_permission_error(
+                    &error.to_string(),
+                    &format!("No se pudo subir '{file_name}' al servidor"),
+                )
+            })?;
+        let _ = ops::emit_log(
+            app,
+            job_id,
+            format!("{file_name} subido ({file_size} bytes)"),
+        );
         Ok(())
     }
 
-    fn build_remote_fs(&self, profile: &ConnectionProfileDto) -> Result<(Box<dyn RemoteFs + Send>, String)> {
+    fn build_remote_fs(
+        &self,
+        profile: &ConnectionProfileDto,
+    ) -> Result<(Box<dyn RemoteFs + Send>, String)> {
         match profile.protocol.as_str() {
             "ssh" => {
                 let opts = SshOpts::new(profile.host.clone())
@@ -1143,29 +1372,34 @@ impl RemoteManager {
                 let mut fs = remotefs_ftp::FtpFs::new(profile.host.clone(), profile.port)
                     .username(profile.username.clone())
                     .password(profile.password.clone());
-                fs = if profile.ftp_mode == "active" { fs.active_mode() } else { fs.passive_mode() };
+                fs = if profile.ftp_mode == "active" {
+                    fs.active_mode()
+                } else {
+                    fs.passive_mode()
+                };
                 Ok((Box::new(fs), profile.start_path.clone()))
             }
-            "ftps" => {
-                Ok((
-                    Box::new(FtpsFs::new(
-                        profile.host.clone(),
-                        profile.port,
-                        profile.username.clone(),
-                        profile.password.clone(),
-                        profile.ftp_mode.clone(),
-                        profile.ftp_secure_implicit,
-                        profile.ftp_accept_invalid_certificates,
-                        profile.ftp_accept_invalid_hostnames,
-                    )),
-                    profile.start_path.clone(),
-                ))
-            }
+            "ftps" => Ok((
+                Box::new(FtpsFs::new(
+                    profile.host.clone(),
+                    profile.port,
+                    profile.username.clone(),
+                    profile.password.clone(),
+                    profile.ftp_mode.clone(),
+                    profile.ftp_secure_implicit,
+                    profile.ftp_accept_invalid_certificates,
+                    profile.ftp_accept_invalid_hostnames,
+                )),
+                profile.start_path.clone(),
+            )),
             other => Err(anyhow!("Protocolo remoto no soportado: {other}")),
         }
     }
 
-    fn build_smb_fs(&self, profile: &ConnectionProfileDto) -> Result<(Box<dyn RemoteFs + Send>, String)> {
+    fn build_smb_fs(
+        &self,
+        profile: &ConnectionProfileDto,
+    ) -> Result<(Box<dyn RemoteFs + Send>, String)> {
         #[cfg(target_family = "unix")]
         {
             let credentials = SmbCredentials::default()
@@ -1176,7 +1410,9 @@ impl RemoteManager {
                 .workgroup(profile.workgroup.clone());
             let fs = SmbFs::try_new(
                 credentials,
-                SmbOptions::default().one_share_per_server(true).case_sensitive(true),
+                SmbOptions::default()
+                    .one_share_per_server(true)
+                    .case_sensitive(true),
             )
             .map_err(|error| anyhow!(error.to_string()))?;
             return Ok((Box::new(fs), profile.start_path.clone()));
@@ -1191,7 +1427,10 @@ impl RemoteManager {
                 credentials = credentials.password(profile.password.clone());
             }
             let fs = SmbFs::new(credentials);
-            return Ok((Box::new(fs), normalize_windows_share_path(&profile.start_path)));
+            return Ok((
+                Box::new(fs),
+                normalize_windows_share_path(&profile.start_path),
+            ));
         }
         #[allow(unreachable_code)]
         Err(anyhow!("SMB no esta soportado en esta plataforma"))
@@ -1200,7 +1439,11 @@ impl RemoteManager {
     fn persist_fingerprint(&self, profile_id: &str, fingerprint: &str) -> Result<()> {
         let mut profiles = self.lock_profiles()?;
         if let Some(profile) = profiles.iter_mut().find(|profile| profile.id == profile_id) {
-            if !profile.trusted_fingerprints.iter().any(|item| item == fingerprint) {
+            if !profile
+                .trusted_fingerprints
+                .iter()
+                .any(|item| item == fingerprint)
+            {
                 profile.trusted_fingerprints.push(fingerprint.to_string());
                 save_profiles(&self.profiles_path, &profiles)?;
             }
@@ -1231,7 +1474,9 @@ impl RemoteManager {
             .map_err(|_| anyhow!("No se pudieron bloquear las sesiones remotas"))
     }
 
-    fn lock_disk_usage_cache(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, CachedDiskUsage>>> {
+    fn lock_disk_usage_cache(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<String, CachedDiskUsage>>> {
         self.disk_usage_cache
             .lock()
             .map_err(|_| anyhow!("No se pudo bloquear la cache de espacio remoto"))
@@ -1300,7 +1545,8 @@ impl RemoteManager {
                 free_bytes: Some(free_bytes),
                 used_bytes: Some(used_bytes),
                 method: "sshDf".to_string(),
-                note: statvfs_error.map(|err| format!("Fallback a df tras fallo de statvfs: {err}")),
+                note: statvfs_error
+                    .map(|err| format!("Fallback a df tras fallo de statvfs: {err}")),
             }),
             Err(exec_error) => Ok(unavailable_disk_usage(
                 virtual_path,
@@ -1309,13 +1555,20 @@ impl RemoteManager {
                         "No se pudo consultar el espacio remoto. statvfs: {statvfs_err}. df: {}",
                         exec_error
                     ),
-                    None => format!("No se pudo consultar el espacio remoto con df: {}", exec_error),
+                    None => format!(
+                        "No se pudo consultar el espacio remoto con df: {}",
+                        exec_error
+                    ),
                 },
             )),
         }
     }
 
-    fn fetch_disk_usage_via_exec(&self, session_id: &str, provider_path: &str) -> Result<(u64, u64, u64)> {
+    fn fetch_disk_usage_via_exec(
+        &self,
+        session_id: &str,
+        provider_path: &str,
+    ) -> Result<(u64, u64, u64)> {
         let command = format!("LC_ALL=C df -Pk {}", shell_single_quote(provider_path));
         let mut session = self.get_session_mut(session_id)?;
         let (status, output) = session
@@ -1334,12 +1587,21 @@ impl RemoteManager {
 
     /// Downloads a single remote file to `local_dest_dir`, streaming directly to disk.
     /// Returns the local path and the number of bytes written.
-    pub fn download_file_to_dir(&self, virtual_path: &str, local_dest_dir: &Path) -> Result<(PathBuf, u64)> {
+    pub fn download_file_to_dir(
+        &self,
+        virtual_path: &str,
+        local_dest_dir: &Path,
+    ) -> Result<(PathBuf, u64)> {
         let (session_id, logical_path) = parse_remote_virtual_path(virtual_path)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
         let filename = logical_leaf_name(&logical_path);
-        fs::create_dir_all(local_dest_dir)
-            .map_err(|e| anyhow!("No se pudo crear el directorio temporal '{}': {}", local_dest_dir.display(), e))?;
+        fs::create_dir_all(local_dest_dir).map_err(|e| {
+            anyhow!(
+                "No se pudo crear el directorio temporal '{}': {}",
+                local_dest_dir.display(),
+                e
+            )
+        })?;
         let target = local_dest_dir.join(&filename);
 
         let mut session = self.get_session_mut(&session_id)?;
@@ -1350,28 +1612,43 @@ impl RemoteManager {
                 "No se pudo abrir el archivo remoto para descarga.\n  Ruta virtual:    {}\n  Ruta proveedor:  {}\n  Error:           {}",
                 virtual_path, provider_path, e
             ))?;
-        let mut file = fs::File::create(&target)
-            .map_err(|e| anyhow!("No se pudo crear el archivo local '{}': {}", target.display(), e))?;
+        let mut file = fs::File::create(&target).map_err(|e| {
+            anyhow!(
+                "No se pudo crear el archivo local '{}': {}",
+                target.display(),
+                e
+            )
+        })?;
         let bytes_written = std::io::copy(&mut stream, &mut file)
             .map_err(|e| anyhow!("Error al transferir datos de '{}': {}", virtual_path, e))?;
-        session.fs
-            .on_read(stream)
-            .map_err(|e| anyhow!("Error al finalizar la descarga de '{}': {}", virtual_path, e))?;
+        session.fs.on_read(stream).map_err(|e| {
+            anyhow!(
+                "Error al finalizar la descarga de '{}': {}",
+                virtual_path,
+                e
+            )
+        })?;
 
         Ok((target, bytes_written))
     }
 
     /// Downloads all files (non-recursive) in a remote directory to `local_dest_dir`.
-    pub fn download_remote_dir_to_local(&self, virtual_dir_path: &str, local_dest_dir: &Path) -> Result<()> {
+    pub fn download_remote_dir_to_local(
+        &self,
+        virtual_dir_path: &str,
+        local_dest_dir: &Path,
+    ) -> Result<()> {
         let (session_id, logical_path) = parse_remote_virtual_path(virtual_dir_path)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_dir_path}"))?;
         let file_entries: Vec<(String, String)> = {
             let mut session = self.get_session_mut(&session_id)?;
             let provider_path = session.resolve_provider_path(&logical_path);
-            let children = session.fs
+            let children = session
+                .fs
                 .list_dir(Path::new(&provider_path))
                 .map_err(|e| anyhow!(e.to_string()))?;
-            children.into_iter()
+            children
+                .into_iter()
                 .filter(|c| !c.is_dir())
                 .map(|c| {
                     let child_logical = session.provider_child_to_logical(c.path())?;
@@ -1385,16 +1662,16 @@ impl RemoteManager {
         for (filename, provider_path) in file_entries {
             let target = local_dest_dir.join(&filename);
             let mut session = self.get_session_mut(&session_id)?;
-            let mut stream = session.fs
-                .open(Path::new(&provider_path))
-                .map_err(|e| anyhow!("No se pudo abrir '{}' para descarga: {}", provider_path, e))?;
+            let mut stream = session.fs.open(Path::new(&provider_path)).map_err(|e| {
+                anyhow!("No se pudo abrir '{}' para descarga: {}", provider_path, e)
+            })?;
             let mut file = fs::File::create(&target)
                 .map_err(|e| anyhow!("No se pudo crear '{}': {}", target.display(), e))?;
             std::io::copy(&mut stream, &mut file)
                 .map_err(|e| anyhow!("Error al transferir '{}': {}", provider_path, e))?;
-            session.fs
-                .on_read(stream)
-                .map_err(|e| anyhow!("Error al finalizar descarga de '{}': {}", provider_path, e))?;
+            session.fs.on_read(stream).map_err(|e| {
+                anyhow!("Error al finalizar descarga de '{}': {}", provider_path, e)
+            })?;
         }
         Ok(())
     }
@@ -1525,20 +1802,22 @@ impl FtpsFs {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let builder = ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
-            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string()))?;
+            .map_err(|error| {
+                RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string())
+            })?;
 
         let config = if self.accept_invalid_certificates || self.accept_invalid_hostnames {
             // Under rustls we use a permissive verifier for local/self-signed setups.
-            let verifier = PermissiveFtpsVerifier::new(roots.clone(), provider.clone())
-                .map_err(|error| RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string()))?;
+            let verifier =
+                PermissiveFtpsVerifier::new(roots.clone(), provider.clone()).map_err(|error| {
+                    RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string())
+                })?;
             builder
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(verifier))
                 .with_no_client_auth()
         } else {
-            builder
-                .with_root_certificates(roots)
-                .with_no_client_auth()
+            builder.with_root_certificates(roots).with_no_client_auth()
         };
 
         Ok(Arc::new(config).into())
@@ -1548,33 +1827,50 @@ impl FtpsFs {
         stream
             .get_ref()
             .set_read_timeout(Some(Duration::from_secs(FTP_COMMAND_TIMEOUT_SECS)))
-            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?;
+            .map_err(|error| {
+                RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string())
+            })?;
         stream
             .get_ref()
             .set_write_timeout(Some(Duration::from_secs(FTP_COMMAND_TIMEOUT_SECS)))
-            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?;
+            .map_err(|error| {
+                RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string())
+            })?;
         Ok(())
     }
 
-    fn connect_explicit(&self, connector: RustlsConnector) -> remotefs::RemoteResult<RustlsFtpStream> {
+    fn connect_explicit(
+        &self,
+        connector: RustlsConnector,
+    ) -> remotefs::RemoteResult<RustlsFtpStream> {
         let addr = resolve_socket_addr(&self.host, self.port)?;
-        let stream = RustlsFtpStream::connect_timeout(addr, Duration::from_secs(FTP_CONNECT_TIMEOUT_SECS))
-            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?;
+        let stream =
+            RustlsFtpStream::connect_timeout(addr, Duration::from_secs(FTP_CONNECT_TIMEOUT_SECS))
+                .map_err(|error| {
+                RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string())
+            })?;
         Self::configure_command_timeouts(&stream)?;
         let stream = stream
             .into_secure(connector, self.host.as_str())
-            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string()))?;
+            .map_err(|error| {
+                RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string())
+            })?;
         Self::configure_command_timeouts(&stream)?;
         Ok(stream)
     }
 
-    fn connect_implicit(&self, connector: RustlsConnector) -> remotefs::RemoteResult<RustlsFtpStream> {
+    fn connect_implicit(
+        &self,
+        connector: RustlsConnector,
+    ) -> remotefs::RemoteResult<RustlsFtpStream> {
         let stream = RustlsFtpStream::connect_secure_implicit(
             format!("{}:{}", self.host, self.port),
             connector,
             self.host.as_str(),
         )
-        .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?;
+        .map_err(|error| {
+            RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string())
+        })?;
         Self::configure_command_timeouts(&stream)?;
         Ok(stream)
     }
@@ -1629,7 +1925,9 @@ impl RemoteFs for FtpsFs {
         }
         stream
             .login(self.username.as_str(), self.password.as_str())
-            .map_err(|error| RemoteError::new_ex(RemoteErrorType::AuthenticationFailed, error.to_string()))?;
+            .map_err(|error| {
+                RemoteError::new_ex(RemoteErrorType::AuthenticationFailed, error.to_string())
+            })?;
         self.stream = Some(stream);
         Ok(Welcome::default())
     }
@@ -1655,7 +1953,9 @@ impl RemoteFs for FtpsFs {
     fn change_dir(&mut self, dir: &Path) -> remotefs::RemoteResult<PathBuf> {
         self.stream_mut()?
             .cwd(dir.to_string_lossy().as_ref())
-            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string()))?;
+            .map_err(|error| {
+                RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string())
+            })?;
         self.pwd()
     }
 
@@ -1663,7 +1963,9 @@ impl RemoteFs for FtpsFs {
         let lines = self
             .stream_mut()?
             .list(Some(path.to_string_lossy().as_ref()))
-            .map_err(|error| RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string()))?;
+            .map_err(|error| {
+                RemoteError::new_ex(RemoteErrorType::ProtocolError, error.to_string())
+            })?;
         Ok(self.parse_list(path, lines))
     }
 
@@ -1685,7 +1987,10 @@ impl RemoteFs for FtpsFs {
             });
         }
         let parent = path.parent().unwrap_or_else(|| Path::new("/"));
-        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
         self.list_dir(parent)?
             .into_iter()
             .find(|entry| entry.path().file_name().and_then(|value| value.to_str()) == Some(name))
@@ -1724,13 +2029,20 @@ impl RemoteFs for FtpsFs {
 
     fn copy(&mut self, src: &Path, dest: &Path) -> remotefs::RemoteResult<()> {
         let buffer = read_remote_bytes_remote(self, src)?;
-        self.create_file(dest, &file_metadata(buffer.len() as u64), Box::new(Cursor::new(buffer)))?;
+        self.create_file(
+            dest,
+            &file_metadata(buffer.len() as u64),
+            Box::new(Cursor::new(buffer)),
+        )?;
         Ok(())
     }
 
     fn mov(&mut self, src: &Path, dest: &Path) -> remotefs::RemoteResult<()> {
         self.stream_mut()?
-            .rename(src.to_string_lossy().as_ref(), dest.to_string_lossy().as_ref())
+            .rename(
+                src.to_string_lossy().as_ref(),
+                dest.to_string_lossy().as_ref(),
+            )
             .map_err(|error| RemoteError::new_ex(RemoteErrorType::IoError, error.to_string()))
     }
 
@@ -1738,11 +2050,19 @@ impl RemoteFs for FtpsFs {
         Err(RemoteError::new(RemoteErrorType::UnsupportedFeature))
     }
 
-    fn append(&mut self, _path: &Path, _metadata: &RemoteMetadata) -> remotefs::RemoteResult<remotefs::fs::WriteStream> {
+    fn append(
+        &mut self,
+        _path: &Path,
+        _metadata: &RemoteMetadata,
+    ) -> remotefs::RemoteResult<remotefs::fs::WriteStream> {
         Err(RemoteError::new(RemoteErrorType::UnsupportedFeature))
     }
 
-    fn create(&mut self, _path: &Path, _metadata: &RemoteMetadata) -> remotefs::RemoteResult<remotefs::fs::WriteStream> {
+    fn create(
+        &mut self,
+        _path: &Path,
+        _metadata: &RemoteMetadata,
+    ) -> remotefs::RemoteResult<remotefs::fs::WriteStream> {
         Err(RemoteError::new(RemoteErrorType::UnsupportedFeature))
     }
 
@@ -1751,7 +2071,9 @@ impl RemoteFs for FtpsFs {
             .stream_mut()?
             .retr_as_buffer(path.to_string_lossy().as_ref())
             .map_err(|error| RemoteError::new_ex(RemoteErrorType::IoError, error.to_string()))?;
-        Ok(ReadStream::from(Box::new(Cursor::new(buffer.into_inner())) as Box<dyn Read + Send>))
+        Ok(ReadStream::from(
+            Box::new(Cursor::new(buffer.into_inner())) as Box<dyn Read + Send>
+        ))
     }
 
     fn create_file(
@@ -1784,7 +2106,9 @@ fn build_profile_from_payload(
         label: required_trimmed("etiqueta", &payload.label)?,
         protocol: required_trimmed("protocolo", &payload.protocol)?,
         host: payload.host.trim().to_string(),
-        port: payload.port.unwrap_or_else(|| default_port_for_protocol(&payload.protocol)),
+        port: payload
+            .port
+            .unwrap_or_else(|| default_port_for_protocol(&payload.protocol)),
         username: payload.username.trim().to_string(),
         password: payload.password,
         share: payload.share.trim().to_string(),
@@ -1812,7 +2136,9 @@ fn load_profiles(path: &Path) -> Result<Vec<ConnectionProfileDto>> {
         return Ok(Vec::new());
     }
     let content = fs::read_to_string(path)?;
-    let parsed: ProfileFile = serde_json::from_str(&content).unwrap_or(ProfileFile { profiles: Vec::new() });
+    let parsed: ProfileFile = serde_json::from_str(&content).unwrap_or(ProfileFile {
+        profiles: Vec::new(),
+    });
     Ok(parsed.profiles)
 }
 
@@ -1841,7 +2167,9 @@ fn validate_connection_profile_payload(payload: &ConnectionProfilePayload) -> Re
     match protocol.as_str() {
         "smb" => {
             if payload.host.trim().is_empty() {
-                return Err(anyhow!("Debes indicar el servidor o IP para la conexion SMB."));
+                return Err(anyhow!(
+                    "Debes indicar el servidor o IP para la conexion SMB."
+                ));
             }
             if payload.share.trim().is_empty() {
                 return Err(anyhow!("Debes indicar el recurso compartido SMB."));
@@ -1849,7 +2177,9 @@ fn validate_connection_profile_payload(payload: &ConnectionProfilePayload) -> Re
         }
         "ssh" => {
             if payload.host.trim().is_empty() {
-                return Err(anyhow!("Debes indicar el servidor o IP para la conexion SSH."));
+                return Err(anyhow!(
+                    "Debes indicar el servidor o IP para la conexion SSH."
+                ));
             }
             if payload.username.trim().is_empty() {
                 return Err(anyhow!("Debes indicar el usuario para la conexion SSH."));
@@ -1857,7 +2187,9 @@ fn validate_connection_profile_payload(payload: &ConnectionProfilePayload) -> Re
         }
         "ftp" | "ftps" => {
             if payload.host.trim().is_empty() {
-                return Err(anyhow!("Debes indicar el servidor o IP para la conexion FTP."));
+                return Err(anyhow!(
+                    "Debes indicar el servidor o IP para la conexion FTP."
+                ));
             }
         }
         _ => return Err(anyhow!("El protocolo remoto indicado no es valido.")),
@@ -1887,7 +2219,10 @@ fn build_remote_virtual_path(session_id: &str, logical_path: &str) -> String {
     if logical_path == "/" {
         format!("{REMOTE_PREFIX}{session_id}/")
     } else {
-        format!("{REMOTE_PREFIX}{session_id}{}", normalize_logical_path(logical_path))
+        format!(
+            "{REMOTE_PREFIX}{session_id}{}",
+            normalize_logical_path(logical_path)
+        )
     }
 }
 
@@ -1936,7 +2271,10 @@ fn join_logical_path(parent: &str, name: &str) -> String {
     }
 }
 
-fn provider_child_to_logical(parent_provider_path: &str, child_provider_path: &Path) -> Result<String> {
+fn provider_child_to_logical(
+    parent_provider_path: &str,
+    child_provider_path: &Path,
+) -> Result<String> {
     let parent = parent_provider_path.replace('\\', "/");
     let child = child_provider_path.to_string_lossy().replace('\\', "/");
     let suffix = child
@@ -1958,10 +2296,12 @@ fn resolve_socket_addr(host: &str, port: u16) -> remotefs::RemoteResult<std::net
         .to_socket_addrs()
         .map_err(|error| RemoteError::new_ex(RemoteErrorType::ConnectionError, error.to_string()))?
         .next()
-        .ok_or_else(|| RemoteError::new_ex(
-            RemoteErrorType::ConnectionError,
-            format!("No se pudo resolver la direccion {host}:{port}"),
-        ))
+        .ok_or_else(|| {
+            RemoteError::new_ex(
+                RemoteErrorType::ConnectionError,
+                format!("No se pudo resolver la direccion {host}:{port}"),
+            )
+        })
 }
 
 fn statvfs_fragment_size(f_frsize: u64, f_bsize: u64) -> u64 {
@@ -2030,7 +2370,11 @@ fn scale_blocks_to_bytes(blocks: u64, fragment_size: u64) -> u64 {
     blocks.saturating_mul(fragment_size)
 }
 
-fn build_disk_usage_bytes(total_blocks: u64, free_blocks: u64, fragment_size: u64) -> (u64, u64, u64) {
+fn build_disk_usage_bytes(
+    total_blocks: u64,
+    free_blocks: u64,
+    fragment_size: u64,
+) -> (u64, u64, u64) {
     let total_bytes = scale_blocks_to_bytes(total_blocks, fragment_size);
     let free_bytes = scale_blocks_to_bytes(free_blocks, fragment_size);
     let used_bytes = total_bytes.saturating_sub(free_bytes);
@@ -2060,7 +2404,11 @@ fn unavailable_disk_usage(scope_path: &str, note: impl Into<String>) -> RemoteDi
 }
 
 fn parse_df_pk_output(output: &str) -> Result<(u64, u64, u64)> {
-    for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         if line.starts_with("Filesystem") {
             continue;
         }
@@ -2089,16 +2437,32 @@ fn parse_df_pk_output(output: &str) -> Result<(u64, u64, u64)> {
     Err(anyhow!("No se pudo interpretar la salida de df."))
 }
 
-fn fetch_disk_usage_via_sftp_statvfs(profile: &ConnectionProfileDto, provider_path: &str) -> Result<(u64, u64, u64)> {
-    let addr = resolve_socket_addr(&profile.host, profile.port)
-        .map_err(|e| anyhow!("No se pudo resolver {}:{}: {}", profile.host, profile.port, e))?;
+fn fetch_disk_usage_via_sftp_statvfs(
+    profile: &ConnectionProfileDto,
+    provider_path: &str,
+) -> Result<(u64, u64, u64)> {
+    let addr = resolve_socket_addr(&profile.host, profile.port).map_err(|e| {
+        anyhow!(
+            "No se pudo resolver {}:{}: {}",
+            profile.host,
+            profile.port,
+            e
+        )
+    })?;
     let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(SSH_AUX_TIMEOUT_SECS))
-        .map_err(|e| anyhow!("No se pudo conectar a {}:{}: {}", profile.host, profile.port, e))?;
+        .map_err(|e| {
+            anyhow!(
+                "No se pudo conectar a {}:{}: {}",
+                profile.host,
+                profile.port,
+                e
+            )
+        })?;
     let _ = tcp.set_read_timeout(Some(Duration::from_secs(SSH_AUX_TIMEOUT_SECS)));
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(SSH_AUX_TIMEOUT_SECS)));
 
-    let mut session = Ssh2Session::new()
-        .map_err(|e| anyhow!("No se pudo crear sesion SSH auxiliar: {}", e))?;
+    let mut session =
+        Ssh2Session::new().map_err(|e| anyhow!("No se pudo crear sesion SSH auxiliar: {}", e))?;
     session.set_tcp_stream(tcp);
     session
         .handshake()
@@ -2107,7 +2471,9 @@ fn fetch_disk_usage_via_sftp_statvfs(profile: &ConnectionProfileDto, provider_pa
         .userauth_password(&profile.username, &profile.password)
         .map_err(|e| anyhow!("Autenticacion SSH auxiliar fallida: {}", e))?;
     if !session.authenticated() {
-        return Err(anyhow!("La autenticacion SSH auxiliar no se completo correctamente."));
+        return Err(anyhow!(
+            "La autenticacion SSH auxiliar no se completo correctamente."
+        ));
     }
 
     let sftp = session
@@ -2116,35 +2482,53 @@ fn fetch_disk_usage_via_sftp_statvfs(profile: &ConnectionProfileDto, provider_pa
 
     let mut handle = match sftp.opendir(Path::new(provider_path)) {
         Ok(handle) => handle,
-        Err(dir_error) => sftp
-            .open(Path::new(provider_path))
-            .map_err(|file_error| anyhow!(
+        Err(dir_error) => sftp.open(Path::new(provider_path)).map_err(|file_error| {
+            anyhow!(
                 "No se pudo abrir la ruta '{}' para statvfs. Como directorio: {}. Como archivo: {}",
                 provider_path,
                 dir_error,
                 file_error
-            ))?,
+            )
+        })?,
     };
 
-    let stat = handle
-        .statvfs()
-        .map_err(|e| anyhow!("El servidor no expone statvfs para '{}': {}", provider_path, e))?;
+    let stat = handle.statvfs().map_err(|e| {
+        anyhow!(
+            "El servidor no expone statvfs para '{}': {}",
+            provider_path,
+            e
+        )
+    })?;
     let fragment_size = statvfs_fragment_size(stat.f_frsize, stat.f_bsize);
-    Ok(build_disk_usage_bytes(stat.f_blocks, stat.f_bavail, fragment_size))
+    Ok(build_disk_usage_bytes(
+        stat.f_blocks,
+        stat.f_bavail,
+        fragment_size,
+    ))
 }
 
 fn describe_profile(profile: &ConnectionProfileDto) -> String {
     match profile.protocol.as_str() {
-        "ssh" => format!("SSH | {}:{} | {}", profile.host, profile.port, profile.username),
+        "ssh" => format!(
+            "SSH | {}:{} | {}",
+            profile.host, profile.port, profile.username
+        ),
         "smb" => format!("SMB | {}\\{}", profile.host, profile.share),
         "ftps" => format!(
             "{} | {}:{} | {}",
-            if profile.ftp_secure_implicit { "FTPS implicito" } else { "FTPS explicito" },
+            if profile.ftp_secure_implicit {
+                "FTPS implicito"
+            } else {
+                "FTPS explicito"
+            },
             profile.host,
             profile.port,
             profile.username
         ),
-        _ => format!("FTP | {}:{} | {}", profile.host, profile.port, profile.username),
+        _ => format!(
+            "FTP | {}:{} | {}",
+            profile.host, profile.port, profile.username
+        ),
     }
 }
 
@@ -2175,7 +2559,10 @@ fn friendly_connection_error(profile: &ConnectionProfileDto, phase: &str, raw: &
     let endpoint = format!("{}:{}", profile.host, profile.port);
     let protocol = protocol_label(profile);
 
-    if lowered.contains("timed out") || lowered.contains("timeout") || lowered.contains("tiempo de espera") {
+    if lowered.contains("timed out")
+        || lowered.contains("timeout")
+        || lowered.contains("tiempo de espera")
+    {
         return format!(
             "Tiempo de espera agotado al {} en {}. Revisa que el equipo este encendido, accesible y escuchando en el puerto correcto.",
             if phase == "fingerprint" { "contactar con el host" } else { "conectar" },
@@ -2261,7 +2648,9 @@ fn friendly_connection_error(profile: &ConnectionProfileDto, phase: &str, raw: &
             protocol
         );
     }
-    if lowered.contains("unsupportedfeature") || lowered.contains("no estan disponibles con el backend ftps actual") {
+    if lowered.contains("unsupportedfeature")
+        || lowered.contains("no estan disponibles con el backend ftps actual")
+    {
         return "La combinacion de opciones de seguridad FTPS solicitada no esta soportada por el backend actual.".to_string();
     }
 
@@ -2277,11 +2666,19 @@ fn friendly_connection_error(profile: &ConnectionProfileDto, phase: &str, raw: &
     )
 }
 
-fn validate_remote_root(profile: &ConnectionProfileDto, remote_fs: &mut dyn RemoteFs, provider_root: &str) -> Result<()> {
+fn validate_remote_root(
+    profile: &ConnectionProfileDto,
+    remote_fs: &mut dyn RemoteFs,
+    provider_root: &str,
+) -> Result<()> {
     let root_path = Path::new(provider_root);
-    let root_entry = remote_fs
-        .stat(root_path)
-        .map_err(|error| anyhow!(friendly_connection_error(profile, "root", &error.to_string())))?;
+    let root_entry = remote_fs.stat(root_path).map_err(|error| {
+        anyhow!(friendly_connection_error(
+            profile,
+            "root",
+            &error.to_string()
+        ))
+    })?;
     if !root_entry.is_dir() {
         return Err(anyhow!(
             "La ruta inicial configurada no es una carpeta navegable. Revisa la carpeta de inicio del perfil {}.",
@@ -2295,19 +2692,30 @@ fn probe_ssh_fingerprint(profile: &ConnectionProfileDto) -> Result<Option<String
     let addr = resolve_socket_addr(&profile.host, profile.port)
         .map_err(|error| anyhow!(error.to_string()))?;
     let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(SSH_AUX_TIMEOUT_SECS))
-        .with_context(|| format!("No se pudo abrir la conexion TCP hacia {}:{}", profile.host, profile.port))?;
+        .with_context(|| {
+            format!(
+                "No se pudo abrir la conexion TCP hacia {}:{}",
+                profile.host, profile.port
+            )
+        })?;
     let _ = tcp.set_read_timeout(Some(Duration::from_secs(SSH_AUX_TIMEOUT_SECS)));
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(SSH_AUX_TIMEOUT_SECS)));
-    let mut session = Ssh2Session::new().context("No se pudo crear la sesion SSH para leer la huella")?;
+    let mut session =
+        Ssh2Session::new().context("No se pudo crear la sesion SSH para leer la huella")?;
     session.set_tcp_stream(tcp);
-    session.handshake().context("No se pudo negociar el handshake SSH para leer la huella")?;
+    session
+        .handshake()
+        .context("No se pudo negociar el handshake SSH para leer la huella")?;
     Ok(session
         .host_key_hash(ssh2::HashType::Sha256)
         .map(|bytes| format!("SHA256:{}", hex_bytes(bytes))))
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn empty_file_metadata() -> RemoteMetadata {
@@ -2326,7 +2734,10 @@ fn check_write_access(remote_fs: &mut dyn RemoteFs, provider_root: &str) -> bool
     );
     let test_path = Path::new(&test_path_str);
     let empty: Box<dyn std::io::Read + Send> = Box::new(std::io::Cursor::new(Vec::<u8>::new()));
-    if remote_fs.create_file(test_path, &file_metadata(0), empty).is_ok() {
+    if remote_fs
+        .create_file(test_path, &file_metadata(0), empty)
+        .is_ok()
+    {
         let _ = remote_fs.remove_file(test_path);
         true
     } else {
@@ -2371,7 +2782,8 @@ fn read_remote_bytes(fs: &mut dyn RemoteFs, path: &Path) -> Result<Vec<u8>> {
     let mut stream = fs.open(path).map_err(|error| anyhow!(error.to_string()))?;
     let mut buffer = Vec::new();
     std::io::copy(&mut stream, &mut buffer).map_err(|error| anyhow!(error.to_string()))?;
-    fs.on_read(stream).map_err(|error| anyhow!(error.to_string()))?;
+    fs.on_read(stream)
+        .map_err(|error| anyhow!(error.to_string()))?;
     Ok(buffer)
 }
 
@@ -2395,9 +2807,11 @@ fn ftp_pex_class(file: &FtpListFile, query: PosixPexQuery) -> UnixPexClass {
 fn remove_remote_target(fs: &mut dyn RemoteFs, path: &Path) -> Result<()> {
     let item = fs.stat(path).map_err(|error| anyhow!(error.to_string()))?;
     if item.is_dir() {
-        fs.remove_dir_all(path).map_err(|error| anyhow!(error.to_string()))
+        fs.remove_dir_all(path)
+            .map_err(|error| anyhow!(error.to_string()))
     } else {
-        fs.remove_file(path).map_err(|error| anyhow!(error.to_string()))
+        fs.remove_file(path)
+            .map_err(|error| anyhow!(error.to_string()))
     }
 }
 
@@ -2450,7 +2864,14 @@ fn collect_remote_files_recursive(
         let child_logical = session.provider_child_to_logical(child.path())?;
         if child.is_dir() {
             if depth < max_depth {
-                collect_remote_files_recursive(session, session_id, &child_logical, max_depth, depth + 1, results)?;
+                collect_remote_files_recursive(
+                    session,
+                    session_id,
+                    &child_logical,
+                    max_depth,
+                    depth + 1,
+                    results,
+                )?;
             }
         } else {
             results.push(build_remote_virtual_path(session_id, &child_logical));

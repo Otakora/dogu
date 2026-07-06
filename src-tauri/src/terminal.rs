@@ -297,9 +297,15 @@ fn inject_shell_integration(
 
     match shell_name.as_str() {
         "bash" | "sh" => inject_bash(cmd, terminal_id),
-        "zsh"         => inject_zsh(cmd, terminal_id),
-        "fish"        => { inject_fish(cmd); None }
-        "pwsh" | "powershell" => { inject_pwsh(cmd); None }
+        "zsh" => inject_zsh(cmd, terminal_id),
+        "fish" => {
+            inject_fish(cmd);
+            None
+        }
+        "pwsh" | "powershell" => {
+            inject_pwsh(cmd);
+            None
+        }
         _ => None,
     }
 }
@@ -405,7 +411,10 @@ fn write_temp_dir(terminal_id: &str, filename: &str, content: &str) -> Option<st
 
 pub fn send_input(manager: &TerminalManager, id: &str, data: &str) -> Result<()> {
     let sessions = manager.sessions.lock().unwrap();
-    match sessions.get(id).ok_or_else(|| anyhow!("terminal '{}' not found", id))? {
+    match sessions
+        .get(id)
+        .ok_or_else(|| anyhow!("terminal '{}' not found", id))?
+    {
         AnySession::Local(s) => {
             let mut writer = s.writer.lock().unwrap();
             writer.write_all(data.as_bytes())?;
@@ -492,7 +501,16 @@ pub fn create_ssh_terminal(
     }
 
     std::thread::spawn(move || {
-        if let Err(e) = run_ssh_worker(app_handle.clone(), id.clone(), host, port, username, password, remote_path, rx) {
+        if let Err(e) = run_ssh_worker(
+            app_handle.clone(),
+            id.clone(),
+            host,
+            port,
+            username,
+            password,
+            remote_path,
+            rx,
+        ) {
             let _ = app_handle.emit(
                 "terminal-data",
                 TerminalDataPayload {
@@ -522,17 +540,20 @@ fn run_ssh_worker(
     let tcp = std::net::TcpStream::connect((host.as_str(), port))
         .map_err(|e| anyhow!("No se pudo conectar a {}:{}: {}", host, port, e))?;
 
-    let mut session = Ssh2Session::new()
-        .map_err(|e| anyhow!("No se pudo crear sesion SSH: {}", e))?;
+    let mut session =
+        Ssh2Session::new().map_err(|e| anyhow!("No se pudo crear sesion SSH: {}", e))?;
     session.set_tcp_stream(tcp);
-    session.handshake()
+    session
+        .handshake()
         .map_err(|e| anyhow!("Error en handshake SSH: {}", e))?;
     session
         .userauth_password(&username, &password)
         .map_err(|e| anyhow!("Autenticacion SSH fallida: {}", e))?;
 
     if !session.authenticated() {
-        return Err(anyhow!("La autenticacion SSH fallo (credenciales incorrectas)"));
+        return Err(anyhow!(
+            "La autenticacion SSH fallo (credenciales incorrectas)"
+        ));
     }
 
     let mut channel = session
@@ -616,12 +637,7 @@ fn run_ssh_worker(
     Ok(())
 }
 
-pub fn probe_ssh_terminal(
-    host: &str,
-    port: u16,
-    username: &str,
-    password: &str,
-) -> Result<()> {
+pub fn probe_ssh_terminal(host: &str, port: u16, username: &str, password: &str) -> Result<()> {
     use ssh2::Session as Ssh2Session;
 
     let addr = format!("{host}:{port}")
@@ -638,8 +654,8 @@ pub fn probe_ssh_terminal(
     let _ = tcp.set_read_timeout(Some(Duration::from_secs(SSH_TERMINAL_CONNECT_TIMEOUT_SECS)));
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(SSH_TERMINAL_CONNECT_TIMEOUT_SECS)));
 
-    let mut session = Ssh2Session::new()
-        .map_err(|e| anyhow!("No se pudo crear sesion SSH: {}", e))?;
+    let mut session =
+        Ssh2Session::new().map_err(|e| anyhow!("No se pudo crear sesion SSH: {}", e))?;
     session.set_tcp_stream(tcp);
     session
         .handshake()
@@ -649,7 +665,9 @@ pub fn probe_ssh_terminal(
         .map_err(|e| anyhow!("Autenticacion SSH fallida: {}", e))?;
 
     if !session.authenticated() {
-        return Err(anyhow!("La autenticacion SSH fallo (credenciales incorrectas)"));
+        return Err(anyhow!(
+            "La autenticacion SSH fallo (credenciales incorrectas)"
+        ));
     }
 
     let mut channel = session
@@ -739,10 +757,10 @@ fn available_shells_unix() -> Vec<AvailableShell> {
         let raw = shell_path.split('/').last().unwrap_or("shell");
         let name = match raw {
             "bash" => "Bash",
-            "zsh"  => "Zsh",
+            "zsh" => "Zsh",
             "fish" => "Fish",
-            "sh"   => "sh",
-            other  => other,
+            "sh" => "sh",
+            other => other,
         }
         .to_string();
         shells.push(AvailableShell {
@@ -751,7 +769,10 @@ fn available_shells_unix() -> Vec<AvailableShell> {
         });
     }
 
-    if !shells.iter().any(|s| s.path.ends_with("/bash") || s.path == "bash") {
+    if !shells
+        .iter()
+        .any(|s| s.path.ends_with("/bash") || s.path == "bash")
+    {
         if std::path::Path::new("/bin/bash").exists() {
             shells.push(AvailableShell {
                 name: "Bash".to_string(),

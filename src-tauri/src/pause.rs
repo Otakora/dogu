@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use tauri::{AppHandle, Emitter};
 
@@ -16,8 +19,8 @@ impl PauseDecision {
     pub fn from_str(s: &str) -> Self {
         match s {
             "retry" => Self::Retry,
-            "skip"  => Self::Skip,
-            _       => Self::Abort,
+            "skip" => Self::Skip,
+            _ => Self::Abort,
         }
     }
 }
@@ -32,7 +35,9 @@ pub struct PauseRegistry {
 
 impl PauseRegistry {
     pub fn new() -> Self {
-        Self { senders: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            senders: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Called from inside a running job thread.
@@ -50,12 +55,15 @@ impl PauseRegistry {
         {
             self.senders.lock().unwrap().insert(job_id.to_string(), tx);
         }
-        let _ = app.emit("job-paused", JobPausedDto {
-            job_id: job_id.to_string(),
-            error: error.to_string(),
-            file_name: file_name.to_string(),
-            is_recoverable,
-        });
+        let _ = app.emit(
+            "job-paused",
+            JobPausedDto {
+                job_id: job_id.to_string(),
+                error: error.to_string(),
+                file_name: file_name.to_string(),
+                is_recoverable,
+            },
+        );
         rx.recv().unwrap_or(PauseDecision::Abort)
     }
 

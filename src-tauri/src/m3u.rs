@@ -9,8 +9,8 @@ use regex::Regex;
 use walkdir::WalkDir;
 
 use crate::models::{
-    M3uEntryDto, M3uFailureDto, M3uGenerateGroupPayload, M3uGenerateResultDto,
-    M3uGroupDto, M3uScanOptions, M3uWarningDto,
+    M3uEntryDto, M3uFailureDto, M3uGenerateGroupPayload, M3uGenerateResultDto, M3uGroupDto,
+    M3uScanOptions, M3uWarningDto,
 };
 
 // Extensions that are valid M3U entries (directly listed)
@@ -30,7 +30,10 @@ fn detect_disc(stem: &str) -> Option<DiscInfo> {
     let patterns = PATTERNS.get_or_init(|| {
         vec![
             // (Disc N) / (Disc N of M) — No-Intro / Redump standard
-            (Regex::new(r"(?i)\s*\(Dis[ck]\s+(\d+)(?:\s+of\s+\d+)?\)").unwrap(), false),
+            (
+                Regex::new(r"(?i)\s*\(Dis[ck]\s+(\d+)(?:\s+of\s+\d+)?\)").unwrap(),
+                false,
+            ),
             // (CD N) / (CD-N)
             (Regex::new(r"(?i)\s*\(CD[- ]?(\d+)\)").unwrap(), false),
             // (Side X) — letter
@@ -49,17 +52,24 @@ fn detect_disc(stem: &str) -> Option<DiscInfo> {
             let raw_base = re.replace(stem, "").to_string();
             // Collapse any double-spaces produced by the removal
             let base_name = raw_base.split_whitespace().collect::<Vec<_>>().join(" ");
-            let sort_key = caps.get(1).map(|m| {
-                let s = m.as_str();
-                if *is_letter {
-                    s.chars().next()
-                        .map(|c| c.to_ascii_uppercase() as u32 - b'A' as u32 + 1)
-                        .unwrap_or(1)
-                } else {
-                    s.parse::<u32>().unwrap_or(1)
-                }
-            }).unwrap_or(1);
-            return Some(DiscInfo { sort_key, base_name });
+            let sort_key = caps
+                .get(1)
+                .map(|m| {
+                    let s = m.as_str();
+                    if *is_letter {
+                        s.chars()
+                            .next()
+                            .map(|c| c.to_ascii_uppercase() as u32 - b'A' as u32 + 1)
+                            .unwrap_or(1)
+                    } else {
+                        s.parse::<u32>().unwrap_or(1)
+                    }
+                })
+                .unwrap_or(1);
+            return Some(DiscInfo {
+                sort_key,
+                base_name,
+            });
         }
     }
     None
@@ -170,7 +180,10 @@ pub fn build_groups(
         };
 
         let key = (output_dir, base_name.to_lowercase());
-        let disc_info = DiscInfo { sort_key, base_name };
+        let disc_info = DiscInfo {
+            sort_key,
+            base_name,
+        };
         map.entry(key).or_default().push((file, disc_info));
     }
 
@@ -189,7 +202,9 @@ pub fn build_groups(
 
             // Sort by disc sort_key, then by abs_path for stable tie-breaking
             files_with_info.sort_by(|(fa, ia), (fb, ib)| {
-                ia.sort_key.cmp(&ib.sort_key).then_with(|| fa.abs_path.cmp(&fb.abs_path))
+                ia.sort_key
+                    .cmp(&ib.sort_key)
+                    .then_with(|| fa.abs_path.cmp(&fb.abs_path))
             });
 
             // Build entries
@@ -241,7 +256,8 @@ pub fn build_groups(
 
             // Mixed formats
             let formats: Vec<String> = {
-                let mut v: Vec<String> = files_with_info.iter().map(|(f, _)| f.ext.clone()).collect();
+                let mut v: Vec<String> =
+                    files_with_info.iter().map(|(f, _)| f.ext.clone()).collect();
                 v.sort_unstable();
                 v.dedup();
                 v
@@ -254,7 +270,11 @@ pub fn build_groups(
             }
 
             // M3U already exists
-            let m3u_file = format!("{}/{}.m3u", output_dir.trim_end_matches('/'), sanitize_filename(&base_name));
+            let m3u_file = format!(
+                "{}/{}.m3u",
+                output_dir.trim_end_matches('/'),
+                sanitize_filename(&base_name)
+            );
             let m3u_exists = Path::new(&m3u_file).exists();
             if m3u_exists {
                 warnings.push(M3uWarningDto {
@@ -367,7 +387,11 @@ pub fn generate_all_local(
         }
     }
 
-    M3uGenerateResultDto { created, skipped, failed }
+    M3uGenerateResultDto {
+        created,
+        skipped,
+        failed,
+    }
 }
 
 // ------------------------------------------------------------------

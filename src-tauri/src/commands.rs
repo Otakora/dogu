@@ -1,20 +1,24 @@
 use std::path::PathBuf;
 
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use tauri::{AppHandle, State};
 
 use crate::{
+    m3u,
     models::{
         ActiveConnectionDto, AppMetadataDto, AvailableShell, ChdConversionOptionsPayload,
         ChdRestoreOptionsPayload, CompressionCapabilitiesDto, CompressionOptionsPayload,
-        ConnectionOpenResultDto, ConnectionProfileDto,
-        ConnectionProfilePayload, EntryDto, ExtractionOptionsPayload, ExtractionPreviewEntry, ExtractionPreviewRow,
-        KnownFoldersDto, M3uGeneratePayload, M3uGenerateResultDto, M3uGroupDto, M3uScanOptions,
-        PreflightCheckResult, PropertiesSummaryDto, RemoteDiskUsageDto, SelectionAnalysisDto, SummaryOptionsPayload,
-        VolumeDto,
+        ConnectionOpenResultDto, ConnectionProfileDto, ConnectionProfilePayload, EntryDto,
+        ExtractionOptionsPayload, ExtractionPreviewEntry, ExtractionPreviewRow, KnownFoldersDto,
+        M3uGeneratePayload, M3uGenerateResultDto, M3uGroupDto, M3uScanOptions,
+        PreflightCheckResult, PropertiesSummaryDto, RemoteDiskUsageDto, SelectionAnalysisDto,
+        SummaryOptionsPayload, VolumeDto,
     },
-    m3u, ops, pause, remote, terminal,
+    ops, pause, remote, terminal,
 };
 
 pub struct SummaryRequestState {
@@ -26,7 +30,10 @@ fn parse_paths(paths: Vec<String>) -> Vec<PathBuf> {
 }
 
 #[tauri::command]
-pub async fn list_children(remote_state: State<'_, remote::RemoteState>, path: String) -> Result<Vec<EntryDto>, String> {
+pub async fn list_children(
+    remote_state: State<'_, remote::RemoteState>,
+    path: String,
+) -> Result<Vec<EntryDto>, String> {
     if remote::RemoteManager::is_remote_path(&path) {
         let rm = remote_state.inner.clone();
         return tauri::async_runtime::spawn_blocking(move || {
@@ -44,7 +51,10 @@ pub async fn list_children(remote_state: State<'_, remote::RemoteState>, path: S
 }
 
 #[tauri::command]
-pub async fn inspect_path(remote_state: State<'_, remote::RemoteState>, path: String) -> Result<EntryDto, String> {
+pub async fn inspect_path(
+    remote_state: State<'_, remote::RemoteState>,
+    path: String,
+) -> Result<EntryDto, String> {
     if remote::RemoteManager::is_remote_path(&path) {
         let rm = remote_state.inner.clone();
         return tauri::async_runtime::spawn_blocking(move || {
@@ -71,7 +81,8 @@ pub async fn search_entries(
     if remote::RemoteManager::is_remote_path(&path) {
         let rm = remote_state.inner.clone();
         return tauri::async_runtime::spawn_blocking(move || {
-            rm.search_entries(&path, &query, recursive).map_err(|e| e.to_string())
+            rm.search_entries(&path, &query, recursive)
+                .map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -92,7 +103,9 @@ pub async fn summarize_paths(
     paths: Vec<String>,
     options: SummaryOptionsPayload,
 ) -> Result<PropertiesSummaryDto, String> {
-    state.current_request_id.store(request_id, Ordering::Relaxed);
+    state
+        .current_request_id
+        .store(request_id, Ordering::Relaxed);
     if paths
         .first()
         .map(|path| remote::RemoteManager::is_remote_path(path))
@@ -106,7 +119,8 @@ pub async fn summarize_paths(
     let parsed = parse_paths(paths);
     let state_ref = state.current_request_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        ops::summarize_paths(&parsed, &options, Some((&state_ref, request_id))).map_err(|error| error.to_string())
+        ops::summarize_paths(&parsed, &options, Some((&state_ref, request_id)))
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -222,11 +236,12 @@ pub fn build_extraction_preview(
 
     // Remote archives: generate a placeholder row (contents can't be previewed without downloading).
     for path in &remote_archives {
-        let dest_root = if options.destination_mode != "custom" || options.destination_path.is_none() {
-            "(carpeta del archivo remoto)".to_string()
-        } else {
-            options.destination_path.clone().unwrap_or_default()
-        };
+        let dest_root =
+            if options.destination_mode != "custom" || options.destination_path.is_none() {
+                "(carpeta del archivo remoto)".to_string()
+            } else {
+                options.destination_path.clone().unwrap_or_default()
+            };
         rows.push(ExtractionPreviewRow {
             archive_path: path.clone(),
             destination_root: dest_root,
@@ -240,8 +255,9 @@ pub fn build_extraction_preview(
 
     // Local archives: use normal preview.
     if !local_archives.is_empty() {
-        let local_rows = ops::build_extraction_preview(&app, &parse_paths(local_archives), &options)
-            .map_err(|error| error.to_string())?;
+        let local_rows =
+            ops::build_extraction_preview(&app, &parse_paths(local_archives), &options)
+                .map_err(|error| error.to_string())?;
         rows.extend(local_rows);
     }
 
@@ -323,7 +339,10 @@ pub fn start_copy_or_move_paths(
     let destination_path = PathBuf::from(destination.clone());
     let is_remote = paths
         .first()
-        .map(|path| remote::RemoteManager::is_remote_path(path) || remote::RemoteManager::is_remote_path(&destination))
+        .map(|path| {
+            remote::RemoteManager::is_remote_path(path)
+                || remote::RemoteManager::is_remote_path(&destination)
+        })
         .unwrap_or_else(|| remote::RemoteManager::is_remote_path(&destination));
     tauri::async_runtime::spawn_blocking(move || {
         let result = if is_remote {
@@ -373,7 +392,10 @@ pub fn start_extract_archives(
     let pr = (*pause_registry).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = ops::extract_archives(
-            &app_handle, &job_id, parsed_paths, options,
+            &app_handle,
+            &job_id,
+            parsed_paths,
+            options,
             Some(rm),
             Some(pr),
         );
@@ -405,7 +427,10 @@ pub fn start_convert_to_chd(
     let pr = (*pause_registry).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = ops::convert_to_chd(
-            &app_handle, &job_id, &parsed_paths, options,
+            &app_handle,
+            &job_id,
+            &parsed_paths,
+            options,
             Some(rm),
             Some(pr),
         );
@@ -433,7 +458,10 @@ pub fn start_restore_from_chd(
     let pr = (*pause_registry).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = ops::restore_from_chd(
-            &app_handle, &job_id, &parsed_paths, options,
+            &app_handle,
+            &job_id,
+            &parsed_paths,
+            options,
             Some(rm),
             Some(pr),
         );
@@ -450,7 +478,10 @@ pub fn start_restore_from_chd(
 pub fn list_connection_profiles(
     remote_state: State<'_, remote::RemoteState>,
 ) -> Result<Vec<ConnectionProfileDto>, String> {
-    remote_state.inner.list_profiles().map_err(|error| error.to_string())
+    remote_state
+        .inner
+        .list_profiles()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -546,11 +577,9 @@ pub async fn disconnect_connection(
 
 #[tauri::command]
 pub async fn list_volumes() -> Result<Vec<VolumeDto>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        ops::list_volumes().map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(|| ops::list_volumes().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -677,14 +706,22 @@ pub async fn generate_m3u_files(
                     }),
                 }
             }
-            Ok(M3uGenerateResultDto { created, skipped, failed })
+            Ok(M3uGenerateResultDto {
+                created,
+                skipped,
+                failed,
+            })
         })
         .await
         .map_err(|e| e.to_string())?;
     }
 
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(m3u::generate_all_local(&payload.groups, payload.overwrite, payload.rename_on_conflict))
+        Ok(m3u::generate_all_local(
+            &payload.groups,
+            payload.overwrite,
+            payload.rename_on_conflict,
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -700,8 +737,7 @@ pub fn create_terminal(
     cwd: String,
     shell: Option<String>,
 ) -> Result<(), String> {
-    terminal::create_terminal(&tm, app_handle, id, cwd, shell)
-        .map_err(|e| e.to_string())
+    terminal::create_terminal(&tm, app_handle, id, cwd, shell).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -815,7 +851,10 @@ pub fn start_compress(
     let pr = (*pause_registry).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = ops::compress_to_archive(
-            &app_handle, &job_id, parsed_paths, options,
+            &app_handle,
+            &job_id,
+            parsed_paths,
+            options,
             Some(rm),
             Some(pr),
         );

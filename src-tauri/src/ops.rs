@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     ffi::OsStr,
     fs,
-    io::{self, Seek, Write},
+    io::{self, Read, Seek, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -35,13 +35,16 @@ impl Drop for TempGuard {
 use crate::{
     models::{
         ChdConversionOptionsPayload, ChdRestoreOptionsPayload, ChdSourceDto,
-        CompressionCapabilitiesDto, CompressionOptionsPayload, EntryDto, ExtractionOptionsPayload,
-        ExtractionPreviewEntry, ExtractionPreviewRow, JobFinishedDto, JobLogDto, JobProgressDto,
-        KnownFoldersDto, PreflightCheckResult, PreflightWarning, PropertiesSummaryDto,
-        RemoteTransferPolicy, SelectionAnalysisDto, SummaryOptionsPayload, VolumeDto,
+        CompressionCapabilitiesDto, CompressionOptionsPayload, DiscImageOptionsPayload, EntryDto,
+        ExtractionOptionsPayload, ExtractionPreviewEntry, ExtractionPreviewRow, JobFinishedDto,
+        JobLogDto, JobProgressDto, KnownFoldersDto, PreflightCheckResult, PreflightWarning,
+        PropertiesSummaryDto, RemoteTransferPolicy, SelectionAnalysisDto, SummaryOptionsPayload,
+        VolumeDto,
     },
     pause, remote,
-    sidecars::{chdman_path, rar_capable_seven_zip_path, runtime_root, seven_zip_path},
+    sidecars::{
+        chdman_path, dolphin_tool_path, rar_capable_seven_zip_path, runtime_root, seven_zip_path,
+    },
 };
 
 const ARCHIVE_EXTENSIONS: &[&str] = &[".zip", ".7z", ".rar"];
@@ -1684,6 +1687,88 @@ pub fn probe_chdman_runtime(app: &AppHandle) -> crate::models::ToolRuntimeDto {
     }
 }
 
+/// Generic runtime probe: resolves a bundled/PATH binary and confirms it can be
+/// launched by the OS. `resolve` returns the binary path (mirrors chdman/7z/dolphin).
+fn probe_tool_runtime(path: Option<PathBuf>, missing_error: &str) -> crate::models::ToolRuntimeDto {
+    use crate::models::ToolRuntimeDto;
+
+    let Some(path) = path else {
+        return ToolRuntimeDto {
+            available: false,
+            path: None,
+            version: None,
+            error: Some(missing_error.to_string()),
+        };
+    };
+    let path_str = path.to_string_lossy().to_string();
+    match Command::new(&path).output() {
+        Ok(output) => {
+            let version = [&output.stdout, &output.stderr].iter().find_map(|b| {
+                let s = String::from_utf8_lossy(b);
+                s.lines()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|l| l.trim().to_string())
+            });
+            ToolRuntimeDto {
+                available: true,
+                path: Some(path_str),
+                version,
+                error: None,
+            }
+        }
+        Err(e) => ToolRuntimeDto {
+            available: false,
+            path: Some(path_str),
+            version: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// Probes every external tool Dogu relies on and reports the capabilities each
+/// one unlocks. Called at startup so the UI can prepare/guide and disable
+/// features whose tool is unavailable.
+pub fn check_tools(app: &AppHandle) -> Vec<crate::models::ToolStatusDto> {
+    use crate::models::ToolStatusDto;
+
+    vec![
+        ToolStatusDto {
+            id: "chdman".to_string(),
+            display_name: "chdman (MAME)".to_string(),
+            optional: false,
+            provisioning: "bundled".to_string(),
+            runtime: probe_chdman_runtime(app),
+            enables: vec!["chd".to_string()],
+            guidance_url: Some("https://docs.mamedev.org/tools/chdman.html".to_string()),
+        },
+        ToolStatusDto {
+            id: "sevenZip".to_string(),
+            display_name: "7-Zip".to_string(),
+            optional: false,
+            provisioning: "bundled".to_string(),
+            runtime: probe_tool_runtime(
+                seven_zip_path(app),
+                "7-Zip no encontrado en los recursos de la aplicación",
+            ),
+            enables: vec!["archives".to_string()],
+            guidance_url: Some("https://www.7-zip.org/".to_string()),
+        },
+        ToolStatusDto {
+            id: "dolphinTool".to_string(),
+            display_name: "DolphinTool".to_string(),
+            // Optional: nod is the built-in RVZ engine, so RVZ still works without it.
+            optional: true,
+            provisioning: "bundled".to_string(),
+            runtime: probe_tool_runtime(
+                dolphin_tool_path(app),
+                "DolphinTool no encontrado en los recursos (motor RVZ nativo 'nod' disponible igualmente)",
+            ),
+            enables: vec!["rvzDolphin".to_string()],
+            guidance_url: Some("https://dolphin-emu.org/download/".to_string()),
+        },
+    ]
+}
+
 pub fn restore_from_chd(
     app: &AppHandle,
     job_id: &str,
@@ -1997,6 +2082,1151 @@ pub fn restore_from_chd(
     Ok(())
 }
 
+// ---- Native disc-image treatments (CSO / XISO) ----
+
+fn leaf_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_else(|| path.as_os_str())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn ext_lower(path: &Path) -> String {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn move_file(from: &Path, to: &Path) -> Result<()> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    fs::copy(from, to)?;
+    let _ = fs::remove_file(from);
+    Ok(())
+}
+
+/// Brings a source local for processing. Remote sources are downloaded into a
+/// dedicated per-job temp dir (single file when possible — disc images are
+/// self-contained — falling back to a whole-directory download for folder
+/// sources like a remote xiso-pack). Returns the local path plus a guard that
+/// cleans the download up on any exit path.
+fn localize_remote_source(
+    app: &AppHandle,
+    job_id: &str,
+    rm: &remote::RemoteManager,
+    source: &Path,
+    source_is_remote: bool,
+) -> Result<(PathBuf, Option<TempGuard>)> {
+    if !source_is_remote {
+        return Ok((source.to_path_buf(), None));
+    }
+    let source_str = source.to_string_lossy().to_string();
+    let dl_dir = temp_download_dir(app, job_id)?;
+    match rm.download_remote_file(&source_str) {
+        Ok(shared) => {
+            let local = dl_dir.join(leaf_name(source));
+            move_file(&shared, &local)?;
+            emit_log(
+                app,
+                job_id,
+                format!("Origen remoto descargado: {}", source.display()),
+            )?;
+            Ok((local, Some(TempGuard(dl_dir))))
+        }
+        Err(_) => {
+            // Likely a directory source (e.g. packing a remote folder to XISO).
+            rm.download_remote_dir_to_local(&source_str, &dl_dir)?;
+            emit_log(
+                app,
+                job_id,
+                format!("Carpeta remota descargada: {}", source.display()),
+            )?;
+            Ok((dl_dir.clone(), Some(TempGuard(dl_dir))))
+        }
+    }
+}
+
+/// Removes the original after a successful op — remote or local.
+fn finalize_delete_original(
+    app: &AppHandle,
+    job_id: &str,
+    remote_manager: &Option<Arc<remote::RemoteManager>>,
+    source: &Path,
+) -> Result<()> {
+    let source_str = source.to_string_lossy().to_string();
+    if remote::RemoteManager::is_remote_path(&source_str) {
+        if let Some(rm) = remote_manager {
+            rm.delete_paths(app, job_id, vec![source_str])?;
+        }
+    } else {
+        remove_single_path(source)?;
+    }
+    emit_log(
+        app,
+        job_id,
+        format!("Original eliminado: {}", source.display()),
+    )?;
+    Ok(())
+}
+
+/// Recursively uploads a local directory tree to a remote destination,
+/// recreating the folder structure.
+fn upload_dir_recursive(
+    app: &AppHandle,
+    job_id: &str,
+    rm: &remote::RemoteManager,
+    local_dir: &Path,
+    remote_dir: &str,
+) -> Result<()> {
+    rm.ensure_remote_dir(remote_dir)?;
+    for entry in fs::read_dir(local_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let child = format!(
+                "{}/{}",
+                remote_dir.trim_end_matches('/'),
+                entry.file_name().to_string_lossy()
+            );
+            upload_dir_recursive(app, job_id, rm, &path, &child)?;
+        } else {
+            rm.upload_file_to_remote(app, job_id, &path, remote_dir)?;
+        }
+    }
+    Ok(())
+}
+
+/// Chooses the effective remote destination directory for a disc-image op:
+/// an explicit `remote_destination`, or the remote source's own folder when the
+/// source is remote and the destination mode is not a local "custom" path.
+fn effective_disc_remote_dest(source: &Path, options: &DiscImageOptionsPayload) -> Option<String> {
+    if options.remote_destination.is_some() {
+        return options.remote_destination.clone();
+    }
+    let source_is_remote = remote::RemoteManager::is_remote_path(&source.to_string_lossy());
+    if source_is_remote && options.destination_mode != "custom" {
+        return remote_parent_of(source);
+    }
+    None
+}
+
+/// Driver for a single-file-output disc-image op on one source, transparently
+/// handling remote sources (download → local) and remote destinations (produce
+/// to temp → upload → cleanup). `produce(local_source, output_path)` writes the
+/// single output file.
+#[allow(clippy::too_many_arguments)]
+fn run_disc_file_op(
+    app: &AppHandle,
+    job_id: &str,
+    remote_manager: &Option<Arc<remote::RemoteManager>>,
+    pause_registry: &Option<pause::PauseRegistry>,
+    source: &Path,
+    options: &DiscImageOptionsPayload,
+    output_name: &str,
+    produce: impl FnOnce(&Path, &Path) -> Result<()>,
+) -> Result<()> {
+    let source_is_remote = remote::RemoteManager::is_remote_path(&source.to_string_lossy());
+
+    // Fast path: nothing remote — write straight to the local destination.
+    if !source_is_remote && options.remote_destination.is_none() {
+        let dest_dir = disc_destination_dir(source, options)?;
+        fs::create_dir_all(&dest_dir)?;
+        let output = prepare_output_path(
+            dest_dir.join(output_name),
+            options.overwrite,
+            options.rename_on_conflict,
+        )?;
+        emit_log(
+            app,
+            job_id,
+            format!("{} -> {}", source.display(), output.display()),
+        )?;
+        return produce(source, &output);
+    }
+
+    let rm = remote_manager
+        .as_ref()
+        .ok_or_else(|| anyhow!("Se necesita el gestor remoto para operaciones remotas."))?;
+    let (local_source, _guard) = localize_remote_source(app, job_id, rm, source, source_is_remote)?;
+
+    if let Some(dest) = effective_disc_remote_dest(source, options) {
+        let pr = pause_registry
+            .as_ref()
+            .ok_or_else(|| anyhow!("Se necesita el registro de pausa para subir a remoto."))?;
+        let policy = options
+            .remote_transfer
+            .clone()
+            .unwrap_or_else(|| RemoteTransferPolicy {
+                on_error: "abort".to_string(),
+            });
+        let source_name = leaf_name(source);
+        run_remote_file_cycle(
+            app,
+            job_id,
+            rm,
+            pr,
+            &dest,
+            &policy,
+            &source_name,
+            |temp_dir| {
+                let output = temp_dir.join(output_name);
+                produce(&local_source, &output)?;
+                Ok(vec![output])
+            },
+        )
+    } else {
+        // Remote source → local (custom) destination.
+        let dest_dir = disc_destination_dir(source, options)?;
+        fs::create_dir_all(&dest_dir)?;
+        let output = prepare_output_path(
+            dest_dir.join(output_name),
+            options.overwrite,
+            options.rename_on_conflict,
+        )?;
+        produce(&local_source, &output)
+    }
+}
+
+/// Like `run_disc_file_op` but the op produces a whole output *folder* (e.g.
+/// unpack-xiso). For remote destinations the folder is built in a temp dir and
+/// uploaded recursively.
+#[allow(clippy::too_many_arguments)]
+fn run_disc_folder_op(
+    app: &AppHandle,
+    job_id: &str,
+    remote_manager: &Option<Arc<remote::RemoteManager>>,
+    _pause_registry: &Option<pause::PauseRegistry>,
+    source: &Path,
+    options: &DiscImageOptionsPayload,
+    folder_name: &str,
+    produce: impl FnOnce(&Path, &Path) -> Result<()>,
+) -> Result<()> {
+    let source_is_remote = remote::RemoteManager::is_remote_path(&source.to_string_lossy());
+
+    if !source_is_remote && options.remote_destination.is_none() {
+        let dest_dir = disc_destination_dir(source, options)?;
+        fs::create_dir_all(&dest_dir)?;
+        let output_dir = prepare_output_path(
+            dest_dir.join(folder_name),
+            options.overwrite,
+            options.rename_on_conflict,
+        )?;
+        fs::create_dir_all(&output_dir)?;
+        return produce(source, &output_dir);
+    }
+
+    let rm = remote_manager
+        .as_ref()
+        .ok_or_else(|| anyhow!("Se necesita el gestor remoto para operaciones remotas."))?;
+    let (local_source, _guard) = localize_remote_source(app, job_id, rm, source, source_is_remote)?;
+
+    if let Some(dest) = effective_disc_remote_dest(source, options) {
+        let staging = temp_download_dir(app, job_id)?.join(format!("out-{folder_name}"));
+        fs::create_dir_all(&staging)?;
+        let _out_guard = TempGuard(staging.clone());
+        produce(&local_source, &staging)?;
+        let remote_target = format!("{}/{}", dest.trim_end_matches('/'), folder_name);
+        upload_dir_recursive(app, job_id, rm, &staging, &remote_target)?;
+        Ok(())
+    } else {
+        let dest_dir = disc_destination_dir(source, options)?;
+        fs::create_dir_all(&dest_dir)?;
+        let output_dir = prepare_output_path(
+            dest_dir.join(folder_name),
+            options.overwrite,
+            options.rename_on_conflict,
+        )?;
+        fs::create_dir_all(&output_dir)?;
+        produce(&local_source, &output_dir)
+    }
+}
+
+fn disc_destination_dir(source: &Path, options: &DiscImageOptionsPayload) -> Result<PathBuf> {
+    if options.destination_mode == "custom" {
+        return options
+            .destination_path
+            .as_ref()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("Modo personalizado sin destination_path"));
+    }
+    source
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("No se pudo determinar la carpeta de destino"))
+}
+
+fn prepare_output_path(
+    path: PathBuf,
+    overwrite: bool,
+    rename_on_conflict: bool,
+) -> Result<PathBuf> {
+    if !path.exists() {
+        return Ok(path);
+    }
+    if overwrite {
+        remove_single_path(&path)?;
+        return Ok(path);
+    }
+    if rename_on_conflict {
+        return Ok(unique_path(&path));
+    }
+    Err(anyhow!(
+        "El destino ya existe: {}. Activa sobreescribir o renombrar en conflicto.",
+        path.display()
+    ))
+}
+
+fn source_stem(path: &Path) -> String {
+    path.file_stem()
+        .unwrap_or_else(|| path.as_os_str())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn xiso_output_stem(path: &Path) -> String {
+    let stem = source_stem(path);
+    stem.strip_suffix(".xiso").unwrap_or(&stem).to_string()
+}
+
+pub fn convert_to_cso(
+    app: &AppHandle,
+    job_id: &str,
+    sources: Vec<PathBuf>,
+    options: DiscImageOptionsPayload,
+    remote_manager: Option<Arc<remote::RemoteManager>>,
+    pause_registry: Option<pause::PauseRegistry>,
+) -> Result<()> {
+    let total = sources.len().max(1) as f64;
+    for (index, source) in sources.iter().enumerate() {
+        if ext_lower(source) != "iso" {
+            return Err(anyhow!("CSO solo acepta origen .iso: {}", source.display()));
+        }
+        let base = index as f64 / total;
+        let span = 1.0 / total;
+        let level = options.compression_level;
+        let output_name = format!("{}.cso", source_stem(source));
+        run_disc_file_op(
+            app,
+            job_id,
+            &remote_manager,
+            &pause_registry,
+            source,
+            &options,
+            &output_name,
+            |local, output| write_cso_v1(app, job_id, base, span, local, output, level),
+        )?;
+        if options.delete_originals {
+            finalize_delete_original(app, job_id, &remote_manager, source)?;
+        }
+    }
+    emit_progress(app, job_id, 1.0, "Conversion CSO completada.".to_string())?;
+    Ok(())
+}
+
+pub fn restore_from_cso(
+    app: &AppHandle,
+    job_id: &str,
+    sources: Vec<PathBuf>,
+    options: DiscImageOptionsPayload,
+    remote_manager: Option<Arc<remote::RemoteManager>>,
+    pause_registry: Option<pause::PauseRegistry>,
+) -> Result<()> {
+    let total = sources.len().max(1) as f64;
+    for (index, source) in sources.iter().enumerate() {
+        if ext_lower(source) != "cso" {
+            return Err(anyhow!(
+                "La restauracion CSO solo acepta .cso: {}",
+                source.display()
+            ));
+        }
+        let base = index as f64 / total;
+        let span = 1.0 / total;
+        let output_name = format!("{}.iso", source_stem(source));
+        run_disc_file_op(
+            app,
+            job_id,
+            &remote_manager,
+            &pause_registry,
+            source,
+            &options,
+            &output_name,
+            |local, output| read_cso_v1(app, job_id, base, span, local, output),
+        )?;
+        if options.delete_originals {
+            finalize_delete_original(app, job_id, &remote_manager, source)?;
+        }
+    }
+    emit_progress(app, job_id, 1.0, "Restauracion CSO completada.".to_string())?;
+    Ok(())
+}
+
+pub fn pack_to_xiso(
+    app: &AppHandle,
+    job_id: &str,
+    sources: Vec<PathBuf>,
+    options: DiscImageOptionsPayload,
+    remote_manager: Option<Arc<remote::RemoteManager>>,
+    pause_registry: Option<pause::PauseRegistry>,
+) -> Result<()> {
+    let total = sources.len().max(1) as f64;
+    for (index, source) in sources.iter().enumerate() {
+        let base = index as f64 / total;
+        let span = 1.0 / total;
+        let output_name = format!("{}.xiso.iso", xiso_output_stem(source));
+        run_disc_file_op(
+            app,
+            job_id,
+            &remote_manager,
+            &pause_registry,
+            source,
+            &options,
+            &output_name,
+            |local, output| write_xiso(app, job_id, base, span, local, output),
+        )?;
+        if options.delete_originals {
+            finalize_delete_original(app, job_id, &remote_manager, source)?;
+        }
+    }
+    emit_progress(app, job_id, 1.0, "Conversion XISO completada.".to_string())?;
+    Ok(())
+}
+
+pub fn unpack_xiso(
+    app: &AppHandle,
+    job_id: &str,
+    sources: Vec<PathBuf>,
+    options: DiscImageOptionsPayload,
+    remote_manager: Option<Arc<remote::RemoteManager>>,
+    pause_registry: Option<pause::PauseRegistry>,
+) -> Result<()> {
+    let total = sources.len().max(1) as f64;
+    for (index, source) in sources.iter().enumerate() {
+        if ext_lower(source) != "iso" {
+            return Err(anyhow!("No es una imagen XISO: {}", source.display()));
+        }
+        let base = index as f64 / total;
+        let span = 1.0 / total;
+        let folder_name = xiso_output_stem(source);
+        run_disc_folder_op(
+            app,
+            job_id,
+            &remote_manager,
+            &pause_registry,
+            source,
+            &options,
+            &folder_name,
+            |local, output_dir| read_xiso(app, job_id, base, span, local, output_dir),
+        )?;
+        if options.delete_originals {
+            finalize_delete_original(app, job_id, &remote_manager, source)?;
+        }
+    }
+    emit_progress(app, job_id, 1.0, "Extraccion XISO completada.".to_string())?;
+    Ok(())
+}
+
+// ---- RVZ (GameCube / Wii): native `nod` engine + DolphinTool fallback ----
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RvzEngine {
+    Nod,
+    Dolphin,
+}
+
+impl RvzEngine {
+    fn from_opt(value: &Option<String>, default: RvzEngine) -> RvzEngine {
+        match value.as_deref() {
+            Some("dolphin") => RvzEngine::Dolphin,
+            Some("nod") => RvzEngine::Nod,
+            _ => default,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            RvzEngine::Nod => "nod",
+            RvzEngine::Dolphin => "DolphinTool",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RvzDirection {
+    /// ISO -> RVZ
+    Encode,
+    /// RVZ -> ISO
+    Decode,
+}
+
+/// Ordered list of engines to try: the configured primary, then the fallback
+/// (when enabled and different). Defaults to nod primary, DolphinTool fallback.
+fn rvz_engine_order(options: &DiscImageOptionsPayload) -> Vec<RvzEngine> {
+    let primary = RvzEngine::from_opt(&options.rvz_primary_engine, RvzEngine::Nod);
+    let mut order = vec![primary];
+    if options.rvz_enable_fallback {
+        let default_fallback = if primary == RvzEngine::Nod {
+            RvzEngine::Dolphin
+        } else {
+            RvzEngine::Nod
+        };
+        let fallback = RvzEngine::from_opt(&options.rvz_fallback_engine, default_fallback);
+        if fallback != primary {
+            order.push(fallback);
+        }
+    }
+    order
+}
+
+pub fn convert_to_rvz(
+    app: &AppHandle,
+    job_id: &str,
+    sources: Vec<PathBuf>,
+    options: DiscImageOptionsPayload,
+    remote_manager: Option<Arc<remote::RemoteManager>>,
+    pause_registry: Option<pause::PauseRegistry>,
+) -> Result<()> {
+    let total = sources.len().max(1) as f64;
+    for (index, source) in sources.iter().enumerate() {
+        if ext_lower(source) != "iso" {
+            return Err(anyhow!("RVZ solo acepta origen .iso: {}", source.display()));
+        }
+        let base = index as f64 / total;
+        let span = 1.0 / total;
+        let output_name = format!("{}.rvz", source_stem(source));
+        run_disc_file_op(
+            app,
+            job_id,
+            &remote_manager,
+            &pause_registry,
+            source,
+            &options,
+            &output_name,
+            |local, output| {
+                run_rvz_operation(
+                    app,
+                    job_id,
+                    base,
+                    span,
+                    local,
+                    output,
+                    &options,
+                    RvzDirection::Encode,
+                )
+            },
+        )?;
+        if options.delete_originals {
+            finalize_delete_original(app, job_id, &remote_manager, source)?;
+        }
+    }
+    emit_progress(app, job_id, 1.0, "Conversion RVZ completada.".to_string())?;
+    Ok(())
+}
+
+pub fn restore_from_rvz(
+    app: &AppHandle,
+    job_id: &str,
+    sources: Vec<PathBuf>,
+    options: DiscImageOptionsPayload,
+    remote_manager: Option<Arc<remote::RemoteManager>>,
+    pause_registry: Option<pause::PauseRegistry>,
+) -> Result<()> {
+    let total = sources.len().max(1) as f64;
+    for (index, source) in sources.iter().enumerate() {
+        if ext_lower(source) != "rvz" {
+            return Err(anyhow!(
+                "La restauracion RVZ solo acepta .rvz: {}",
+                source.display()
+            ));
+        }
+        let base = index as f64 / total;
+        let span = 1.0 / total;
+        let output_name = format!("{}.iso", source_stem(source));
+        run_disc_file_op(
+            app,
+            job_id,
+            &remote_manager,
+            &pause_registry,
+            source,
+            &options,
+            &output_name,
+            |local, output| {
+                run_rvz_operation(
+                    app,
+                    job_id,
+                    base,
+                    span,
+                    local,
+                    output,
+                    &options,
+                    RvzDirection::Decode,
+                )
+            },
+        )?;
+        if options.delete_originals {
+            finalize_delete_original(app, job_id, &remote_manager, source)?;
+        }
+    }
+    emit_progress(app, job_id, 1.0, "Restauracion RVZ completada.".to_string())?;
+    Ok(())
+}
+
+/// Runs one RVZ conversion/restoration, trying each configured engine in order.
+/// If an engine fails, its partial output is discarded and the next engine is
+/// attempted, so a successful run always leaves a complete, valid file.
+fn run_rvz_operation(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    source: &Path,
+    output: &Path,
+    options: &DiscImageOptionsPayload,
+    direction: RvzDirection,
+) -> Result<()> {
+    let engines = rvz_engine_order(options);
+    let mut last_err: Option<anyhow::Error> = None;
+    for (attempt, engine) in engines.iter().enumerate() {
+        // Discard any partial output left by a previous failed attempt.
+        if output.exists() {
+            let _ = remove_single_path(output);
+        }
+        let result = match (engine, direction) {
+            (RvzEngine::Nod, RvzDirection::Encode) => rvz_encode_nod(
+                app,
+                job_id,
+                base,
+                span,
+                source,
+                output,
+                options.compression_level,
+            ),
+            (RvzEngine::Nod, RvzDirection::Decode) => {
+                rvz_decode_nod(app, job_id, base, span, source, output)
+            }
+            (RvzEngine::Dolphin, _) => rvz_run_dolphin(
+                app,
+                job_id,
+                base,
+                span,
+                source,
+                output,
+                options.compression_level,
+                direction,
+            ),
+        };
+        match result {
+            Ok(()) => {
+                if attempt > 0 {
+                    emit_log(
+                        app,
+                        job_id,
+                        format!("RVZ: completado con el motor de reserva {}", engine.label()),
+                    )?;
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                emit_log(
+                    app,
+                    job_id,
+                    format!("RVZ: el motor {} fallo: {error}", engine.label()),
+                )?;
+                last_err = Some(error);
+            }
+        }
+    }
+    if output.exists() {
+        let _ = remove_single_path(output);
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("No hay ningun motor RVZ disponible.")))
+}
+
+fn rvz_encode_nod(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    source: &Path,
+    output: &Path,
+    compression_level: u8,
+) -> Result<()> {
+    use nod::common::{Compression, Format};
+    use nod::read::{DiscOptions, DiscReader};
+    use nod::write::{DiscWriter, FormatOptions, ProcessOptions};
+
+    let disc = DiscReader::new(source, &DiscOptions::default())
+        .map_err(|e| anyhow!("nod no pudo abrir la ISO (¿es un disco GameCube/Wii?): {e}"))?;
+    let zstd_level = compression_level.clamp(1, 22) as i8;
+    let format_options = FormatOptions {
+        format: Format::Rvz,
+        compression: Compression::Zstandard(zstd_level),
+        block_size: Format::Rvz.default_block_size(),
+    };
+    let writer = DiscWriter::new(disc, &format_options)
+        .map_err(|e| anyhow!("nod no pudo iniciar la escritura RVZ: {e}"))?;
+    let bound = writer.progress_bound().max(1);
+
+    let mut out = std::io::BufWriter::with_capacity(1024 * 1024, fs::File::create(output)?);
+    let finalization = writer
+        .process(
+            |data, pos, _| {
+                out.write_all(data.as_ref())?;
+                let progress = base + span * (pos as f64 / bound as f64);
+                let _ = emit_progress(
+                    app,
+                    job_id,
+                    progress.clamp(0.0, 0.99),
+                    format!(
+                        "Escribiendo RVZ (nod) {}%",
+                        (pos.saturating_mul(100) / bound).min(100)
+                    ),
+                );
+                Ok(())
+            },
+            &ProcessOptions::default(),
+        )
+        .map_err(|e| anyhow!("nod fallo al comprimir a RVZ: {e}"))?;
+
+    // RVZ/WIA write their header last; flush it to the start of the file.
+    if !finalization.header.is_empty() {
+        out.seek(std::io::SeekFrom::Start(0))?;
+        out.write_all(finalization.header.as_ref())?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn rvz_decode_nod(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    source: &Path,
+    output: &Path,
+) -> Result<()> {
+    use nod::common::{Compression, Format};
+    use nod::read::{DiscOptions, DiscReader};
+    use nod::write::{DiscWriter, FormatOptions, ProcessOptions};
+
+    let disc = DiscReader::new(source, &DiscOptions::default())
+        .map_err(|e| anyhow!("nod no pudo abrir el RVZ: {e}"))?;
+    let format_options = FormatOptions {
+        format: Format::Iso,
+        compression: Compression::None,
+        block_size: Format::Iso.default_block_size(),
+    };
+    let writer = DiscWriter::new(disc, &format_options)
+        .map_err(|e| anyhow!("nod no pudo iniciar la restauracion a ISO: {e}"))?;
+    let bound = writer.progress_bound().max(1);
+
+    let mut out = std::io::BufWriter::with_capacity(1024 * 1024, fs::File::create(output)?);
+    let finalization = writer
+        .process(
+            |data, pos, _| {
+                out.write_all(data.as_ref())?;
+                let progress = base + span * (pos as f64 / bound as f64);
+                let _ = emit_progress(
+                    app,
+                    job_id,
+                    progress.clamp(0.0, 0.99),
+                    format!(
+                        "Restaurando ISO (nod) {}%",
+                        (pos.saturating_mul(100) / bound).min(100)
+                    ),
+                );
+                Ok(())
+            },
+            &ProcessOptions::default(),
+        )
+        .map_err(|e| anyhow!("nod fallo al restaurar el RVZ a ISO: {e}"))?;
+    if !finalization.header.is_empty() {
+        out.seek(std::io::SeekFrom::Start(0))?;
+        out.write_all(finalization.header.as_ref())?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn rvz_run_dolphin(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    source: &Path,
+    output: &Path,
+    compression_level: u8,
+    direction: RvzDirection,
+) -> Result<()> {
+    let tool = dolphin_tool_path(app).ok_or_else(|| {
+        anyhow!("DolphinTool no esta disponible (no se encontro el binario en third_party/dolphin-tool ni en PATH).")
+    })?;
+
+    // DolphinTool needs a "user" folder for temporary processing files; point it
+    // at a scratch dir so it doesn't create one in Dogu's working directory.
+    let user_dir = std::env::temp_dir().join("dogu-dolphintool");
+    let _ = fs::create_dir_all(&user_dir);
+
+    let mut command = Command::new(&tool);
+    command
+        .arg("convert")
+        .arg("-u")
+        .arg(&user_dir)
+        .arg("-i")
+        .arg(source)
+        .arg("-o")
+        .arg(output);
+    match direction {
+        RvzDirection::Encode => {
+            let level = compression_level.clamp(1, 22);
+            command
+                .arg("-f")
+                .arg("rvz")
+                .arg("-c")
+                .arg("zstd")
+                .arg("-l")
+                .arg(level.to_string())
+                .arg("-b")
+                .arg("131072");
+        }
+        RvzDirection::Decode => {
+            command.arg("-f").arg("iso");
+        }
+    }
+
+    emit_progress(
+        app,
+        job_id,
+        (base + span * 0.05).clamp(0.0, 0.99),
+        "DolphinTool procesando...".to_string(),
+    )?;
+    let result = command
+        .output()
+        .map_err(|e| anyhow!("No se pudo ejecutar DolphinTool: {e}"))?;
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(anyhow!("DolphinTool fallo: {}", stderr.trim()));
+    }
+    emit_progress(
+        app,
+        job_id,
+        (base + span).min(0.99),
+        "DolphinTool completado".to_string(),
+    )?;
+    Ok(())
+}
+
+fn cso_alignment_for_size(size: u64) -> u8 {
+    for align in 0..=8 {
+        if (size >> align) <= 0x7fff_ffff {
+            return align;
+        }
+    }
+    8
+}
+
+fn write_cso_v1(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    source: &Path,
+    output: &Path,
+    compression_level: u8,
+) -> Result<()> {
+    // CISO/CSO v1 stores each block as a *raw* DEFLATE stream (no zlib header or
+    // Adler-32 trailer). This is what maxcso, PCSX2 and PPSSPP expect, so the
+    // resulting .cso loads directly in emulators.
+    use flate2::{write::DeflateEncoder, Compression};
+
+    const HEADER_SIZE: u64 = 24;
+    const BLOCK_SIZE: usize = 2048;
+    const RAW_FLAG: u32 = 0x8000_0000;
+
+    let mut input = fs::File::open(source)?;
+    let input_len = input.metadata()?.len();
+    let sector_count = ((input_len + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64) as usize;
+    let index_len = sector_count + 1;
+    let min_data_start = HEADER_SIZE + (index_len as u64 * 4);
+    let align = cso_alignment_for_size(input_len.max(min_data_start));
+    let align_mask = (1_u64 << align) - 1;
+    let level = Compression::new(u32::from(compression_level.min(9)));
+
+    let mut out = std::io::BufWriter::new(fs::File::create(output)?);
+    out.write_all(&vec![0; min_data_start as usize])?;
+
+    let mut indexes = vec![0_u32; index_len];
+    let mut position = min_data_start;
+    let mut buffer = vec![0_u8; BLOCK_SIZE];
+    for sector in 0..sector_count {
+        if align_mask > 0 {
+            let padding = (1_u64 << align) - (position & align_mask);
+            if padding < (1_u64 << align) {
+                out.seek(std::io::SeekFrom::Start(position))?;
+                out.write_all(&vec![0; padding as usize])?;
+                position += padding;
+            }
+        }
+
+        let remaining = input_len.saturating_sub((sector as u64) * BLOCK_SIZE as u64);
+        let block_len = remaining.min(BLOCK_SIZE as u64) as usize;
+        input.read_exact(&mut buffer[..block_len])?;
+        // Every CSO block covers a full 2048-byte sector; zero-pad a trailing
+        // partial sector so raw blocks are exactly one sector on disk (what
+        // maxcso/PCSX2/PPSSPP assume). Real ISOs are sector-aligned, so this
+        // only guards non-standard inputs. The reader drops the padding via
+        // the true image size in the header.
+        if block_len < BLOCK_SIZE {
+            buffer[block_len..].fill(0);
+        }
+
+        let mut encoder = DeflateEncoder::new(Vec::new(), level);
+        encoder.write_all(&buffer)?;
+        let compressed = encoder.finish()?;
+        let use_raw = compressed.len() + 12 >= BLOCK_SIZE;
+        indexes[sector] = ((position >> align) as u32) | if use_raw { RAW_FLAG } else { 0 };
+
+        out.seek(std::io::SeekFrom::Start(position))?;
+        if use_raw {
+            out.write_all(&buffer)?;
+            position += BLOCK_SIZE as u64;
+        } else {
+            out.write_all(&compressed)?;
+            position += compressed.len() as u64;
+        }
+
+        let progress = base + span * ((sector + 1) as f64 / sector_count.max(1) as f64);
+        emit_progress(
+            app,
+            job_id,
+            progress.clamp(0.0, 0.99),
+            format!(
+                "Comprimiendo CSO {}%",
+                ((sector + 1) * 100 / sector_count.max(1))
+            ),
+        )?;
+    }
+    indexes[index_len - 1] = (position >> align) as u32;
+
+    out.seek(std::io::SeekFrom::Start(0))?;
+    out.write_all(b"CISO")?;
+    out.write_all(&24_u32.to_le_bytes())?;
+    out.write_all(&input_len.to_le_bytes())?;
+    out.write_all(&(BLOCK_SIZE as u32).to_le_bytes())?;
+    out.write_all(&[1, align, 0, 0])?;
+    for entry in indexes {
+        out.write_all(&entry.to_le_bytes())?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn read_cso_v1(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    source: &Path,
+    output: &Path,
+) -> Result<()> {
+    use flate2::read::{DeflateDecoder, ZlibDecoder};
+
+    const RAW_FLAG: u32 = 0x8000_0000;
+    const OFFSET_MASK: u32 = 0x7fff_ffff;
+
+    let mut input = fs::File::open(source)?;
+    let mut header = [0_u8; 24];
+    input.read_exact(&mut header)?;
+    if &header[0..4] != b"CISO" {
+        return Err(anyhow!(
+            "No parece un fichero CSO valido: {}",
+            source.display()
+        ));
+    }
+    let total_size = u64::from_le_bytes(header[8..16].try_into().unwrap());
+    let block_size = u32::from_le_bytes(header[16..20].try_into().unwrap()) as usize;
+    let version = header[20];
+    let align = header[21];
+    if version > 1 {
+        return Err(anyhow!(
+            "CSO v{} no esta soportado nativamente todavia. Dogu escribe y restaura CSO v1/DEFLATE.",
+            version
+        ));
+    }
+    if block_size == 0 {
+        return Err(anyhow!("CSO con tamano de bloque invalido"));
+    }
+    let sector_count = ((total_size + block_size as u64 - 1) / block_size as u64) as usize;
+    let mut indexes = vec![0_u32; sector_count + 1];
+    for entry in &mut indexes {
+        let mut raw = [0_u8; 4];
+        input.read_exact(&mut raw)?;
+        *entry = u32::from_le_bytes(raw);
+    }
+
+    let mut output_file = std::io::BufWriter::new(fs::File::create(output)?);
+    for sector in 0..sector_count {
+        let current = indexes[sector];
+        let next = indexes[sector + 1];
+        let offset = ((current & OFFSET_MASK) as u64) << align;
+        let next_offset = ((next & OFFSET_MASK) as u64) << align;
+        let data_len = next_offset
+            .checked_sub(offset)
+            .ok_or_else(|| anyhow!("Indice CSO corrupto"))? as usize;
+        let remaining = total_size.saturating_sub((sector as u64) * block_size as u64);
+        let expected_len = remaining.min(block_size as u64) as usize;
+
+        input.seek(std::io::SeekFrom::Start(offset))?;
+        let mut chunk = vec![0_u8; data_len];
+        input.read_exact(&mut chunk)?;
+        if (current & RAW_FLAG) != 0 {
+            output_file.write_all(&chunk[..expected_len.min(chunk.len())])?;
+        } else {
+            // Standard CSO blocks are raw DEFLATE; try that first and fall back to
+            // zlib-wrapped blocks for tolerance with any non-standard producer.
+            let mut decoded = Vec::with_capacity(expected_len);
+            let deflate_result = DeflateDecoder::new(chunk.as_slice()).read_to_end(&mut decoded);
+            if deflate_result.is_err() || decoded.len() < expected_len {
+                decoded.clear();
+                ZlibDecoder::new(chunk.as_slice()).read_to_end(&mut decoded)?;
+            }
+            if decoded.len() < expected_len {
+                return Err(anyhow!("Bloque CSO truncado al descomprimir"));
+            }
+            output_file.write_all(&decoded[..expected_len])?;
+        }
+
+        let progress = base + span * ((sector + 1) as f64 / sector_count.max(1) as f64);
+        emit_progress(
+            app,
+            job_id,
+            progress.clamp(0.0, 0.99),
+            format!(
+                "Restaurando CSO {}%",
+                ((sector + 1) * 100 / sector_count.max(1))
+            ),
+        )?;
+    }
+    output_file.flush()?;
+    Ok(())
+}
+
+fn write_xiso(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    source: &Path,
+    output: &Path,
+) -> Result<()> {
+    use xdvdfs::write::{self, img::ProgressInfo};
+
+    let image = fs::File::options()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(output)?;
+    let mut image = std::io::BufWriter::with_capacity(1024 * 1024, image);
+    let mut total_entries: usize = 1;
+    let mut done_entries: usize = 0;
+    let mut progress = |info| match info {
+        ProgressInfo::FileCount(count) => total_entries += count,
+        ProgressInfo::DirCount(count) => total_entries += count,
+        ProgressInfo::DirAdded(path, _) | ProgressInfo::FileAdded(path, _) => {
+            done_entries += 1;
+            let _ = emit_progress(
+                app,
+                job_id,
+                (base + span * (done_entries as f64 / total_entries.max(1) as f64))
+                    .clamp(0.0, 0.99),
+                format!("Empaquetando XISO {path}"),
+            );
+        }
+        ProgressInfo::FinishedPacking => {
+            let _ = emit_progress(
+                app,
+                job_id,
+                (base + span).min(0.99),
+                "XISO escrito".to_string(),
+            );
+        }
+        _ => {}
+    };
+
+    if source.is_dir() {
+        let mut source_fs = write::fs::StdFilesystem::create(source);
+        write::img::create_xdvdfs_image(&mut source_fs, &mut image, &mut progress)?;
+    } else {
+        let file = fs::File::options().read(true).open(source)?;
+        let reader = std::io::BufReader::new(file);
+        let source_image = xdvdfs::blockdev::OffsetWrapper::new(reader)
+            .map_err(|_| anyhow!("La ISO no contiene un volumen XDVDFS/Xbox reconocible"))?;
+        let mut source_fs = write::fs::XDVDFSFilesystem::new(source_image)
+            .ok_or_else(|| anyhow!("No se pudo abrir el sistema de ficheros XDVDFS"))?;
+        write::img::create_xdvdfs_image(&mut source_fs, &mut image, &mut progress)?;
+    }
+    image.flush()?;
+    Ok(())
+}
+
+fn read_xiso(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
+    source: &Path,
+    output_dir: &Path,
+) -> Result<()> {
+    let file = fs::File::options().read(true).open(source)?;
+    let reader = std::io::BufReader::new(file);
+    let mut image = xdvdfs::blockdev::OffsetWrapper::new(reader)
+        .map_err(|_| anyhow!("La ISO no contiene un volumen XDVDFS/Xbox reconocible"))?;
+    let volume = xdvdfs::read::read_volume(&mut image)?;
+    let tree = volume.root_table.file_tree(&mut image)?;
+    let total = tree.len().max(1);
+
+    for (index, (dir, dirent)) in tree.iter().enumerate() {
+        let dir = dir.trim_start_matches('/');
+        let dirname = output_dir.join(dir);
+        let file_name = dirent.name_str::<std::io::Error>()?;
+        let file_path = dirname.join(&*file_name);
+        fs::create_dir_all(&dirname)?;
+        if dirent.node.dirent.is_directory() {
+            fs::create_dir_all(&file_path)?;
+        } else if !dirent.node.dirent.is_empty() {
+            let mut out = fs::File::options()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(&file_path)?;
+            dirent.node.dirent.seek_to(&mut image)?;
+            let data = image.get_ref().get_ref().try_clone();
+            match data {
+                Ok(data) => {
+                    let data = data.take(dirent.node.dirent.data.size as u64);
+                    let mut data = std::io::BufReader::new(data);
+                    io::copy(&mut data, &mut out)?;
+                }
+                Err(_) => {
+                    let data = dirent.node.dirent.read_data_all(&mut image)?;
+                    out.write_all(&data)?;
+                }
+            }
+        } else {
+            let _ = fs::File::create(&file_path)?;
+        }
+
+        emit_progress(
+            app,
+            job_id,
+            (base + span * ((index + 1) as f64 / total as f64)).clamp(0.0, 0.99),
+            format!("Extrayendo XISO {}", file_path.display()),
+        )?;
+    }
+    Ok(())
+}
+
 fn extract_zip(
     app: &AppHandle,
     job_id: &str,
@@ -2160,6 +3390,131 @@ fn is_chd_file(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
+/// The XDVDFS volume descriptor signature, present at the start and end of the
+/// 2048-byte volume sector (sector 32 of the game partition).
+const XDVDFS_VOLUME_MAGIC: &[u8; 20] = b"MICROSOFT*XBOX*MEDIA";
+/// Game-partition offsets probed to locate the XDVDFS volume. The first entry
+/// (0) corresponds to a trimmed XISO; the rest are the XGD1/XGD2/XGD3 offsets
+/// used by full Xbox disc dumps (redump). The volume descriptor sits at
+/// `offset + 0x10000` (sector 32 * 2048 bytes).
+const XDVDFS_PARTITION_OFFSETS: [u64; 4] = [0, 0x1830_0000, 0x0FD9_0000, 0x0208_0000];
+const XDVDFS_VOLUME_SECTOR: u64 = 0x1_0000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum XisoKind {
+    /// Trimmed XISO — game partition at offset 0. Playable in xemu as-is and can
+    /// be unpacked into a file tree.
+    Trimmed,
+    /// Full Xbox disc dump (redump / XGD1-3). Can be trimmed into a playable XISO.
+    Redump,
+}
+
+/// Probe an image for the XDVDFS volume signature by content (authoritative).
+///
+/// `Ok(Some(Trimmed))` / `Ok(Some(Redump))` when an Xbox volume is found,
+/// `Ok(None)` when the file opened cleanly but is not an Xbox disc, and `Err`
+/// when the file could not be read (callers may then fall back to naming).
+fn xdvdfs_kind(path: &Path) -> io::Result<Option<XisoKind>> {
+    let mut file = fs::File::open(path)?;
+    let mut magic = [0_u8; XDVDFS_VOLUME_MAGIC.len()];
+    for (index, offset) in XDVDFS_PARTITION_OFFSETS.iter().enumerate() {
+        if file
+            .seek(io::SeekFrom::Start(offset + XDVDFS_VOLUME_SECTOR))
+            .is_err()
+        {
+            continue;
+        }
+        match file.read_exact(&mut magic) {
+            Ok(()) if &magic == XDVDFS_VOLUME_MAGIC => {
+                return Ok(Some(if index == 0 {
+                    XisoKind::Trimmed
+                } else {
+                    XisoKind::Redump
+                }));
+            }
+            // Wrong signature, or the probe offset is past EOF for this image:
+            // keep probing the remaining offsets.
+            Ok(()) => {}
+            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+/// True when `path` is a GameCube or Wii disc image, detected by the disc magic
+/// word (Wii `5D1C9EA3` at 0x18, GameCube `C2339F3D` at 0x1C).
+fn is_gc_wii_iso(path: &Path) -> io::Result<bool> {
+    let mut file = fs::File::open(path)?;
+    let mut word = [0_u8; 4];
+    file.seek(io::SeekFrom::Start(0x18))?;
+    if file.read_exact(&mut word).is_ok() && word == [0x5D, 0x1C, 0x9E, 0xA3] {
+        return Ok(true);
+    }
+    file.seek(io::SeekFrom::Start(0x1C))?;
+    if file.read_exact(&mut word).is_ok() && word == [0xC2, 0x33, 0x9F, 0x3D] {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Classify local `.iso` selections by content so the UI only offers treatments
+/// that are actually valid for each file. Remote paths and non-`.iso` files are
+/// skipped (the frontend falls back to the `.xiso` naming convention for those).
+pub fn detect_disc_kinds(paths: Vec<PathBuf>) -> Vec<crate::models::DiscKindDto> {
+    let mut out = Vec::new();
+    for path in paths {
+        let path_str = path.to_string_lossy();
+        if remote::RemoteManager::is_remote_path(&path_str) {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(OsStr::to_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if ext != "iso" {
+            continue;
+        }
+        let kind = match xdvdfs_kind(&path) {
+            Ok(Some(XisoKind::Trimmed)) => "xiso",
+            Ok(Some(XisoKind::Redump)) => "redump",
+            // Not an Xbox disc — check for a GameCube/Wii image (RVZ candidate).
+            Ok(None) => match is_gc_wii_iso(&path) {
+                Ok(true) => "gc-wii",
+                Ok(false) => "iso",
+                Err(_) => continue,
+            },
+            // Unreadable: leave it out so the frontend uses its naming fallback.
+            Err(_) => continue,
+        };
+        out.push(crate::models::DiscKindDto {
+            path: path_str.to_string(),
+            kind: kind.to_string(),
+        });
+    }
+    out
+}
+
+/// True when `path` is a trimmed XISO. Uses content detection for local files
+/// (authoritative) and falls back to the `.xiso` naming convention only for
+/// remote paths or files that cannot be read.
+fn is_likely_xiso_path(path: &Path) -> bool {
+    if !remote::RemoteManager::is_remote_path(&path.to_string_lossy()) {
+        match xdvdfs_kind(path) {
+            Ok(Some(XisoKind::Trimmed)) => return true,
+            Ok(Some(XisoKind::Redump)) | Ok(None) => return false,
+            Err(_) => {} // Unreadable — fall through to the naming heuristic.
+        }
+    }
+    let name = path
+        .file_name()
+        .unwrap_or_else(|| path.as_os_str())
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    name.ends_with(".xiso.iso") || name.ends_with(".xiso")
+}
+
 /// Classify a remote:// path as a CHD source by extension only (no file reading).
 /// required_paths will contain just the source itself; the backend resolves siblings after download.
 /// Returns filenames (not full paths) of required files that do not exist on disk.
@@ -2200,7 +3555,7 @@ fn detect_chd_source_remote(path: &Path) -> Option<ChdSourceDto> {
             missing_files: vec![], // Cannot verify remote files at scan time
         });
     }
-    if DVD_SOURCE_EXTENSIONS.contains(&ext.as_str()) {
+    if DVD_SOURCE_EXTENSIONS.contains(&ext.as_str()) && !is_likely_xiso_path(path) {
         return Some(ChdSourceDto {
             source_path: path_str.clone(),
             container_dir,
@@ -2245,7 +3600,7 @@ fn detect_chd_source(path: &Path) -> Result<Option<ChdSourceDto>> {
         }));
     }
 
-    if DVD_SOURCE_EXTENSIONS.contains(&extension.as_str()) {
+    if DVD_SOURCE_EXTENSIONS.contains(&extension.as_str()) && !is_likely_xiso_path(path) {
         return Ok(Some(ChdSourceDto {
             source_path: path.to_string_lossy().to_string(),
             container_dir: path.parent().unwrap_or(path).to_string_lossy().to_string(),

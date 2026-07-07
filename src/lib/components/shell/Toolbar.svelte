@@ -486,22 +486,36 @@
     font-weight: 700;
   }
 
+  /* OFF — neutral, clearly inactive (looks like a normal labelled button). */
   .tb-btn--queue:not(.tb-btn--active) {
-    background:
-      linear-gradient(135deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 62%),
-      transparent;
-    border-color: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: color-mix(in srgb, var(--accent) 72%, var(--text-muted));
+    background: transparent;
+    border-color: var(--line-strong);
+    color: var(--text-muted);
+  }
+  .tb-btn--queue:not(.tb-btn--active):hover:not(:disabled) {
+    background: var(--surface-hover);
+    border-color: color-mix(in srgb, var(--accent) 34%, var(--line-strong));
+    color: var(--text);
   }
 
-  .tb-btn--queue:hover:not(:disabled) {
-    border-color: color-mix(in srgb, var(--accent) 36%, transparent);
-    color: var(--accent);
+  /* ON — filled accent, unmistakable. Overrides the shared .tb-btn--active. */
+  .tb-btn--queue.tb-btn--active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-contrast);
+    box-shadow: 0 1px 7px color-mix(in srgb, var(--accent) 34%, transparent);
+  }
+  .tb-btn--queue.tb-btn--active:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 90%, #000);
+    border-color: color-mix(in srgb, var(--accent) 90%, #000);
+    color: var(--accent-contrast);
   }
 
   .tb-queue-label {
     font-size: 11px;
     line-height: 1;
+    font-weight: 700;
+    letter-spacing: 0.02em;
   }
 
   .tb-badge {
@@ -520,6 +534,13 @@
     line-height: 12px;
     font-variant-numeric: tabular-nums;
     pointer-events: none;
+  }
+
+  /* On the filled ON button, invert the badge so the count stays legible. */
+  .tb-btn--queue.tb-btn--active .tb-badge {
+    background: var(--accent-contrast);
+    color: var(--accent);
+    border-color: var(--accent);
   }
 
   /* ── Nav ── */

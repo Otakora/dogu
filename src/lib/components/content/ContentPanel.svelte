@@ -3,13 +3,14 @@
   import { getContext, onDestroy, untrack } from "svelte";
   import { app } from "../../stores/app.svelte.js";
   import type { PaneView } from "../../stores/app.svelte.js";
-  import type { EntryDto, ContentSortKey } from "../../types/index.js";
+  import type { EntryDto, ContentSortKey, DiscKind, DiscKindDto } from "../../types/index.js";
+  import type { DiscImageMode } from "../dialogs/DiscImageDialog.svelte";
   import FileRow from "./FileRow.svelte";
   import ContextMenu from "../ui/ContextMenu.svelte";
   import type { MenuItem } from "../ui/ContextMenu.svelte";
   import { t, tn } from "../../i18n/index.js";
   import { openTerminalAt, openRemoteTerminalAt } from "../../utils/terminal.js";
-  import { ghostToEntry, normalizePath, uniqueDisplayPath, dirnameOf, basenameOf } from "../../utils/ghosts.js";
+  import { ghostToEntry, buildGhost, joinPath, normalizePath, uniqueDisplayPath, dirnameOf, basenameOf } from "../../utils/ghosts.js";
 
   const pane = getContext<PaneView>("pane");
 
@@ -24,12 +25,13 @@
     onCompressQuick: (paths: string[]) => void;
     onCompress: (paths: string[]) => void;
     onChd: (paths: string[]) => void;
+    onDiscImage: (mode: DiscImageMode, paths: string[]) => void;
     onM3u: (paths: string[]) => void;
     onProperties: (paths: string[]) => void;
     onOpenWith: (path: string) => void;
   };
 
-  let { onDelete, onCopy, onCut, onPaste, onExtractHere, onExtractToFolder, onExtractTo, onCompressQuick, onCompress, onChd, onM3u, onProperties, onOpenWith }: Props = $props();
+  let { onDelete, onCopy, onCut, onPaste, onExtractHere, onExtractToFolder, onExtractTo, onCompressQuick, onCompress, onChd, onDiscImage, onM3u, onProperties, onOpenWith }: Props = $props();
 
   // ── Panel / body element refs ────────────────────────────
   let panelEl = $state<HTMLElement | undefined>(undefined);
@@ -37,6 +39,9 @@
 
   // ── Context menu ─────────────────────────────────────────
   let contextMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  // Content-based classification of `.iso` paths (from detect_disc_kinds),
+  // cached so a right-click probes each file at most once.
+  const discKindCache = new Map<string, DiscKind>();
 
   // ── Column resize ─────────────────────────────────────────
   let resizingCol = $state<{ key: "name" | "type" | "size" | "modified"; startX: number; startW: number } | null>(null);
@@ -301,12 +306,14 @@
 
   // ── Load on path / tab change ────────────────────────────
   let lastLoadKey = "";
+  // Path whose scroll is currently reflected in the DOM (the "outgoing" folder).
+  let domScrollPath = "";
   let scrollSaveTimer: ReturnType<typeof setTimeout> | undefined;
 
   function saveScrollPosition() {
     clearTimeout(scrollSaveTimer);
     scrollSaveTimer = setTimeout(() => {
-      if (contentBodyEl) pane.setTabScrollTop(pane.activeTabIdx, contentBodyEl.scrollTop);
+      if (contentBodyEl && pane.currentPath) pane.setPathScroll(pane.currentPath, contentBodyEl.scrollTop);
     }, 100);
   }
 
@@ -319,10 +326,17 @@
     lastLoadKey = key;
 
     untrack(() => {
+      // Capture the scroll of the folder we're leaving so returning to it
+      // (up a level, back, breadcrumb…) restores exactly where the user was.
+      if (domScrollPath && domScrollPath !== path && contentBodyEl) {
+        pane.setPathScroll(domScrollPath, contentBodyEl.scrollTop);
+      }
+      domScrollPath = path;
+
       const loadedPath = pane.activeTab?.loadedPath;
       if (loadedPath === path) {
         requestAnimationFrame(() => {
-          if (contentBodyEl) contentBodyEl.scrollTop = pane.activeTab?.scrollTop ?? 0;
+          if (contentBodyEl) contentBodyEl.scrollTop = pane.pathScroll(path);
         });
       } else if (pane.isSearching && pane.searchQuery) {
         doSearch(path, pane.searchQuery);
@@ -340,18 +354,57 @@
       pane.setEntries(entries);
       pane.setTabLoadedPath(path);
       requestAnimationFrame(() => {
-        if (contentBodyEl) contentBodyEl.scrollTop = pane.activeTab?.scrollTop ?? 0;
+        if (contentBodyEl) contentBodyEl.scrollTop = pane.pathScroll(path);
       });
     } catch (e) {
-      // A ghost directory doesn't exist on disk yet — show its predicted
-      // children (from the overlay) without a spurious load error.
-      const isGhostDir = app.queueGhosts.some(g => g.isDir && normalizePath(g.path) === normalizePath(path));
-      if (!isGhostDir) app.notify("error", t("contentPanel.couldNotLoad", { error: String(e) }));
-      pane.setEntries([]);
+      // A ghost directory doesn't exist on disk yet. If it's the output of a
+      // queued folder copy/move, mirror the source folder's real contents as
+      // ghosts so the user can drill into the predicted tree (works at any depth,
+      // local or remote, without bloating the queue).
+      const ghostChildren = await computeGhostDirChildren(path);
+      if (ghostChildren !== null) {
+        pane.setEntries(ghostChildren);
+      } else {
+        app.notify("error", t("contentPanel.couldNotLoad", { error: String(e) }));
+        pane.setEntries([]);
+      }
     } finally {
       pane.setLoading(false);
       panelEl?.focus();
     }
+  }
+
+  /**
+   * When `path` is inside a folder produced by a queued copy/move, returns the
+   * predicted contents as ghosts by mirroring the corresponding source folder
+   * (recursively at any depth). Returns null when `path` is not a ghost dir —
+   * i.e. a real load failure the caller should report.
+   */
+  async function computeGhostDirChildren(path: string): Promise<EntryDto[] | null> {
+    const np = normalizePath(path);
+    for (const op of app.opQueue) {
+      if (op.kind !== "copy" && op.kind !== "move") continue;
+      for (let i = 0; i < op.produces.length; i++) {
+        const g = op.produces[i];
+        if (!g.isDir) continue;
+        const root = normalizePath(g.path);
+        if (np !== root && !np.startsWith(root + "/")) continue;
+        // It IS a ghost directory. Map back to the source and mirror its tree.
+        const source = op.sources[i];
+        if (!source) return [];
+        const rel = path.slice(g.path.length).replace(/^[/\\]+/, "");
+        const sourcePath = rel ? joinPath(source, rel) : source;
+        try {
+          const children = await invoke<EntryDto[]>("list_children", { path: sourcePath });
+          return children.map((c) =>
+            ghostToEntry(buildGhost(joinPath(path, c.name), c.isDir, op.id, false)),
+          );
+        } catch {
+          return [];
+        }
+      }
+    }
+    return null;
   }
 
   async function doSearch(path: string, query: string) {
@@ -540,7 +593,10 @@
   }
 
   // ── Context menu ─────────────────────────────────────────
-  function openContextMenu(e: MouseEvent, entry: EntryDto) {
+  async function openContextMenu(e: MouseEvent, entry: EntryDto) {
+    // Capture coordinates now — `e` is read again after the await below.
+    const menuX = e.clientX;
+    const menuY = e.clientY;
     const sel = pane.selectedPaths.has(entry.path) ? [...pane.selectedPaths] : [entry.path];
     if (!pane.selectedPaths.has(entry.path)) pane.setSelection([entry.path]);
 
@@ -553,6 +609,24 @@
       const ext = entryOf(p)?.extension ?? "";
       return ext.startsWith(".") ? ext : ext ? `.${ext}` : "";
     };
+    // Probe local .iso files by content so the menu offers only valid treatments.
+    // Cached, so a right-click classifies each file at most once.
+    const localIsoPaths = sel.filter(p => !p.startsWith("remote://") && normalizeExt(p) === ".iso" && !discKindCache.has(p));
+    if (localIsoPaths.length > 0) {
+      try {
+        const kinds = await invoke<DiscKindDto[]>("detect_disc_kinds", { paths: localIsoPaths });
+        for (const k of kinds) discKindCache.set(k.path, k.kind);
+      } catch { /* leave uncached — isoKindOf falls back to the naming convention */ }
+    }
+    // Classify an .iso: content when known, else the `.xiso` naming fallback.
+    const isoKindOf = (p: string): DiscKind => {
+      const cached = discKindCache.get(p);
+      if (cached) return cached;
+      const name = basenameOf(p).toLowerCase();
+      return (name.endsWith(".xiso.iso") || name.endsWith(".xiso")) ? "xiso" : "iso";
+    };
+    const isTrimmedXiso = (p: string) => normalizeExt(p) === ".iso" && isoKindOf(p) === "xiso";
+
     const allFiles = sel.every(p => !entryOf(p)?.isDir);
     const isSingleDir = !isMulti && !!entryOf(sel[0])?.isDir;
     const hasM3uDirs = sel.some(p => !!entryOf(p)?.isDir);
@@ -561,9 +635,32 @@
       : [];
     const hasArchives = archivePaths.length > 0;
     const canCompress = true;
-    const hasChdSources = allFiles && sel.some(p => [".cue", ".gdi", ".toc", ".iso"].includes(normalizeExt(p)));
+    const isGcWii = (p: string) => normalizeExt(p) === ".iso" && isoKindOf(p) === "gc-wii";
+    // CHD accepts CD cue/gdi/toc and DVD-style ISOs (redump/generic), but not a
+    // trimmed XISO nor a GameCube/Wii disc — no emulator consumes a CHD of those.
+    const hasChdSources = allFiles && sel.some(p =>
+      [".cue", ".gdi", ".toc"].includes(normalizeExt(p)) ||
+      (normalizeExt(p) === ".iso" && !isTrimmedXiso(p) && !isGcWii(p))
+    );
     const hasChdFiles = allFiles && sel.some(p => normalizeExt(p) === ".chd");
     const hasChdDirs = sel.some(p => !!entryOf(p)?.isDir);
+    // Only genuine Xbox full dumps can be trimmed into a playable XISO.
+    const redumpIsoPaths = allFiles ? sel.filter(p => normalizeExt(p) === ".iso" && isoKindOf(p) === "redump") : [];
+    // GameCube/Wii discs convert to RVZ (their proper format); .rvz restores to ISO.
+    const rvzConvertPaths = allFiles ? sel.filter(isGcWii) : [];
+    const rvzRestorePaths = allFiles ? sel.filter(p => normalizeExt(p) === ".rvz") : [];
+    // Any non-Nintendo ISO (trimmed xiso, redump or generic) can be compressed to CSO.
+    const csoConvertPaths = allFiles ? sel.filter(p => normalizeExt(p) === ".iso" && !isGcWii(p)) : [];
+    // Trimmed XISOs can be extracted into a file tree.
+    const xisoUnpackPaths = allFiles ? sel.filter(isTrimmedXiso) : [];
+    const csoRestorePaths = allFiles ? sel.filter(p => normalizeExt(p) === ".cso") : [];
+    // CSO/XISO/RVZ are native (no external tool) and now support remote sources
+    // via backend staging. Content-based kinds (redump/gc-wii) aren't probed for
+    // remote, so remote only surfaces the extension-detectable treatments.
+    const hasLocalDiscTreatment = true;
+    const selectedExts = new Set(sel.filter(p => !entryOf(p)?.isDir).map(normalizeExt).filter(Boolean));
+    const selectionHasDirs = sel.some(p => !!entryOf(p)?.isDir);
+    const selectionIsMixedForTreatments = selectedExts.size > 1 || (selectionHasDirs && selectedExts.size > 0);
 
     const newTabIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h6"/></svg>`;
     const splitPaneIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>`;
@@ -625,14 +722,101 @@
       items.push({ kind: "action", label: t("menu.addToArchive"), icon: compressIcon, onclick: () => onCompress(sel) });
     }
 
-    if (hasChdSources || hasChdFiles || hasChdDirs) {
-      items.push({ kind: "separator" });
-      items.push({
+    const convertItems: MenuItem[] = [];
+    const restoreItems: MenuItem[] = [];
+    // Gated on chdman being available (probed at startup).
+    if (app.canChd && (hasChdSources || hasChdFiles || hasChdDirs)) {
+      (hasChdFiles && !hasChdSources && !hasChdDirs ? restoreItems : convertItems).push({
         kind: "action",
-        label: hasChdSources ? t("menu.convertToChd") : hasChdFiles ? t("menu.restoreFromChd") : t("menu.convertToChd"),
+        label: hasChdSources && selectionIsMixedForTreatments
+          ? t("menu.convertDiscToChd")
+          : hasChdFiles
+            ? t("menu.restoreFromChd")
+            : t("menu.convertToChd"),
         icon: chdIcon,
         onclick: () => onChd(sel),
       });
+    }
+    if (hasLocalDiscTreatment && csoConvertPaths.length > 0) {
+      convertItems.push({
+        kind: "action",
+        label: selectionIsMixedForTreatments ? t("menu.convertIsoToCso") : t("menu.convertToCso"),
+        icon: discImageIcon,
+        onclick: () => onDiscImage("cso-convert", csoConvertPaths),
+      });
+    }
+    if (hasLocalDiscTreatment && redumpIsoPaths.length > 0) {
+      convertItems.push({
+        kind: "action",
+        label: selectionIsMixedForTreatments ? t("menu.convertIsoToXiso") : t("menu.convertToXiso"),
+        icon: discImageIcon,
+        onclick: () => onDiscImage("xiso-pack", redumpIsoPaths),
+      });
+    }
+    if (hasLocalDiscTreatment && rvzConvertPaths.length > 0) {
+      convertItems.push({
+        kind: "action",
+        label: selectionIsMixedForTreatments ? t("menu.convertIsoToRvz") : t("menu.convertToRvz"),
+        icon: discImageIcon,
+        onclick: () => onDiscImage("rvz-convert", rvzConvertPaths),
+      });
+    }
+    if (hasLocalDiscTreatment && rvzRestorePaths.length > 0) {
+      restoreItems.push({
+        kind: "action",
+        label: selectionIsMixedForTreatments ? t("menu.restoreRvzToIso") : t("menu.restoreFromRvz"),
+        icon: discImageIcon,
+        onclick: () => onDiscImage("rvz-restore", rvzRestorePaths),
+      });
+    }
+    if (hasLocalDiscTreatment && xisoUnpackPaths.length > 0) {
+      restoreItems.push({
+        kind: "action",
+        label: t("menu.unpackXiso"),
+        icon: discImageIcon,
+        onclick: () => onDiscImage("xiso-unpack", xisoUnpackPaths),
+      });
+    }
+    if (hasLocalDiscTreatment && csoRestorePaths.length > 0) {
+      restoreItems.push({
+        kind: "action",
+        label: selectionIsMixedForTreatments ? t("menu.restoreCsoToIso") : t("menu.restoreFromCso"),
+        icon: discImageIcon,
+        onclick: () => onDiscImage("cso-restore", csoRestorePaths),
+      });
+    }
+    if (hasLocalDiscTreatment && !allFiles && sel.some(p => !!entryOf(p)?.isDir)) {
+      convertItems.push({
+        kind: "action",
+        label: selectedExts.size > 0 ? t("menu.convertFolderToXiso") : t("menu.convertToXiso"),
+        icon: discImageIcon,
+        onclick: () => onDiscImage("xiso-pack", sel.filter(p => !!entryOf(p)?.isDir)),
+      });
+    }
+    const treatmentItems: MenuItem[] = [];
+    const hasBothTreatmentGroups = convertItems.length > 0 && restoreItems.length > 0;
+    if (convertItems.length > 0) {
+      treatmentItems.push(convertItems.length === 1
+        ? (hasBothTreatmentGroups ? { kind: "submenu", label: t("menu.convert"), icon: discImageIcon, children: convertItems } : convertItems[0])
+        : { kind: "submenu", label: t("menu.convert"), icon: discImageIcon, children: convertItems });
+    }
+    if (restoreItems.length > 0) {
+      treatmentItems.push(restoreItems.length === 1
+        ? (hasBothTreatmentGroups ? { kind: "submenu", label: t("menu.restore"), icon: discImageIcon, children: restoreItems } : restoreItems[0])
+        : { kind: "submenu", label: t("menu.restore"), icon: discImageIcon, children: restoreItems });
+    }
+    if (treatmentItems.length > 0) {
+      items.push({ kind: "separator" });
+      if (treatmentItems.length === 1) {
+        items.push(treatmentItems[0]);
+      } else {
+        items.push({
+          kind: "submenu",
+          label: t("menu.romTreatments"),
+          icon: discImageIcon,
+          children: treatmentItems,
+        });
+      }
     }
 
     if (hasM3uDirs && !selHasGhost) {
@@ -653,7 +837,7 @@
     items.push({ kind: "separator" });
     items.push({ kind: "action", label: t("menu.delete"), shortcut: "Del", icon: deleteIcon, danger: true, onclick: () => onDelete(sel) });
 
-    contextMenu = { x: e.clientX, y: e.clientY, items };
+    contextMenu = { x: menuX, y: menuY, items };
   }
 
   // ── Sort header click ────────────────────────────────────
@@ -699,6 +883,7 @@
   const extractToIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><polyline points="12 11 12 17"/><polyline points="9 14 12 17 15 14"/></svg>`;
   const extractToFolderIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>`;
   const chdIcon      = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="3" x2="12" y2="9"/><line x1="12" y1="15" x2="12" y2="21"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>`;
+  const discImageIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2"/><path d="M12 4v3M12 17v3M4 12h3M17 12h3"/><path d="M16 8l-8 8"/></svg>`;
   const propsIcon    = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
   const deleteIcon   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4h6v2"/></svg>`;
   const newFolderIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>`;

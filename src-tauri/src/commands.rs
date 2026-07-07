@@ -12,11 +12,11 @@ use crate::{
     models::{
         ActiveConnectionDto, AppMetadataDto, AvailableShell, ChdConversionOptionsPayload,
         ChdRestoreOptionsPayload, CompressionCapabilitiesDto, CompressionOptionsPayload,
-        ConnectionOpenResultDto, ConnectionProfileDto, ConnectionProfilePayload, EntryDto,
-        ExtractionOptionsPayload, ExtractionPreviewEntry, ExtractionPreviewRow, KnownFoldersDto,
-        M3uGeneratePayload, M3uGenerateResultDto, M3uGroupDto, M3uScanOptions,
-        PreflightCheckResult, PropertiesSummaryDto, RemoteDiskUsageDto, SelectionAnalysisDto,
-        SummaryOptionsPayload, VolumeDto,
+        ConnectionOpenResultDto, ConnectionProfileDto, ConnectionProfilePayload,
+        DiscImageOptionsPayload, EntryDto, ExtractionOptionsPayload, ExtractionPreviewEntry,
+        ExtractionPreviewRow, KnownFoldersDto, M3uGeneratePayload, M3uGenerateResultDto,
+        M3uGroupDto, M3uScanOptions, PreflightCheckResult, PropertiesSummaryDto,
+        RemoteDiskUsageDto, SelectionAnalysisDto, SummaryOptionsPayload, VolumeDto,
     },
     ops, pause, remote, terminal,
 };
@@ -467,6 +467,208 @@ pub fn start_restore_from_chd(
         );
         let message = match &result {
             Ok(_) => "Recuperacion desde CHD completada.".to_string(),
+            Err(error) => error.to_string(),
+        };
+        let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_convert_to_cso(
+    app: AppHandle,
+    job_id: String,
+    paths: Vec<String>,
+    options: DiscImageOptionsPayload,
+    remote_state: State<'_, remote::RemoteState>,
+    pause_registry: State<'_, pause::PauseRegistry>,
+) -> Result<(), String> {
+    let app_handle = app.clone();
+    let parsed_paths = parse_paths(paths);
+    let rm = remote_state.inner.clone();
+    let pr = (*pause_registry).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = ops::convert_to_cso(
+            &app_handle,
+            &job_id,
+            parsed_paths,
+            options,
+            Some(rm),
+            Some(pr),
+        );
+        let message = match &result {
+            Ok(_) => "Conversion CSO completada.".to_string(),
+            Err(error) => error.to_string(),
+        };
+        let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_restore_from_cso(
+    app: AppHandle,
+    job_id: String,
+    paths: Vec<String>,
+    options: DiscImageOptionsPayload,
+    remote_state: State<'_, remote::RemoteState>,
+    pause_registry: State<'_, pause::PauseRegistry>,
+) -> Result<(), String> {
+    let app_handle = app.clone();
+    let parsed_paths = parse_paths(paths);
+    let rm = remote_state.inner.clone();
+    let pr = (*pause_registry).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = ops::restore_from_cso(
+            &app_handle,
+            &job_id,
+            parsed_paths,
+            options,
+            Some(rm),
+            Some(pr),
+        );
+        let message = match &result {
+            Ok(_) => "Restauracion CSO completada.".to_string(),
+            Err(error) => error.to_string(),
+        };
+        let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
+    });
+    Ok(())
+}
+
+/// Classify local `.iso` selections by content (trimmed XISO / Xbox redump /
+/// GameCube-Wii / generic ISO) so the UI only offers disc treatments that are
+/// actually valid. Cheap: a few small reads per file, remote/non-iso skipped.
+#[tauri::command]
+pub fn detect_disc_kinds(paths: Vec<String>) -> Vec<crate::models::DiscKindDto> {
+    ops::detect_disc_kinds(parse_paths(paths))
+}
+
+/// Probes every external tool at startup (chdman, 7-Zip, DolphinTool) and reports
+/// availability + the capabilities each unlocks, so the UI can prepare/guide and
+/// disable features whose tool is missing.
+#[tauri::command]
+pub fn check_tools(app: AppHandle) -> Vec<crate::models::ToolStatusDto> {
+    ops::check_tools(&app)
+}
+
+#[tauri::command]
+pub fn start_convert_to_rvz(
+    app: AppHandle,
+    job_id: String,
+    paths: Vec<String>,
+    options: DiscImageOptionsPayload,
+    remote_state: State<'_, remote::RemoteState>,
+    pause_registry: State<'_, pause::PauseRegistry>,
+) -> Result<(), String> {
+    let app_handle = app.clone();
+    let parsed_paths = parse_paths(paths);
+    let rm = remote_state.inner.clone();
+    let pr = (*pause_registry).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = ops::convert_to_rvz(
+            &app_handle,
+            &job_id,
+            parsed_paths,
+            options,
+            Some(rm),
+            Some(pr),
+        );
+        let message = match &result {
+            Ok(_) => "Conversion RVZ completada.".to_string(),
+            Err(error) => error.to_string(),
+        };
+        let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_restore_from_rvz(
+    app: AppHandle,
+    job_id: String,
+    paths: Vec<String>,
+    options: DiscImageOptionsPayload,
+    remote_state: State<'_, remote::RemoteState>,
+    pause_registry: State<'_, pause::PauseRegistry>,
+) -> Result<(), String> {
+    let app_handle = app.clone();
+    let parsed_paths = parse_paths(paths);
+    let rm = remote_state.inner.clone();
+    let pr = (*pause_registry).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = ops::restore_from_rvz(
+            &app_handle,
+            &job_id,
+            parsed_paths,
+            options,
+            Some(rm),
+            Some(pr),
+        );
+        let message = match &result {
+            Ok(_) => "Restauracion RVZ completada.".to_string(),
+            Err(error) => error.to_string(),
+        };
+        let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_pack_to_xiso(
+    app: AppHandle,
+    job_id: String,
+    paths: Vec<String>,
+    options: DiscImageOptionsPayload,
+    remote_state: State<'_, remote::RemoteState>,
+    pause_registry: State<'_, pause::PauseRegistry>,
+) -> Result<(), String> {
+    let app_handle = app.clone();
+    let parsed_paths = parse_paths(paths);
+    let rm = remote_state.inner.clone();
+    let pr = (*pause_registry).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = ops::pack_to_xiso(
+            &app_handle,
+            &job_id,
+            parsed_paths,
+            options,
+            Some(rm),
+            Some(pr),
+        );
+        let message = match &result {
+            Ok(_) => "Conversion XISO completada.".to_string(),
+            Err(error) => error.to_string(),
+        };
+        let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_unpack_xiso(
+    app: AppHandle,
+    job_id: String,
+    paths: Vec<String>,
+    options: DiscImageOptionsPayload,
+    remote_state: State<'_, remote::RemoteState>,
+    pause_registry: State<'_, pause::PauseRegistry>,
+) -> Result<(), String> {
+    let app_handle = app.clone();
+    let parsed_paths = parse_paths(paths);
+    let rm = remote_state.inner.clone();
+    let pr = (*pause_registry).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = ops::unpack_xiso(
+            &app_handle,
+            &job_id,
+            parsed_paths,
+            options,
+            Some(rm),
+            Some(pr),
+        );
+        let message = match &result {
+            Ok(_) => "Extraccion XISO completada.".to_string(),
             Err(error) => error.to_string(),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);

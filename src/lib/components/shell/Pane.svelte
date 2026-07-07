@@ -5,6 +5,7 @@
   import TabBar from "./TabBar.svelte";
   import Toolbar from "./Toolbar.svelte";
   import ContentPanel from "../content/ContentPanel.svelte";
+  import type { DiscImageMode } from "../dialogs/DiscImageDialog.svelte";
 
   type Props = {
     paneIdx: number;
@@ -18,6 +19,7 @@
     onCompressQuick: (paths: string[]) => void;
     onCompress: (paths: string[]) => void;
     onChd: (paths: string[]) => void;
+    onDiscImage: (mode: DiscImageMode, paths: string[]) => void;
     onM3u: (paths: string[]) => void;
     onProperties: (paths: string[]) => void;
     onOpenWith: (path: string) => void;
@@ -27,7 +29,7 @@
     paneIdx,
     onDelete, onCopy, onCut, onPaste,
     onExtractHere, onExtractToFolder, onExtractTo,
-    onCompressQuick, onCompress, onChd, onM3u,
+    onCompressQuick, onCompress, onChd, onDiscImage, onM3u,
     onProperties, onOpenWith,
   }: Props = $props();
 
@@ -83,6 +85,7 @@
       {onCompressQuick}
       {onCompress}
       {onChd}
+      {onDiscImage}
       {onM3u}
       {onProperties}
       {onOpenWith}

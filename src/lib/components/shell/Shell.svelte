@@ -4,7 +4,7 @@
   import { onMount, onDestroy } from "svelte";
   import { app } from "../../stores/app.svelte.js";
   import type {
-    AppMetadataDto,
+    ToolStatusDto,
     JobProgressDto,
     JobLogDto,
     JobFinishedDto,
@@ -12,6 +12,7 @@
     SelectionAnalysisDto,
     ChdConversionOptionsPayload,
     ChdRestoreOptionsPayload,
+    DiscImageOptionsPayload,
     ExtractionOptionsPayload,
     CompressionOptionsPayload,
     CompressionCapabilitiesDto,
@@ -27,6 +28,12 @@
     predictCompress,
     predictChdConvert,
     predictChdRestore,
+    predictCsoConvert,
+    predictCsoRestore,
+    predictXisoPack,
+    predictXisoUnpack,
+    predictRvzConvert,
+    predictRvzRestore,
     buildGhost,
     normalizePath,
     basenameOf,
@@ -45,6 +52,9 @@
   import ExtractionDialog from "../dialogs/ExtractionDialog.svelte";
   import CompressionDialog from "../dialogs/CompressionDialog.svelte";
   import ChdDialog from "../dialogs/ChdDialog.svelte";
+  import DiscImageDialog from "../dialogs/DiscImageDialog.svelte";
+  import type { DiscImageMode } from "../dialogs/DiscImageDialog.svelte";
+  import ToolStatusScreen from "../dialogs/ToolStatusScreen.svelte";
   import M3uDialog from "../dialogs/M3uDialog.svelte";
   import { t, tn } from "../../i18n/index.js";
 
@@ -110,6 +120,8 @@
   let compressionState = $state<{ sources: string[] } | null>(null);
   let compressionCapabilities = $state<CompressionCapabilitiesDto>({ canCompressZip: true, canCompress7z: true, canCompressRar: false });
   let chdState = $state<{ analysis: SelectionAnalysisDto; mode: "convert" | "restore" } | null>(null);
+  let discImageState = $state<{ mode: DiscImageMode; sources: string[] } | null>(null);
+  let toolScreenOpen = $state(false);
   let m3uDirs = $state<string[] | null>(null);
 
   // ── Job / queue ID counters ───────────────────────────────
@@ -158,22 +170,22 @@
     if (storedSplit) splitPercent = Math.max(20, Math.min(80, parseInt(storedSplit, 10)));
 
     try {
-      const [vols, kf, caps, meta] = await Promise.all([
+      const [vols, kf, caps, tools] = await Promise.all([
         invoke<VolumeDto[]>("list_volumes"),
         invoke<KnownFoldersDto>("get_known_folders"),
         invoke<CompressionCapabilitiesDto>("get_compression_capabilities"),
-        invoke<AppMetadataDto>("get_app_metadata"),
+        invoke<ToolStatusDto[]>("check_tools"),
       ]);
       app.setVolumes(vols);
       app.setKnownFolders(kf);
       compressionCapabilities = caps;
+      app.setToolStatus(tools);
 
-      if (meta.platform === "linux" && !meta.chdmanRuntime.available) {
-        const msg = meta.chdmanRuntime.error
-          ? t("startup.chdmanUnavailable", { error: meta.chdmanRuntime.error })
-          : t("startup.chdmanMissing");
-        app.notify("warn", msg);
-      }
+      // Every launch we re-check tools. Auto-open the preparation screen only
+      // when a *required* tool is missing/not runnable; optional ones (e.g.
+      // DolphinTool — nod still covers RVZ) are surfaced discreetly in
+      // Settings/About instead of nagging on every launch.
+      if (app.toolProblems.some(p => !p.optional)) toolScreenOpen = true;
     } catch {
       // System info unavailable
     }
@@ -678,6 +690,111 @@
   }
 
   // ── Compress ──────────────────────────────────────────────
+  // ---- Native disc-image treatments (CSO / XISO / RVZ) ----
+  // Remote sources are supported: the backend stages them to a local temp,
+  // operates, and uploads the result back (in-place for "same folder"), just
+  // like CHD. Remote sources convert in place; a local custom folder pulls the
+  // output down instead.
+  function openDiscImageDialog(mode: DiscImageMode, paths: string[]) {
+    if (paths.length === 0) return;
+    discImageState = { mode, sources: paths };
+  }
+
+  function discImageTitle(mode: DiscImageMode): string {
+    if (mode === "cso-convert") return t("shell.convertingToCso");
+    if (mode === "cso-restore") return t("shell.restoringFromCso");
+    if (mode === "xiso-pack") return t("shell.packingToXiso");
+    if (mode === "rvz-convert") return t("shell.convertingToRvz");
+    if (mode === "rvz-restore") return t("shell.restoringFromRvz");
+    return t("shell.unpackingXiso");
+  }
+
+  function discImageSuccess(mode: DiscImageMode): string {
+    if (mode === "cso-convert") return t("shell.csoConversionComplete");
+    if (mode === "cso-restore") return t("shell.csoRestoreComplete");
+    if (mode === "xiso-pack") return t("shell.xisoPackComplete");
+    if (mode === "rvz-convert") return t("shell.rvzConversionComplete");
+    if (mode === "rvz-restore") return t("shell.rvzRestoreComplete");
+    return t("shell.xisoUnpackComplete");
+  }
+
+  function discImageFailure(mode: DiscImageMode): string {
+    if (mode === "cso-convert") return t("shell.csoConversionFailed");
+    if (mode === "cso-restore") return t("shell.csoRestoreFailed");
+    if (mode === "xiso-pack") return t("shell.xisoPackFailed");
+    if (mode === "rvz-convert") return t("shell.rvzConversionFailed");
+    if (mode === "rvz-restore") return t("shell.rvzRestoreFailed");
+    return t("shell.xisoUnpackFailed");
+  }
+
+  function discImageCommand(mode: DiscImageMode): string {
+    if (mode === "cso-convert") return "start_convert_to_cso";
+    if (mode === "cso-restore") return "start_restore_from_cso";
+    if (mode === "xiso-pack") return "start_pack_to_xiso";
+    if (mode === "rvz-convert") return "start_convert_to_rvz";
+    if (mode === "rvz-restore") return "start_restore_from_rvz";
+    return "start_unpack_xiso";
+  }
+
+  function buildDiscImageOp(mode: DiscImageMode, paths: string[], rawOpts: DiscImageOptionsPayload): QueuedOp {
+    const opts: DiscImageOptionsPayload = {
+      ...rawOpts,
+      renameOnConflict: app.settings.renameOnConflict,
+      // RVZ engine routing comes from settings; ignored by non-RVZ modes.
+      rvzPrimaryEngine: app.settings.rvzPrimaryEngine,
+      rvzFallbackEngine: app.settings.rvzFallbackEngine,
+      rvzEnableFallback: app.settings.rvzEnableFallback,
+    };
+    const opId = newQueueId();
+    const destinations = opts.destinationPath ? [opts.destinationPath] : paths.map(p => parentDir(p));
+    const produces =
+      mode === "cso-convert" ? predictCsoConvert(paths, opts, opId)
+      : mode === "cso-restore" ? predictCsoRestore(paths, opts, opId)
+      : mode === "xiso-pack" ? predictXisoPack(paths, opts, opId)
+      : mode === "rvz-convert" ? predictRvzConvert(paths, opts, opId)
+      : mode === "rvz-restore" ? predictRvzRestore(paths, opts, opId)
+      : predictXisoUnpack(paths, opts, opId);
+    return {
+      id: opId,
+      title: discImageTitle(mode),
+      kind: mode,
+      sources: paths,
+      destinations,
+      deletes: opts.deleteOriginals ? paths : [],
+      produces,
+      dependsOn: [],
+      overwrite: opts.overwrite,
+      renameOnConflict: opts.renameOnConflict ?? false,
+      execute: () => executeDiscImage(mode, paths, opts),
+    };
+  }
+
+  function buildDiscImageOps(mode: DiscImageMode, paths: string[], opts: DiscImageOptionsPayload): QueuedOp[] {
+    if (paths.length === 0) return [];
+    if (paths.length <= 1) return [buildDiscImageOp(mode, paths, opts)];
+    const batchId = newBatchId();
+    const batchTitle = t(`queue.batch.${mode}`, { count: paths.length });
+    return paths.map((path, index) =>
+      withBatch(buildDiscImageOp(mode, [path], opts), batchId, batchTitle, index + 1, paths.length)
+    );
+  }
+
+  async function executeDiscImage(mode: DiscImageMode, paths: string[], opts: DiscImageOptionsPayload): Promise<boolean> {
+    const jobId = newJobId();
+    app.startJob(jobId, discImageTitle(mode), {
+      statusMessageOnSuccess: discImageSuccess(mode),
+      statusMessageOnFailure: discImageFailure(mode),
+    });
+    const done = app.waitForJob(jobId);
+    try {
+      await invoke(discImageCommand(mode), { jobId, paths, options: opts });
+    } catch (e) {
+      app.notify("error", String(e));
+      app.finishJob(jobId, false, String(e));
+    }
+    return await done;
+  }
+
   function handleCompressQuick(paths: string[]) {
     if (paths.length === 0) return;
     const stem = paths[0].replace(/\\/g, "/").split("/").filter(Boolean).pop()?.replace(/\.[A-Za-z0-9]{1,8}$/, "") ?? "archive";
@@ -759,6 +876,7 @@
     onCompressQuick: handleCompressQuick,
     onCompress: handleCompress,
     onChd: openChdDialog,
+    onDiscImage: openDiscImageDialog,
     onM3u: openM3uDialog,
     onProperties: handleProperties,
     onOpenWith: handleOpenWith,
@@ -878,6 +996,23 @@
       chdState = null;
     }}
   />
+{/if}
+
+{#if discImageState}
+  <DiscImageDialog
+    mode={discImageState.mode}
+    sources={discImageState.sources}
+    onclose={() => (discImageState = null)}
+    onConfirm={(sources, opts) => {
+      if (app.queueMode) enqueueOps(buildDiscImageOps(discImageState!.mode, sources, opts));
+      else void buildDiscImageOp(discImageState!.mode, sources, opts).execute();
+      discImageState = null;
+    }}
+  />
+{/if}
+
+{#if toolScreenOpen}
+  <ToolStatusScreen onclose={() => (toolScreenOpen = false)} />
 {/if}
 
 <style>

@@ -29,8 +29,15 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 webpki-roots = "1"
 walkdir = "2"
-zip = "2"
+# Default features minus `lzma`/`xz`: those pull native lzma-sys, which clashes
+# with nod's liblzma-sys (both `links = "lzma"`). nod owns lzma so it can read
+# every RVZ; Dogu only writes Stored/Deflated zips, and 7-Zip covers exotic
+# archives, so dropping the internal LZMA-zip reader is safe.
+zip = { version = "2", default-features = false, features = ["aes-crypto", "bzip2", "deflate", "deflate64", "time", "zstd"] }
 sysinfo = { version = "0.32", default-features = false, features = ["disk"] }
 dirs = "5"
 portable-pty = "0.8"
 regex = "1"
+flate2 = "1"
+xdvdfs = { version = "0.8.3", features = ["sync"] }
+nod = "=2.0.0-alpha.9"

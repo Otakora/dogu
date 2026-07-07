@@ -97,6 +97,20 @@ export type AppMetadataDto = {
   chdmanRuntime: ToolRuntimeDto;
 };
 
+/** Startup status of one external tool + the capabilities it unlocks. */
+export type ToolStatusDto = {
+  id: "chdman" | "sevenZip" | "dolphinTool";
+  displayName: string;
+  /** When false, missing = a core feature set is unavailable. */
+  optional: boolean;
+  /** "bundled" (shipped with Dogu) or "manual" (user installs; Dogu detects). */
+  provisioning: "bundled" | "manual";
+  runtime: ToolRuntimeDto;
+  /** Capability ids unlocked when available, e.g. "chd", "archives", "rvzDolphin". */
+  enables: string[];
+  guidanceUrl: string | null;
+};
+
 export type JobProgressDto = {
   jobId: string;
   progress: number;
@@ -162,6 +176,17 @@ export type ChdSourceDto = {
   /** Filenames that are referenced but missing from disk. Empty = all OK. */
   missingFiles: string[];
 };
+
+/** Content-based classification of a `.iso`, from `detect_disc_kinds`.
+ * "xiso" = trimmed XDVDFS (ready for xemu / can be unpacked),
+ * "redump" = full Xbox disc dump (can be trimmed into a playable XISO),
+ * "gc-wii" = GameCube/Wii disc (RVZ candidate),
+ * "iso" = not a recognised console disc (only generic CSO/CHD treatments apply). */
+export type DiscKind = "xiso" | "redump" | "gc-wii" | "iso";
+
+/** RVZ engine identifier. "nod" = native Rust library, "dolphin" = DolphinTool sidecar. */
+export type RvzEngine = "nod" | "dolphin";
+export type DiscKindDto = { path: string; kind: DiscKind };
 
 export type SelectionAnalysisDto = {
   archives: string[];
@@ -250,6 +275,23 @@ export type ChdRestoreOptionsPayload = {
 
 // ── Compression ─────────────────────────────────────────────────
 
+export type DiscImageOptionsPayload = {
+  destinationMode: 'same' | 'custom';
+  destinationPath: string | null;
+  deleteOriginals: boolean;
+  overwrite: boolean;
+  renameOnConflict?: boolean;
+  compressionLevel: number;
+  remoteDestination?: string | null;
+  remoteTransfer?: RemoteTransferPolicy | null;
+  /** RVZ engine to try first. Only used by RVZ modes. */
+  rvzPrimaryEngine?: RvzEngine;
+  /** RVZ engine to fall back to when the primary fails. */
+  rvzFallbackEngine?: RvzEngine;
+  /** Whether to try the fallback engine when the primary one fails. */
+  rvzEnableFallback?: boolean;
+};
+
 export type CompressionFormat = 'zip' | '7z' | 'rar';
 
 export type CompressionOptionsPayload = {
@@ -332,12 +374,20 @@ export type AppSettings = {
   chdScanDepth: number;
   /** Max queued operations Dogu may run at once in smart execution mode. */
   queueMaxConcurrent: number;
+  /** Whether queue mode starts enabled when Dogu launches. */
+  defaultQueueMode: boolean;
   /** Default "replace existing" behavior for operations without a dialog (copy/move)
    *  and the default state of the replace checkbox in operation dialogs. */
   defaultOverwriteOnConflict: boolean;
   /** When an operation does NOT overwrite and hits a name collision, append a
    *  numeric suffix " (2)", " (3)"… instead of failing/skipping. */
   renameOnConflict: boolean;
+  /** RVZ engine tried first for GameCube/Wii conversions. Default "nod". */
+  rvzPrimaryEngine: RvzEngine;
+  /** Try the other engine when the primary one fails. Default true. */
+  rvzEnableFallback: boolean;
+  /** Engine used as fallback when enabled. Default "dolphin". */
+  rvzFallbackEngine: RvzEngine;
 };
 
 export type NotificationKind = "error" | "warn" | "info" | "success";
@@ -437,7 +487,21 @@ export type M3uGenerateResultDto = {
 
 // ── Operation queue ─────────────────────────────────────────────
 
-export type QueuedOpKind = 'copy' | 'move' | 'delete' | 'extract' | 'compress' | 'chd-convert' | 'chd-restore' | 'm3u';
+export type QueuedOpKind =
+  | 'copy'
+  | 'move'
+  | 'delete'
+  | 'extract'
+  | 'compress'
+  | 'chd-convert'
+  | 'chd-restore'
+  | 'cso-convert'
+  | 'cso-restore'
+  | 'xiso-pack'
+  | 'xiso-unpack'
+  | 'rvz-convert'
+  | 'rvz-restore'
+  | 'm3u';
 
 /**
  * A predicted file/folder that a queued operation will create once it runs.

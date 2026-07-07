@@ -44,6 +44,12 @@
     compress:     "#10b981",
     "chd-convert":"#0d9488",
     "chd-restore":"#0d9488",
+    "cso-convert":"#2563eb",
+    "cso-restore":"#2563eb",
+    "xiso-pack":"#f97316",
+    "xiso-unpack":"#f97316",
+    "rvz-convert":"#7c3aed",
+    "rvz-restore":"#7c3aed",
     m3u:          "#d946ef",
   };
 
@@ -52,6 +58,9 @@
       copy: "queue.kind.copy", move: "queue.kind.move", delete: "queue.kind.delete",
       extract: "queue.kind.extract", compress: "queue.kind.compress",
       "chd-convert": "queue.kind.chdConvert", "chd-restore": "queue.kind.chdRestore",
+      "cso-convert": "queue.kind.csoConvert", "cso-restore": "queue.kind.csoRestore",
+      "xiso-pack": "queue.kind.xisoPack", "xiso-unpack": "queue.kind.xisoUnpack",
+      "rvz-convert": "queue.kind.rvzConvert", "rvz-restore": "queue.kind.rvzRestore",
       m3u: "queue.kind.m3u",
     };
     return t(map[k]);

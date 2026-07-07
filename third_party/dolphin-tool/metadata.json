@@ -1,0 +1,29 @@
+{
+  "tool": "dolphin-tool",
+  "display_name": "DolphinTool",
+  "version": "2606",
+  "release_tag": "2606",
+  "source": "Compilado desde la fuente oficial de Dolphin",
+  "author": "Dolphin Emulator Project and contributors",
+  "copyright": "Copyright (c) Dolphin Emulator Project",
+  "license": "GPL-2.0-or-later",
+  "license_offer": "third_party/THIRD-PARTY-LICENSES.md",
+  "urls": {
+    "github": "https://github.com/dolphin-emu/dolphin",
+    "source_tag": "https://github.com/dolphin-emu/dolphin/tree/2606",
+    "download": "https://dolphin-emu.org/download/",
+    "cmake_target": "dolphin-tool (Source/Core/DolphinTool)"
+  },
+  "windows": {
+    "path": "third_party/dolphin-tool/windows/DolphinTool.exe",
+    "build_script": "third_party/dolphin-tool/windows/build_dolphin_tool.ps1",
+    "bundled": true,
+    "status": "Binario compilado desde la fuente oficial de Dolphin 2606 (VS 2022, target dolphin-tool) y verificado el 2026-07-07. Falta git add/commit (Git LFS)."
+  },
+  "linux": {
+    "path": "third_party/dolphin-tool/linux/DolphinTool",
+    "build_script": "third_party/dolphin-tool/linux/build_dolphin_tool.sh",
+    "bundled": true,
+    "status": "Binario compilado desde la fuente oficial de Dolphin 2606 en Ubuntu WSL (CMake+Ninja, target dolphin-tool) y verificado el 2026-07-07. Enlaza libs de escritorio (audio/X11/GL). Falta git add/commit (Git LFS)."
+  }
+}

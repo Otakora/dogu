@@ -16,7 +16,7 @@
   let { x, y, items, onclose }: Props = $props();
 
   let menuEl = $state<HTMLElement | undefined>(undefined);
-  // Snapshot initial position (context menus don't reposition when props change)
+  // Snapshot initial position; context menus do not reposition when props change.
   let adjustedX = $state(untrack(() => x));
   let adjustedY = $state(untrack(() => y));
 
@@ -48,14 +48,8 @@
   });
 </script>
 
-<div
-  class="ctx-menu"
-  style="left:{adjustedX}px;top:{adjustedY}px"
-  bind:this={menuEl}
-  role="menu"
-  aria-label="Context menu"
->
-  {#each items as item}
+{#snippet menuItems(list: MenuItem[])}
+  {#each list as item}
     {#if item.kind === "separator"}
       <div class="ctx-sep" role="separator"></div>
     {:else if item.kind === "action"}
@@ -76,8 +70,33 @@
           <span class="ctx-shortcut">{item.shortcut}</span>
         {/if}
       </button>
+    {:else if item.kind === "submenu"}
+      <div class="ctx-submenu">
+        <button class="ctx-item ctx-item--submenu" role="menuitem" aria-haspopup="menu">
+          {#if item.icon}
+            <span class="ctx-icon" aria-hidden="true">{@html item.icon}</span>
+          {:else}
+            <span class="ctx-icon-placeholder"></span>
+          {/if}
+          <span class="ctx-label">{item.label}</span>
+          <span class="ctx-chevron">&gt;</span>
+        </button>
+        <div class="ctx-menu ctx-menu--nested" role="menu">
+          {@render menuItems(item.children)}
+        </div>
+      </div>
     {/if}
   {/each}
+{/snippet}
+
+<div
+  class="ctx-menu"
+  style="left:{adjustedX}px;top:{adjustedY}px"
+  bind:this={menuEl}
+  role="menu"
+  aria-label="Context menu"
+>
+  {@render menuItems(items)}
 </div>
 
 <style>
@@ -91,6 +110,22 @@
     min-width: 180px;
     box-shadow: var(--shadow-lg);
     animation: fade-in 0.1s ease;
+  }
+
+  .ctx-menu--nested {
+    display: none;
+    position: absolute;
+    left: calc(100% - 2px);
+    top: -4px;
+  }
+
+  .ctx-submenu {
+    position: relative;
+
+    &:hover > .ctx-menu--nested,
+    &:focus-within > .ctx-menu--nested {
+      display: block;
+    }
   }
 
   .ctx-sep {
@@ -152,5 +187,12 @@
     font-size: 11px;
     color: var(--text-subtle);
     margin-left: 16px;
+  }
+
+  .ctx-chevron {
+    color: var(--text-subtle);
+    margin-left: 14px;
+    font-size: 13px;
+    line-height: 1;
   }
 </style>

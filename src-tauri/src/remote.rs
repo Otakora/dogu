@@ -961,7 +961,7 @@ impl RemoteManager {
         Ok(())
     }
 
-    fn download_remote_file(&self, path: &str) -> Result<PathBuf> {
+    pub fn download_remote_file(&self, path: &str) -> Result<PathBuf> {
         let (session_id, logical_path) = parse_remote_virtual_path(path)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
         let mut session = self.get_session_mut(&session_id)?;

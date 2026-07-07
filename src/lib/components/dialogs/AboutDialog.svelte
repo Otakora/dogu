@@ -42,6 +42,30 @@
         <line x1="12" y1="22.08" x2="12" y2="12"/>
       </svg>`,
     },
+    {
+      name: "DolphinTool",
+      version: "v2606",
+      copyright: "© Dolphin Emulator Project",
+      license: "GPL-2.0+",
+      url: "https://dolphin-emu.org/",
+      urlLabel: "dolphin-emu.org",
+      icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2 12c3-4 7-6 11-6 4 0 7 2 9 6-2 4-5 6-9 6-4 0-8-2-11-6z"/>
+        <circle cx="15" cy="11" r="1.4"/>
+      </svg>`,
+    },
+    {
+      name: "nod",
+      version: "v2.0-alpha",
+      copyright: "© Luke Street and contributors",
+      license: "MIT/Apache-2.0",
+      url: "https://github.com/encounter/nod",
+      urlLabel: "github.com/encounter/nod",
+      icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"/>
+        <circle cx="12" cy="12" r="2.5"/>
+      </svg>`,
+    },
   ] as const;
 </script>
 

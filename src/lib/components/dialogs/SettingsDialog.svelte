@@ -4,7 +4,7 @@
   import Button from "../ui/Button.svelte";
   import AboutDialog from "./AboutDialog.svelte";
   import { t } from "../../i18n/index.js";
-  import type { Locale } from "../../types/index.js";
+  import type { Locale, RvzEngine } from "../../types/index.js";
 
   let aboutOpen = $state(false);
 </script>
@@ -156,6 +156,19 @@
         <!-- Queue -->
         <div class="setting-group">
           <div class="setting-label">{t("settingsDialog.queue")}</div>
+          <div class="setting-row">
+            <div class="setting-name-block">
+              <span class="setting-name">{t("settingsDialog.defaultQueueMode")}</span>
+              <span class="setting-hint">{t("settingsDialog.defaultQueueModeHint")}</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={app.settings.defaultQueueMode}
+              onchange={(e) => app.setDefaultQueueMode((e.target as HTMLInputElement).checked)}
+              class="checkbox"
+              aria-label={t("settingsDialog.defaultQueueMode")}
+            />
+          </div>
           <div class="queue-card">
             <div class="setting-row setting-row--top">
               <div class="setting-name-block">
@@ -224,6 +237,69 @@
                 aria-label={t("settingsDialog.chdScanDepth")}
               />
             </div>
+          </div>
+        </div>
+
+        <!-- RVZ engines -->
+        <div class="setting-group">
+          <div class="setting-label">{t("settingsDialog.rvz")}</div>
+          <div class="rvz-card">
+            <p class="rvz-intro">{t("settingsDialog.rvzIntro")}</p>
+
+            {#if !app.hasDolphinTool}
+              <p class="rvz-warning">{t("settingsDialog.rvzDolphinMissing")}</p>
+            {/if}
+
+            <div class="setting-row setting-row--top">
+              <div class="setting-name-block">
+                <span class="setting-name">{t("settingsDialog.rvzPrimaryEngine")}</span>
+                <span class="setting-hint">{t("settingsDialog.rvzPrimaryEngineHint")}</span>
+              </div>
+              <select
+                class="select-input"
+                value={app.settings.rvzPrimaryEngine}
+                onchange={(e) => app.updateSettings({ rvzPrimaryEngine: (e.target as HTMLSelectElement).value as RvzEngine })}
+                aria-label={t("settingsDialog.rvzPrimaryEngine")}
+              >
+                <option value="nod">{t("settingsDialog.rvzEngineNod")}</option>
+                <option value="dolphin">{t("settingsDialog.rvzEngineDolphin")}</option>
+              </select>
+            </div>
+
+            <div class="setting-row setting-row--top">
+              <div class="setting-name-block">
+                <span class="setting-name">{t("settingsDialog.rvzEnableFallback")}</span>
+                <span class="setting-hint">{t("settingsDialog.rvzEnableFallbackHint")}</span>
+              </div>
+              <input
+                type="checkbox"
+                checked={app.settings.rvzEnableFallback}
+                onchange={(e) => app.updateSettings({ rvzEnableFallback: (e.target as HTMLInputElement).checked })}
+                class="checkbox"
+                aria-label={t("settingsDialog.rvzEnableFallback")}
+              />
+            </div>
+
+            {#if app.settings.rvzEnableFallback}
+              <div class="setting-row setting-row--top">
+                <div class="setting-name-block">
+                  <span class="setting-name">{t("settingsDialog.rvzFallbackEngine")}</span>
+                  <span class="setting-hint">{t("settingsDialog.rvzFallbackEngineHint")}</span>
+                </div>
+                <select
+                  class="select-input"
+                  value={app.settings.rvzFallbackEngine}
+                  onchange={(e) => app.updateSettings({ rvzFallbackEngine: (e.target as HTMLSelectElement).value as RvzEngine })}
+                  aria-label={t("settingsDialog.rvzFallbackEngine")}
+                >
+                  <option value="nod">{t("settingsDialog.rvzEngineNod")}</option>
+                  <option value="dolphin">{t("settingsDialog.rvzEngineDolphin")}</option>
+                </select>
+              </div>
+              {#if app.settings.rvzPrimaryEngine === app.settings.rvzFallbackEngine}
+                <p class="rvz-warning">{t("settingsDialog.rvzSameEngineWarning")}</p>
+              {/if}
+            {/if}
           </div>
         </div>
       </div>
@@ -423,5 +499,35 @@
 
   .footer-left {
     flex: 1;
+  }
+
+  .rvz-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 11px 12px;
+    border-radius: 9px;
+    background:
+      radial-gradient(circle at 8% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 38%),
+      linear-gradient(135deg, color-mix(in srgb, var(--accent) 7%, var(--surface-alt)), var(--surface-alt));
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  }
+
+  .rvz-intro {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-muted);
+  }
+
+  .rvz-warning {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--warning, #b45309);
+    background: color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent);
+    border-radius: 7px;
+    padding: 6px 8px;
   }
 </style>

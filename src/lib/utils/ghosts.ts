@@ -12,6 +12,7 @@ import type {
   ChdConversionOptionsPayload,
   ChdRestoreOptionsPayload,
   CompressionOptionsPayload,
+  DiscImageOptionsPayload,
 } from "../types/index.js";
 
 // ── Path helpers (handle Windows '\', POSIX '/', and remote:// paths) ──────
@@ -245,4 +246,75 @@ export function predictChdRestore(
     ghosts.push(makeGhost(joinPath(destDir, `${outName}.bin`), false, opId, true));
   }
   return ghosts;
+}
+
+export function predictCsoConvert(
+  sources: string[],
+  opts: DiscImageOptionsPayload,
+  opId: string,
+): GhostEntry[] {
+  return sources.map((src) => {
+    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    return makeGhost(joinPath(destDir, `${stemOf(basenameOf(src))}.cso`), false, opId, false);
+  });
+}
+
+export function predictCsoRestore(
+  sources: string[],
+  opts: DiscImageOptionsPayload,
+  opId: string,
+): GhostEntry[] {
+  return sources.map((src) => {
+    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    return makeGhost(joinPath(destDir, `${stemOf(basenameOf(src))}.iso`), false, opId, false);
+  });
+}
+
+function xisoStem(path: string): string {
+  const stem = stemOf(basenameOf(path));
+  return stem.endsWith(".xiso") ? stem.slice(0, -5) : stem;
+}
+
+export function predictXisoPack(
+  sources: string[],
+  opts: DiscImageOptionsPayload,
+  opId: string,
+): GhostEntry[] {
+  return sources.map((src) => {
+    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    return makeGhost(joinPath(destDir, `${xisoStem(src)}.xiso.iso`), false, opId, true);
+  });
+}
+
+export function predictXisoUnpack(
+  sources: string[],
+  opts: DiscImageOptionsPayload,
+  opId: string,
+): GhostEntry[] {
+  return sources.map((src) => {
+    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    return makeGhost(joinPath(destDir, xisoStem(src)), true, opId, true);
+  });
+}
+
+export function predictRvzConvert(
+  sources: string[],
+  opts: DiscImageOptionsPayload,
+  opId: string,
+): GhostEntry[] {
+  return sources.map((src) => {
+    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    return makeGhost(joinPath(destDir, `${stemOf(basenameOf(src))}.rvz`), false, opId, false);
+  });
+}
+
+export function predictRvzRestore(
+  sources: string[],
+  opts: DiscImageOptionsPayload,
+  opId: string,
+): GhostEntry[] {
+  return sources.map((src) => {
+    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    return makeGhost(joinPath(destDir, `${stemOf(basenameOf(src))}.iso`), false, opId, false);
+  });
 }

@@ -22,8 +22,14 @@ import type {
   ConflictSeverity,
   GhostEntry,
   JobPausedDto,
+  ToolStatusDto,
 } from "../types/index.js";
 import { normalizePath, uniqueDisplayPath, basenameOf } from "../utils/ghosts.js";
+
+// Per-tab vertical scroll memory, keyed by `${tabId}::${normalizedPath}`. Kept
+// outside reactive state (a plain Map) so frequent scroll writes cause no churn.
+// Lets Dogu restore the scroll position when navigating back into a folder.
+const scrollMemory = new Map<string, number>();
 
 // ─── Local types ───────────────────────────────────────────
 type ConfirmDialogState = {
@@ -92,6 +98,10 @@ export type PaneView = {
   duplicateTab(): void;
   reorderTabs(fromIdx: number, insertIdx: number): void;
   setTabScrollTop(tabIdx: number, scrollTop: number): void;
+  /** Remembers vertical scroll for a given path within this tab. */
+  setPathScroll(path: string, scrollTop: number): void;
+  /** Restores the remembered scroll for a path (0 if never visited). */
+  pathScroll(path: string): number;
   setTabLoadedPath(path: string): void;
   // Navigation
   readonly currentPath: string | null;
@@ -217,8 +227,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   contentColumnWidths: DEFAULT_COLUMN_WIDTHS,
   chdScanDepth: 3,
   queueMaxConcurrent: DEFAULT_QUEUE_MAX_CONCURRENT,
+  defaultQueueMode: false,
   defaultOverwriteOnConflict: false,
   renameOnConflict: true,
+  rvzPrimaryEngine: "nod",
+  rvzEnableFallback: true,
+  rvzFallbackEngine: "dolphin",
 };
 
 function clampQueueMaxConcurrent(value: unknown): number {
@@ -633,6 +647,12 @@ function createAppState() {
   let volumes = $state<VolumeDto[]>([]);
   let knownFolders = $state<KnownFoldersDto | null>(null);
 
+  // External tool status (probed at startup) + derived capabilities.
+  let toolStatus = $state<ToolStatusDto[]>([]);
+  const capabilitySet = $derived(
+    new Set(toolStatus.filter(ts => ts.runtime.available).flatMap(ts => ts.enables)),
+  );
+
   // Clipboard (shared across panes/tabs)
   let clipboard = $state<ClipboardState | null>(null);
 
@@ -641,8 +661,8 @@ function createAppState() {
   let jobsPanelOpen = $state(false);
   const jobWaiters = new Map<string, Array<(success: boolean) => void>>();
 
-  // Operation queue
-  let queueMode = $state(false);
+  // Operation queue — starts in the user's configured default mode.
+  let queueMode = $state(untrack(() => settings.defaultQueueMode));
   let opQueue = $state<QueuedOp[]>([]);
   let queueRunning = $state(false);
   let queueRunStats = $state<QueueRunStats | null>(null);
@@ -776,6 +796,16 @@ function createAppState() {
       setTabScrollTop(tabIdx: number, scrollTop: number) {
         const pn = p();
         if (pn.tabs[tabIdx]) pn.tabs[tabIdx].scrollTop = scrollTop;
+      },
+
+      setPathScroll(path: string, scrollTop: number) {
+        const id = t()?.id;
+        if (id) scrollMemory.set(`${id}::${normalizePath(path)}`, scrollTop);
+      },
+
+      pathScroll(path: string) {
+        const id = t()?.id;
+        return id ? (scrollMemory.get(`${id}::${normalizePath(path)}`) ?? 0) : 0;
       },
 
       setTabLoadedPath(path: string) {
@@ -1272,6 +1302,18 @@ function createAppState() {
       });
     },
 
+    // ── External tools / capabilities ─────────────────────────
+    get toolStatus() { return toolStatus; },
+    setToolStatus(status: ToolStatusDto[]) { toolStatus = status; },
+    /** CHD convert/restore available (needs chdman). */
+    get canChd() { return capabilitySet.has("chd"); },
+    /** .7z/.rar extraction available (needs 7-Zip). */
+    get canArchives() { return capabilitySet.has("archives"); },
+    /** DolphinTool RVZ engine available (nod is always available regardless). */
+    get hasDolphinTool() { return capabilitySet.has("rvzDolphin"); },
+    /** Tools that were probed and are not usable — drives the startup screen. */
+    get toolProblems() { return toolStatus.filter(ts => !ts.runtime.available); },
+
     // ── Operation queue ───────────────────────────────────────
     get queueMode()      { return queueMode; },
     get opQueue()        { return opQueue; },
@@ -1325,6 +1367,13 @@ function createAppState() {
     },
 
     toggleQueueMode() { queueMode = !queueMode; },
+
+    /** Persists the launch default for queue mode and applies it immediately. */
+    setDefaultQueueMode(on: boolean) {
+      settings = { ...settings, defaultQueueMode: on };
+      persistSettings(settings);
+      queueMode = on;
+    },
 
     addToQueue(op: QueuedOp) {
       // Link the op to any already-queued ops whose ghost outputs it consumes.

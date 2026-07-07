@@ -190,6 +190,18 @@ pub struct ChdSourceDto {
     pub missing_files: Vec<String>,
 }
 
+/// Content-based classification of a disc image path, used to decide which
+/// treatments are safe to offer for a `.iso` (see `ops::detect_disc_kinds`).
+/// `kind` is one of: "xiso" (trimmed XDVDFS, ready for xemu / can be unpacked),
+/// "redump" (full Xbox disc dump / XGD1-3, can be trimmed into a playable XISO),
+/// or "iso" (not an Xbox disc — only generic CSO/CHD treatments apply).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscKindDto {
+    pub path: String,
+    pub kind: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectionAnalysisDto {
@@ -261,6 +273,40 @@ pub struct ChdRestoreOptionsPayload {
     pub remote_transfer: Option<RemoteTransferPolicy>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscImageOptionsPayload {
+    pub destination_mode: String,
+    pub destination_path: Option<String>,
+    pub delete_originals: bool,
+    pub overwrite: bool,
+    #[serde(default)]
+    pub rename_on_conflict: bool,
+    #[serde(default = "default_disc_image_compression_level")]
+    pub compression_level: u8,
+    #[serde(default)]
+    pub remote_destination: Option<String>,
+    #[serde(default)]
+    pub remote_transfer: Option<RemoteTransferPolicy>,
+    /// RVZ engine to try first ("nod" or "dolphin"). Only used by RVZ modes.
+    #[serde(default)]
+    pub rvz_primary_engine: Option<String>,
+    /// RVZ engine to fall back to when the primary fails ("nod" or "dolphin").
+    #[serde(default)]
+    pub rvz_fallback_engine: Option<String>,
+    /// Whether to try the fallback engine if the primary one fails.
+    #[serde(default = "default_true")]
+    pub rvz_enable_fallback: bool,
+}
+
+fn default_disc_image_compression_level() -> u8 {
+    9
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Runtime availability check for an external tool binary.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -272,6 +318,28 @@ pub struct ToolRuntimeDto {
     pub version: Option<String>,
     /// Human-readable reason why the tool is unavailable, if applicable.
     pub error: Option<String>,
+}
+
+/// Startup status of one external tool Dogu depends on, plus the capabilities it
+/// unlocks. The frontend uses this to show the preparation screen and to disable
+/// features whose tool is missing or not runnable.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolStatusDto {
+    /// Stable id: "chdman" | "sevenZip" | "dolphinTool".
+    pub id: String,
+    pub display_name: String,
+    /// When true, Dogu still works if this tool is missing (only its features are
+    /// disabled). When false, a core feature set is unavailable.
+    pub optional: bool,
+    /// How Dogu obtains this tool: "bundled" (shipped in repo) or "manual"
+    /// (user installs / places it; Dogu detects it).
+    pub provisioning: String,
+    pub runtime: ToolRuntimeDto,
+    /// Capability ids this tool unlocks when available (e.g. "chd", "archives").
+    pub enables: Vec<String>,
+    /// Optional page that helps the user obtain the tool when it is missing.
+    pub guidance_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

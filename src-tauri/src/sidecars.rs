@@ -129,6 +129,31 @@ fn build_seven_zip_candidates(
     candidates
 }
 
+/// Locates the bundled (or PATH-provided) DolphinTool binary used as the RVZ
+/// fallback engine. Mirrors `chdman_path`; accepts both the official
+/// `DolphinTool` name and the lowercase `dolphin-tool` some builds ship.
+pub fn dolphin_tool_path(app: &AppHandle) -> Option<PathBuf> {
+    let root = runtime_root(app);
+    for base in ["DolphinTool", "dolphin-tool"] {
+        let candidate = root
+            .join("third_party")
+            .join("dolphin-tool")
+            .join(platform_name())
+            .join(exe_name(base));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        let fallback = root
+            .join("third_party")
+            .join("dolphin-tool")
+            .join(exe_name(base));
+        if fallback.exists() {
+            return Some(fallback);
+        }
+    }
+    which_in_path(&exe_name("DolphinTool")).or_else(|| which_in_path(&exe_name("dolphin-tool")))
+}
+
 fn seven_zip_supports_rar(path: &Path) -> bool {
     match tool_stem(path).as_deref() {
         Some("7z") | Some("7zz") => true,

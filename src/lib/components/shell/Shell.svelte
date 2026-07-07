@@ -119,8 +119,15 @@
   let _queueSeq = 0;
   function newQueueId() { return `qop-${Date.now()}-${++_queueSeq}`; }
 
+  let _batchSeq = 0;
+  function newBatchId() { return `qbatch-${Date.now()}-${++_batchSeq}`; }
+
   function parentDir(p: string): string {
     return p.replace(/[/\\][^/\\]+[/\\]?$/, "") || p;
+  }
+
+  function withBatch(op: QueuedOp, batchId: string, batchTitle: string, index: number, total: number): QueuedOp {
+    return { ...op, batchId, batchTitle, batchIndex: index, batchTotal: total };
   }
 
   function enqueueOrRun(op: QueuedOp) {
@@ -130,6 +137,14 @@
     } else {
       op.execute();
     }
+  }
+
+  function enqueueOps(ops: QueuedOp[]) {
+    if (ops.length === 0) return;
+    for (const op of ops) app.addToQueue(op);
+    app.notify("info", ops.length === 1
+      ? t("queue.operationQueued")
+      : t("queue.operationsQueued", { count: ops.length }));
   }
 
   // ── Tauri event listeners ─────────────────────────────────
@@ -284,7 +299,7 @@
     };
   }
 
-  async function executeDelete(paths: string[]): Promise<void> {
+  async function executeDelete(paths: string[]): Promise<boolean> {
     const jobId = newJobId();
     app.startJob(jobId, t("shell.deleting"), {
       statusMessageOnSuccess: t("shell.deleted"),
@@ -297,7 +312,7 @@
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
     }
-    await done;
+    return await done;
   }
 
   // ── Copy / Cut / Paste ────────────────────────────────────
@@ -339,7 +354,7 @@
     });
   }
 
-  async function executePaste(paths: string[], dest: string, isCut: boolean, overwrite: boolean, renameOnConflict: boolean): Promise<void> {
+  async function executePaste(paths: string[], dest: string, isCut: boolean, overwrite: boolean, renameOnConflict: boolean): Promise<boolean> {
     const jobId = newJobId();
     const op = isCut ? "cut" : "copy";
     app.startJob(jobId, op === "copy" ? t("shell.copying") : t("shell.moving"), {
@@ -353,7 +368,7 @@
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
     }
-    await done;
+    return await done;
   }
 
   // ── Extraction ────────────────────────────────────────────
@@ -405,16 +420,25 @@
   }
 
   /**
-   * Enqueues (or runs) an extraction. When queueing, the archive's *entire*
-   * contents (all nested files and folders) are predicted via the backend deep
-   * preview, so downstream operations can target extracted files at any depth
-   * and navigate the predicted folder tree. Prediction is skipped for remote
-   * archives (not previewable without downloading) and ghost archives.
+   * Enqueues (or runs) an extraction. In queue mode each archive becomes its
+   * own planned operation, so the scheduler can overlap independent archives.
+   * Local archives still get a deep ghost preview for downstream operations.
    */
   async function enqueueExtract(archives: string[], opts: ExtractionOptionsPayload) {
     opts = { ...opts, renameOnConflict: app.settings.renameOnConflict };
-    const op = buildExtractOp(archives, opts);
-    if (!app.queueMode) { op.execute(); return; }
+    if (!app.queueMode) {
+      void buildExtractOp(archives, opts).execute();
+      return;
+    }
+
+    const batchId = archives.length > 1 ? newBatchId() : null;
+    const batchTitle = archives.length > 1
+      ? t("queue.batch.extract", { count: archives.length })
+      : "";
+    const ops = archives.map((archive, index) => {
+      const op = buildExtractOp([archive], opts);
+      return batchId ? withBatch(op, batchId, batchTitle, index + 1, archives.length) : op;
+    });
 
     const previewable = archives.filter(a => !isGhostPath(a) && !a.startsWith("remote://"));
     if (previewable.length > 0) {
@@ -422,20 +446,22 @@
         const rows = await invoke<ExtractionPreviewRow[]>("build_extraction_preview_deep", {
           archives: previewable, options: opts,
         });
-        op.produces = rows.flatMap(r =>
-          r.entries
+        const rowsByArchive = new Map(rows.map((row) => [normalizePath(row.archivePath), row]));
+        for (const op of ops) {
+          const row = rowsByArchive.get(normalizePath(op.sources[0] ?? ""));
+          if (!row) continue;
+          op.produces = row.entries
             .filter(e => e.destinationPath)
-            .map(e => buildGhost(e.destinationPath, e.isDir, op.id, false)),
-        );
+            .map(e => buildGhost(e.destinationPath, e.isDir, op.id, false));
+        }
       } catch (e) {
         app.notify("warn", t("queue.extractGhostPreviewFailed", { error: String(e) }));
       }
     }
-    app.addToQueue(op);
-    app.notify("info", t("queue.operationQueued"));
+    enqueueOps(ops);
   }
 
-  async function executeExtraction(archives: string[], opts: ExtractionOptionsPayload): Promise<void> {
+  async function executeExtraction(archives: string[], opts: ExtractionOptionsPayload): Promise<boolean> {
     const jobId = newJobId();
     app.startJob(jobId, t("shell.extracting"), {
       statusMessageOnSuccess: t("shell.extractionComplete"),
@@ -448,7 +474,7 @@
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
     }
-    await done;
+    return await done;
   }
 
   // ── M3U ───────────────────────────────────────────────────
@@ -476,7 +502,7 @@
     };
   }
 
-  async function executeM3u(payload: M3uGeneratePayload): Promise<void> {
+  async function executeM3u(payload: M3uGeneratePayload): Promise<boolean> {
     const jobId = newJobId();
     app.startJob(jobId, t("shell.generatingM3u"), {
       statusMessageOnSuccess: t("shell.m3uComplete"),
@@ -490,7 +516,7 @@
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
     }
-    await done;
+    return await done;
   }
 
   // ── CHD ───────────────────────────────────────────────────
@@ -578,7 +604,17 @@
     };
   }
 
-  async function executeConvertChd(paths: string[], opts: ChdConversionOptionsPayload): Promise<void> {
+  function buildConvertChdOps(paths: string[], rawOpts: ChdConversionOptionsPayload): QueuedOp[] {
+    if (paths.length === 0) return [];
+    if (paths.length <= 1) return [buildConvertChdOp(paths, rawOpts)];
+    const batchId = newBatchId();
+    const batchTitle = t("queue.batch.chdConvert", { count: paths.length });
+    return paths.map((path, index) =>
+      withBatch(buildConvertChdOp([path], rawOpts), batchId, batchTitle, index + 1, paths.length)
+    );
+  }
+
+  async function executeConvertChd(paths: string[], opts: ChdConversionOptionsPayload): Promise<boolean> {
     const jobId = newJobId();
     app.startJob(jobId, t("shell.convertingToChd"), {
       statusMessageOnSuccess: t("shell.chdConversionComplete"),
@@ -591,7 +627,7 @@
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
     }
-    await done;
+    return await done;
   }
 
   function buildRestoreChdOp(paths: string[], rawOpts: ChdRestoreOptionsPayload): QueuedOp {
@@ -615,7 +651,17 @@
     };
   }
 
-  async function executeRestoreChd(paths: string[], opts: ChdRestoreOptionsPayload): Promise<void> {
+  function buildRestoreChdOps(paths: string[], rawOpts: ChdRestoreOptionsPayload): QueuedOp[] {
+    if (paths.length === 0) return [];
+    if (paths.length <= 1) return [buildRestoreChdOp(paths, rawOpts)];
+    const batchId = newBatchId();
+    const batchTitle = t("queue.batch.chdRestore", { count: paths.length });
+    return paths.map((path, index) =>
+      withBatch(buildRestoreChdOp([path], rawOpts), batchId, batchTitle, index + 1, paths.length)
+    );
+  }
+
+  async function executeRestoreChd(paths: string[], opts: ChdRestoreOptionsPayload): Promise<boolean> {
     const jobId = newJobId();
     app.startJob(jobId, t("shell.restoringFromChd"), {
       statusMessageOnSuccess: t("shell.chdRestoreComplete"),
@@ -628,7 +674,7 @@
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
     }
-    await done;
+    return await done;
   }
 
   // ── Compress ──────────────────────────────────────────────
@@ -675,7 +721,7 @@
     };
   }
 
-  async function executeCompress(sources: string[], opts: CompressionOptionsPayload): Promise<void> {
+  async function executeCompress(sources: string[], opts: CompressionOptionsPayload): Promise<boolean> {
     const jobId = newJobId();
     app.startJob(jobId, t("shell.compressing"), {
       statusMessageOnSuccess: t("shell.compressionComplete"),
@@ -688,7 +734,7 @@
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
     }
-    await done;
+    return await done;
   }
 
   // ── Properties ────────────────────────────────────────────
@@ -822,11 +868,13 @@
     initialMode={chdState.mode}
     onclose={() => (chdState = null)}
     onConvert={(paths, opts) => {
-      enqueueOrRun(buildConvertChdOp(paths, opts));
+      if (app.queueMode) enqueueOps(buildConvertChdOps(paths, opts));
+      else void buildConvertChdOp(paths, opts).execute();
       chdState = null;
     }}
     onRestore={(paths, opts) => {
-      enqueueOrRun(buildRestoreChdOp(paths, opts));
+      if (app.queueMode) enqueueOps(buildRestoreChdOps(paths, opts));
+      else void buildRestoreChdOp(paths, opts).execute();
       chdState = null;
     }}
   />

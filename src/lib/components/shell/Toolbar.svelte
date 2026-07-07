@@ -21,6 +21,7 @@
 
   // Split view always uses two rows; single pane uses one row.
   const twoRow = $derived(app.isSplit);
+  const queuedCount = $derived(app.opQueue.length);
 
   // ── Editable path ─────────────────────────────────────────────
   let editingPath = $state(false);
@@ -334,7 +335,7 @@
 
 {#snippet globalButtons()}
   <button
-    class="tb-btn"
+    class="tb-btn tb-btn--queue"
     class:tb-btn--active={app.queueMode}
     onclick={() => app.toggleQueueMode()}
     title={t("toolbar.queueMode")}
@@ -345,6 +346,10 @@
       <line x1="3" y1="6" x2="15" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="15" y2="18"/>
       <polyline points="18 9 21 12 18 15"/>
     </svg>
+    {#if queuedCount > 0}
+      <span class="tb-badge" aria-hidden="true">{queuedCount}</span>
+    {/if}
+    <span class="tb-queue-label">{t("toolbar.queueShort")}</span>
   </button>
   <button
     class="tb-btn"
@@ -440,16 +445,17 @@
     align-items: center;
     justify-content: center;
     background: none;
-    border: none;
+    border: 1px solid transparent;
     color: var(--text-muted);
     border-radius: 5px;
     cursor: pointer;
     flex-shrink: 0;
-    transition: background 0.1s, color 0.1s;
+    transition: background 0.1s, color 0.1s, border-color 0.1s, box-shadow 0.1s;
   }
 
   .tb-btn:hover:not(:disabled) {
     background: var(--surface-hover);
+    border-color: color-mix(in srgb, var(--line-strong) 70%, transparent);
     color: var(--text);
   }
 
@@ -460,14 +466,61 @@
 
   .tb-btn--active {
     background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 20%, transparent);
     color: var(--accent);
   }
   .tb-btn--active:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 38%, transparent);
     color: var(--accent);
   }
 
   .tb-btn-placeholder { width: 28px; flex-shrink: 0; }
+
+  .tb-btn--queue {
+    position: relative;
+    width: auto;
+    min-width: 70px;
+    padding: 0 9px;
+    gap: 6px;
+    font-weight: 700;
+  }
+
+  .tb-btn--queue:not(.tb-btn--active) {
+    background:
+      linear-gradient(135deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 62%),
+      transparent;
+    border-color: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: color-mix(in srgb, var(--accent) 72%, var(--text-muted));
+  }
+
+  .tb-btn--queue:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+    color: var(--accent);
+  }
+
+  .tb-queue-label {
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .tb-badge {
+    position: absolute;
+    right: -4px;
+    top: -4px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    border: 1px solid var(--surface);
+    font-size: 9px;
+    font-weight: 800;
+    line-height: 12px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
 
   /* ── Nav ── */
   .tb-nav {

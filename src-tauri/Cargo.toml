@@ -1,6 +1,6 @@
 [package]
 name = "dogu"
-version = "0.2.1"
+version = "0.2.2"
 description = "ROM manager desktop app"
 authors = ["wind"]
 edition = "2021"

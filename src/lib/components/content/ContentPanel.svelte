@@ -722,37 +722,6 @@
   oncontextmenu={handlePanelContextMenu}
   onwheel={handleContentWheel}
 >
-  <!-- ── Column headers (list view only) ── -->
-  {#if pane.viewMode === "list"}
-  <div class="content-header" role="row">
-    <div class="col-gutter"></div>
-    <button class="col-hdr col-hdr--name" onclick={() => clickSort("name")} role="columnheader">
-      {t("contentPanel.name")}
-      {#if pane.sortKey === "name"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
-    </button>
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "name")}></div>
-    <button class="col-hdr col-hdr--type" onclick={() => clickSort("type")} role="columnheader">
-      {t("contentPanel.type")}
-      {#if pane.sortKey === "type"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
-    </button>
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "type")}></div>
-    <button class="col-hdr col-hdr--size" onclick={() => clickSort("size")} role="columnheader">
-      {t("contentPanel.size")}
-      {#if pane.sortKey === "size"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
-    </button>
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "size")}></div>
-    <button class="col-hdr col-hdr--modified" onclick={() => clickSort("modified")} role="columnheader">
-      {t("contentPanel.modified")}
-      {#if pane.sortKey === "modified"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
-    </button>
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "modified")}></div>
-  </div>
-  {/if}
-
   <!-- ── Quick filter bar ── -->
   {#if quickFilterOpen}
     <div class="quick-filter-bar">
@@ -787,6 +756,38 @@
     onscroll={saveScrollPosition}
     role="presentation"
   >
+    <!-- ── Column headers (list view only). Lives inside the same horizontal
+         scroll plane as rows, so labels stay aligned with their columns. ── -->
+    {#if pane.viewMode === "list"}
+      <div class="content-header" role="row">
+        <div class="col-gutter"></div>
+        <button class="col-hdr col-hdr--name" onclick={() => clickSort("name")} role="columnheader">
+          {t("contentPanel.name")}
+          {#if pane.sortKey === "name"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
+        </button>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "name")}></div>
+        <button class="col-hdr col-hdr--type" onclick={() => clickSort("type")} role="columnheader">
+          {t("contentPanel.type")}
+          {#if pane.sortKey === "type"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
+        </button>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "type")}></div>
+        <button class="col-hdr col-hdr--size" onclick={() => clickSort("size")} role="columnheader">
+          {t("contentPanel.size")}
+          {#if pane.sortKey === "size"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
+        </button>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "size")}></div>
+        <button class="col-hdr col-hdr--modified" onclick={() => clickSort("modified")} role="columnheader">
+          {t("contentPanel.modified")}
+          {#if pane.sortKey === "modified"}<span class="sort-arrow">{pane.sortDir === "asc" ? "↑" : "↓"}</span>{/if}
+        </button>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div class="col-resize-handle" role="separator" onmousedown={(e) => startColResize(e, "modified")}></div>
+      </div>
+    {/if}
+
     {#if pane.isLoading}
       <div class="content-state">
         <span class="loading-spinner"></span>
@@ -956,6 +957,11 @@
     background: var(--surface);
     border-bottom: 1px solid var(--line);
     flex-shrink: 0;
+    position: sticky;
+    top: -4px;
+    z-index: 5;
+    width: max-content;
+    min-width: 100%;
   }
 
   .col-hdr {
@@ -1006,7 +1012,7 @@
 
   .content-body {
     flex: 1;
-    overflow-y: auto;
+    overflow: auto;
     padding: 4px;
     padding-bottom: 60px;
     position: relative;
@@ -1048,6 +1054,8 @@
     gap: 1px;
     padding-left: 16px;
     align-items: flex-start;
+    width: max-content;
+    min-width: 100%;
   }
 
   .file-grid {

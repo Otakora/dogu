@@ -53,6 +53,8 @@
   class="pane"
   class:pane--focused={isFocused}
   class:pane--split={app.isSplit}
+  class:pane--left={paneIdx === 0}
+  class:pane--right={paneIdx === 1}
   style="--content-scale: {paneView.contentZoom}"
   role="region"
   aria-label="Pane {paneIdx + 1}"
@@ -102,10 +104,17 @@
     content: "";
     position: absolute;
     inset: 0;
-    border: 2px solid var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 66%, transparent);
+    box-shadow:
+      inset 0 1px 0 color-mix(in srgb, var(--accent) 20%, transparent),
+      inset var(--focus-edge-x, 3px) 0 0 color-mix(in srgb, var(--accent) 72%, transparent);
     pointer-events: none;
     z-index: 10;
     border-radius: 0;
+  }
+
+  .pane--right {
+    --focus-edge-x: -3px;
   }
 
   .pane-content {

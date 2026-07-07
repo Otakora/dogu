@@ -330,6 +330,8 @@ export type AppSettings = {
   contentSortDirection: SortDirection;
   contentColumnWidths: ContentColumnWidths;
   chdScanDepth: number;
+  /** Max queued operations Dogu may run at once in smart execution mode. */
+  queueMaxConcurrent: number;
   /** Default "replace existing" behavior for operations without a dialog (copy/move)
    *  and the default state of the replace checkbox in operation dialogs. */
   defaultOverwriteOnConflict: boolean;
@@ -463,6 +465,10 @@ export type QueuedOp = {
   id: string;
   title: string;
   kind: QueuedOpKind;
+  batchId?: string;
+  batchTitle?: string;
+  batchIndex?: number;
+  batchTotal?: number;
   sources: string[];
   destinations: string[];
   deletes: string[];
@@ -473,7 +479,7 @@ export type QueuedOp = {
   /** Effective conflict policy — drives the overlay's replace/rename/conflict rendering. */
   overwrite: boolean;
   renameOnConflict: boolean;
-  execute: () => Promise<void>;
+  execute: () => Promise<boolean>;
 };
 
 export type ConflictKind = 'source-deleted' | 'dest-deleted' | 'dest-collision';

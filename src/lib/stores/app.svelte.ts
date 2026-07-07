@@ -164,6 +164,27 @@ type QueueRunStats = {
   completed: number;
   succeeded: number;
   failed: number;
+  skipped: number;
+  running: number;
+  mode: QueueExecutionMode;
+};
+
+type QueueExecutionMode = "smart" | "parallel" | "sequential";
+
+type QueuePlan = {
+  total: number;
+  hasDependencies: boolean;
+  hasOrderingConstraints: boolean;
+  dependencyEdges: number;
+  orderingEdges: number;
+  maxParallelWidth: number;
+  maxConcurrent: number;
+  firstWave: number;
+  levels: string[][];
+  blockingConflicts: QueueConflict[];
+  hardPredecessors: Map<string, Set<string>>;
+  hardSuccessors: Map<string, Set<string>>;
+  orderPredecessors: Map<string, Set<string>>;
 };
 
 // ─── Default settings ─────────────────────────────────────
@@ -173,6 +194,10 @@ const DEFAULT_COLUMN_WIDTHS: ContentColumnWidths = {
   size: 90,
   modified: 140,
 };
+
+const DEFAULT_QUEUE_MAX_CONCURRENT = 3;
+const MIN_QUEUE_MAX_CONCURRENT = 1;
+const MAX_QUEUE_MAX_CONCURRENT = 6;
 
 const DEFAULT_SETTINGS: AppSettings = {
   theme: "light",
@@ -191,9 +216,16 @@ const DEFAULT_SETTINGS: AppSettings = {
   contentSortDirection: "asc",
   contentColumnWidths: DEFAULT_COLUMN_WIDTHS,
   chdScanDepth: 3,
+  queueMaxConcurrent: DEFAULT_QUEUE_MAX_CONCURRENT,
   defaultOverwriteOnConflict: false,
   renameOnConflict: true,
 };
+
+function clampQueueMaxConcurrent(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_QUEUE_MAX_CONCURRENT;
+  return Math.min(MAX_QUEUE_MAX_CONCURRENT, Math.max(MIN_QUEUE_MAX_CONCURRENT, Math.round(n)));
+}
 
 function loadSettings(): AppSettings {
   try {
@@ -204,7 +236,11 @@ function loadSettings(): AppSettings {
       parsed.favoriteLocations = parsed.localLocations;
     }
     delete parsed.localLocations;
-    return { ...DEFAULT_SETTINGS, ...parsed } as AppSettings;
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      queueMaxConcurrent: clampQueueMaxConcurrent(parsed.queueMaxConcurrent),
+    } as AppSettings;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -441,8 +477,9 @@ function detectConflicts(ops: QueuedOp[]): QueueConflict[] {
 /** Returns the id of the queued op that produces `path` (or contains it), if any. */
 function ghostProducerOf(path: string, ops: QueuedOp[]): string | null {
   const np = normalizePath(path);
+  const resolvedOutputs = resolveQueueOutputs(ops);
   for (const op of ops) {
-    for (const g of op.produces) {
+    for (const g of resolvedOutputs.get(op.id) ?? op.produces) {
       const gp = normalizePath(g.path);
       if (np === gp || np.startsWith(gp + "/")) return op.id;
     }
@@ -483,6 +520,98 @@ function orderRespectsDeps(ops: QueuedOp[]): boolean {
   return ops.every((op, i) => op.dependsOn.every((d) => (indexOf.get(d) ?? -1) < i));
 }
 
+function buildQueuePlan(ops: QueuedOp[], conflicts: QueueConflict[], maxConcurrent: number): QueuePlan {
+  const ids = new Set(ops.map((o) => o.id));
+  const indexOf = new Map(ops.map((o, i) => [o.id, i]));
+  const hardPredecessors = new Map<string, Set<string>>();
+  const hardSuccessors = new Map<string, Set<string>>();
+  const orderPredecessors = new Map<string, Set<string>>();
+  const allSuccessors = new Map<string, Set<string>>();
+
+  for (const op of ops) {
+    hardPredecessors.set(op.id, new Set());
+    hardSuccessors.set(op.id, new Set());
+    orderPredecessors.set(op.id, new Set());
+    allSuccessors.set(op.id, new Set());
+  }
+
+  let dependencyEdges = 0;
+  let orderingEdges = 0;
+
+  const addEdge = (from: string, to: string, hard: boolean) => {
+    if (from === to || !ids.has(from) || !ids.has(to)) return;
+    const predecessors = hard ? hardPredecessors : orderPredecessors;
+    const predSet = predecessors.get(to);
+    const succSet = allSuccessors.get(from);
+    if (!predSet || !succSet || predSet.has(from)) return;
+    predSet.add(from);
+    succSet.add(to);
+    if (hard) {
+      hardSuccessors.get(from)?.add(to);
+      dependencyEdges += 1;
+    } else {
+      orderingEdges += 1;
+    }
+  };
+
+  for (const op of ops) {
+    for (const dep of op.dependsOn) addEdge(dep, op.id, true);
+  }
+
+  for (const conflict of conflicts) {
+    if (conflict.severity !== "parallel-only") continue;
+    const aIndex = indexOf.get(conflict.opAId);
+    const bIndex = indexOf.get(conflict.opBId);
+    if (aIndex === undefined || bIndex === undefined) continue;
+    const earlier = ops[Math.min(aIndex, bIndex)];
+    const later = ops[Math.max(aIndex, bIndex)];
+    addEdge(earlier.id, later.id, false);
+  }
+
+  const remainingPreds = new Map<string, Set<string>>();
+  for (const op of ops) {
+    remainingPreds.set(op.id, new Set([
+      ...(hardPredecessors.get(op.id) ?? []),
+      ...(orderPredecessors.get(op.id) ?? []),
+    ]));
+  }
+
+  const pending = new Set(ops.map((o) => o.id));
+  const levels: string[][] = [];
+  while (pending.size > 0) {
+    const ready = ops
+      .filter((op) => pending.has(op.id) && (remainingPreds.get(op.id)?.size ?? 0) === 0)
+      .map((op) => op.id);
+    if (ready.length === 0) {
+      levels.push([...pending]);
+      break;
+    }
+    levels.push(ready);
+    for (const id of ready) {
+      pending.delete(id);
+      for (const child of allSuccessors.get(id) ?? []) {
+        remainingPreds.get(child)?.delete(id);
+      }
+    }
+  }
+
+  return {
+    total: ops.length,
+    hasDependencies: dependencyEdges > 0,
+    hasOrderingConstraints: orderingEdges > 0,
+    dependencyEdges,
+    orderingEdges,
+    maxParallelWidth: Math.max(0, ...levels.map((level) => level.length)),
+    maxConcurrent: Math.min(maxConcurrent, Math.max(0, ...levels.map((level) => level.length))),
+    firstWave: levels[0]?.length ?? 0,
+    levels,
+    blockingConflicts: conflicts.filter((c) => c.severity === "blocking"),
+    hardPredecessors,
+    hardSuccessors,
+    orderPredecessors,
+  };
+}
+
 // ─── App state (Svelte 5 runes) ────────────────────────────
 function createAppState() {
   // Settings
@@ -510,7 +639,7 @@ function createAppState() {
   // Jobs
   let jobs = $state<JobEntry[]>([]);
   let jobsPanelOpen = $state(false);
-  const jobWaiters = new Map<string, Array<() => void>>();
+  const jobWaiters = new Map<string, Array<(success: boolean) => void>>();
 
   // Operation queue
   let queueMode = $state(false);
@@ -518,6 +647,8 @@ function createAppState() {
   let queueRunning = $state(false);
   let queueRunStats = $state<QueueRunStats | null>(null);
   const queueConflicts = $derived(detectConflicts(opQueue));
+  const queueMaxConcurrent = $derived(clampQueueMaxConcurrent(settings.queueMaxConcurrent));
+  const queuePlan = $derived(buildQueuePlan(opQueue, queueConflicts, queueMaxConcurrent));
   // Final output names per op after applying rename-on-conflict across the queue.
   const resolvedOutputs = $derived(resolveQueueOutputs(opQueue));
   // Any op consuming another op's ghost output forces ordered (sequential) execution.
@@ -825,7 +956,11 @@ function createAppState() {
     // ── Settings ────────────────────────────────────────────
     get settings() { return settings; },
     updateSettings(patch: Partial<AppSettings>) {
-      settings = { ...settings, ...patch };
+      settings = {
+        ...settings,
+        ...patch,
+        queueMaxConcurrent: clampQueueMaxConcurrent(patch.queueMaxConcurrent ?? settings.queueMaxConcurrent),
+      };
       persistSettings(settings);
       applyTheme(settings.theme);
     },
@@ -1100,7 +1235,7 @@ function createAppState() {
       }
       const waiters = jobWaiters.get(jobId) ?? [];
       jobWaiters.delete(jobId);
-      for (const w of waiters) w();
+      for (const w of waiters) w(success);
     },
 
     pauseJob(dto: JobPausedDto) {
@@ -1127,10 +1262,10 @@ function createAppState() {
     get progress() { return null; },
     clearProgress() {},
 
-    waitForJob(jobId: string): Promise<void> {
+    waitForJob(jobId: string): Promise<boolean> {
       return new Promise(resolve => {
         const job = jobs.find(j => j.id === jobId);
-        if (job?.done) { resolve(); return; }
+        if (job?.done) { resolve(job.success); return; }
         const list = jobWaiters.get(jobId) ?? [];
         list.push(resolve);
         jobWaiters.set(jobId, list);
@@ -1141,6 +1276,8 @@ function createAppState() {
     get queueMode()      { return queueMode; },
     get opQueue()        { return opQueue; },
     get queueConflicts() { return queueConflicts; },
+    get queuePlan()      { return queuePlan; },
+    get queueMaxConcurrent() { return queueMaxConcurrent; },
     get queueRunning()   { return queueRunning; },
     get queueRunStats()  { return queueRunStats; },
     get queueHasDependencies() { return queueHasDependencies; },
@@ -1227,41 +1364,150 @@ function createAppState() {
       opQueue = next;
     },
 
-    async executeQueue(mode: "parallel" | "sequential") {
+    async executeQueue(mode: QueueExecutionMode) {
       const ops = [...opQueue];
       if (ops.length === 0) return;
+      const effectiveMode: QueueExecutionMode = mode === "parallel" ? "smart" : mode;
+      const maxConcurrent = clampQueueMaxConcurrent(settings.queueMaxConcurrent);
+      const plan = buildQueuePlan(ops, detectConflicts(ops), maxConcurrent);
+      if (plan.blockingConflicts.length > 0) return;
+
       opQueue = [];
       queueRunning = true;
       const preExistingIds = new Set(jobs.map(j => j.id));
-      queueRunStats = { total: ops.length, completed: 0, succeeded: 0, failed: 0 };
-
-      const wrapOp = async (op: QueuedOp) => {
-        await op.execute().catch(() => {});
-        queueRunStats = { ...queueRunStats!, completed: queueRunStats!.completed + 1 };
+      queueRunStats = {
+        total: ops.length,
+        completed: 0,
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        running: 0,
+        mode: effectiveMode,
       };
 
-      // Ghost dependencies require ordered execution: a consumer must run after
-      // its producer so the real files exist when it starts. Parallel mode is
-      // only safe when nothing in the batch depends on another op's output.
-      const hasDeps = ops.some((o) => o.dependsOn.length > 0);
-      const effectiveMode = hasDeps ? "sequential" : mode;
+      const terminal = new Set<string>();
+      const succeeded = new Set<string>();
+      const failed = new Set<string>();
+      const skipped = new Set<string>();
+      const running = new Set<string>();
+
+      const updateStats = (patch: Partial<QueueRunStats>) => {
+        if (!queueRunStats) return;
+        queueRunStats = { ...queueRunStats, ...patch };
+      };
+
+      const markSkipped = (id: string) => {
+        if (terminal.has(id) || running.has(id)) return;
+        terminal.add(id);
+        skipped.add(id);
+        updateStats({
+          completed: queueRunStats!.completed + 1,
+          skipped: queueRunStats!.skipped + 1,
+        });
+      };
+
+      const skipHardDependents = (id: string) => {
+        for (const child of plan.hardSuccessors.get(id) ?? []) {
+          if (terminal.has(child) || running.has(child)) continue;
+          markSkipped(child);
+          skipHardDependents(child);
+        }
+      };
+
+      const runOp = async (op: QueuedOp): Promise<boolean> => {
+        running.add(op.id);
+        updateStats({ running: queueRunStats!.running + 1 });
+        let ok = false;
+        try {
+          ok = await op.execute();
+        } catch {
+          ok = false;
+        }
+        running.delete(op.id);
+        terminal.add(op.id);
+        if (ok) succeeded.add(op.id);
+        else {
+          failed.add(op.id);
+          skipHardDependents(op.id);
+        }
+        updateStats({
+          running: queueRunStats!.running - 1,
+          completed: queueRunStats!.completed + 1,
+          succeeded: queueRunStats!.succeeded + (ok ? 1 : 0),
+          failed: queueRunStats!.failed + (ok ? 0 : 1),
+        });
+        return ok;
+      };
+
+      const hardDepsSucceeded = (op: QueuedOp) =>
+        [...(plan.hardPredecessors.get(op.id) ?? [])].every((dep) => succeeded.has(dep));
+
+      const orderDepsTerminal = (op: QueuedOp) =>
+        [...(plan.orderPredecessors.get(op.id) ?? [])].every((dep) => terminal.has(dep));
+
+      const runSequential = async () => {
+        for (const op of ops) {
+          if (terminal.has(op.id)) continue;
+          if (!hardDepsSucceeded(op)) {
+            markSkipped(op.id);
+            skipHardDependents(op.id);
+            continue;
+          }
+          await runOp(op);
+        }
+      };
+
+      const runSmart = async () => {
+        const pending = new Set(ops.map((op) => op.id));
+        await new Promise<void>((resolve) => {
+          const pump = () => {
+            if (terminal.size >= ops.length) {
+              resolve();
+              return;
+            }
+
+            let launched = false;
+            while (running.size < maxConcurrent) {
+              const ready = ops.find((op) =>
+                pending.has(op.id) && hardDepsSucceeded(op) && orderDepsTerminal(op)
+              );
+              if (!ready) break;
+              pending.delete(ready.id);
+              launched = true;
+              void runOp(ready).then(pump);
+            }
+
+            if (!launched && running.size === 0 && pending.size > 0) {
+              for (const id of [...pending]) {
+                pending.delete(id);
+                markSkipped(id);
+              }
+              resolve();
+            }
+          };
+          pump();
+        });
+      };
 
       try {
-        if (effectiveMode === "parallel") {
-          await Promise.all(ops.map(wrapOp));
-        } else {
-          for (const op of ops) await wrapOp(op);
-        }
+        if (effectiveMode === "sequential") await runSequential();
+        else await runSmart();
       } finally {
         queueRunning = false;
         const queueJobs = jobs.filter(j => !preExistingIds.has(j.id) && j.done);
-        const succeeded = queueJobs.filter(j => j.success).length;
-        const failed    = queueJobs.filter(j => !j.success).length;
-        queueRunStats = { total: ops.length, completed: ops.length, succeeded, failed };
         for (const j of queueJobs.filter(j => j.success)) {
           const id = j.id;
           setTimeout(() => { jobs = jobs.filter(x => x.id !== id); }, 5000);
         }
+        queueRunStats = {
+          total: ops.length,
+          completed: terminal.size,
+          succeeded: succeeded.size,
+          failed: failed.size,
+          skipped: skipped.size,
+          running: 0,
+          mode: effectiveMode,
+        };
         setTimeout(() => { queueRunStats = null; }, 8000);
       }
     },

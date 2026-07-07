@@ -5,6 +5,9 @@
   import { t, tn } from "../../i18n/index.js";
   import type { QueueConflict, QueuedOp, QueuedOpKind } from "../../types/index.js";
 
+  const MAX_VISIBLE_WAVES = 4;
+  const MAX_VISIBLE_WAVE_STEPS = 6;
+
   async function resumeJob(jobId: string, decision: "retry" | "skip" | "abort") {
     app.clearJobPause(jobId);
     await invoke("resume_job", { jobId, decision });
@@ -28,9 +31,7 @@
   const hasConflicts        = $derived(app.queueConflicts.length > 0);
   const hasBlockingConflicts= $derived(blockingConflicts.length > 0);
   const hasQueueWarnings    = $derived(hasConflicts || app.queueHasDependencies);
-  // Parallel is only safe with NO conflicts AND no chained dependencies
-  // (a consumer must wait for the producer that creates its input).
-  const canRunParallel      = $derived(hasQueue && !hasConflicts && !app.queueHasDependencies && !app.queueRunning);
+  const canRunSmart         = $derived(hasQueue && !hasBlockingConflicts && !app.queueRunning);
   // Sequential is safe even with parallel-only conflicts (queue order protects it)
   const canRunSequential    = $derived(hasQueue && !hasBlockingConflicts && !app.queueRunning);
 
@@ -68,6 +69,38 @@
       .filter(n => n > 0)
       .sort((a, b) => a - b);
     return steps.length ? steps.join(", ") : null;
+  }
+
+  function batchLabel(op: QueuedOp): string | null {
+    if (!op.batchId || !op.batchTitle || !op.batchIndex || !op.batchTotal) return null;
+    return t("queue.batch.item", {
+      title: op.batchTitle,
+      index: op.batchIndex,
+      total: op.batchTotal,
+    });
+  }
+
+  function opById(id: string): QueuedOp | undefined {
+    return app.opQueue.find(o => o.id === id);
+  }
+
+  function stepNumberForId(id: string): number {
+    return app.opQueue.findIndex(o => o.id === id) + 1;
+  }
+
+  function waveStepTitle(id: string): string {
+    const op = opById(id);
+    const step = stepNumberForId(id);
+    return op && step > 0 ? `${step}. ${op.title}` : "";
+  }
+
+  function waveStepColor(id: string): string {
+    const op = opById(id);
+    return op ? KIND_COLOR[op.kind] : "var(--accent)";
+  }
+
+  function visiblePlanLevels(): string[][] {
+    return app.queuePlan.levels.slice(0, MAX_VISIBLE_WAVES);
   }
 
   function basename(p: string): string {
@@ -188,23 +221,35 @@
         {/if}
       </button>
 
-      {#if app.jobsPanelOpen && app.opQueue.length > 0}
-        <button
-          class="header-btn header-btn--accent"
-          onclick={() => app.executeQueue("parallel")}
-          disabled={!canRunParallel}
-          title={app.queueHasDependencies ? t("queue.parallelDisabledDeps") : hasConflicts ? t("queue.conflicts.blocking") : t("queue.runParallel")}
-        >{t("queue.runParallel")}</button>
-        <button
-          class="header-btn header-btn--accent"
-          onclick={() => app.executeQueue("sequential")}
-          disabled={!canRunSequential}
-          title={hasBlockingConflicts ? t("queue.conflicts.blocking") : t("queue.runSequential")}
-        >{t("queue.runSequential")}</button>
-        <button class="header-btn" onclick={() => app.clearQueue()}>{t("queue.clearQueue")}</button>
-      {/if}
-      {#if app.jobsPanelOpen && hasJobs}
-        <button class="header-btn" onclick={() => app.clearDoneJobs()}>{t("jobsPanel.clearDone")}</button>
+      {#if app.jobsPanelOpen && (app.opQueue.length > 0 || hasJobs)}
+        <div class="jobs-actions" aria-label="Queue actions">
+          {#if app.opQueue.length > 0}
+            <div class="jobs-run-actions">
+              <button
+                class="header-btn header-btn--primary"
+                onclick={() => app.executeQueue("smart")}
+                disabled={!canRunSmart}
+                title={hasBlockingConflicts ? t("queue.conflicts.blocking") : t("queue.runSmart")}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
+                  <path d="M3 1.8v6.4L8 5 3 1.8z"/>
+                </svg>
+                {t("queue.runSmart")}
+              </button>
+              <button
+                class="header-btn header-btn--secondary"
+                onclick={() => app.executeQueue("sequential")}
+                disabled={!canRunSequential}
+                title={hasBlockingConflicts ? t("queue.conflicts.blocking") : t("queue.runSequential")}
+              >{t("queue.runSequential")}</button>
+            </div>
+            <div class="jobs-action-sep" aria-hidden="true"></div>
+            <button class="header-btn header-btn--danger-ghost" onclick={() => app.clearQueue()}>{t("queue.clearQueue")}</button>
+          {/if}
+          {#if hasJobs}
+            <button class="header-btn header-btn--ghost" onclick={() => app.clearDoneJobs()}>{t("jobsPanel.clearDone")}</button>
+          {/if}
+        </div>
       {/if}
     </div>
 
@@ -230,15 +275,63 @@
                     </svg>
                   {/if}
                   <span class="queue-stat-text">{t("queue.stats.completed", { completed: app.queueRunStats.completed, total: app.queueRunStats.total })}</span>
+                  {#if app.queueRunStats.running > 0}
+                    <span class="stat-running">{t("queue.stats.running", { count: app.queueRunStats.running })}</span>
+                  {/if}
                   {#if app.queueRunStats.succeeded > 0}
                     <span class="stat-ok">✓{app.queueRunStats.succeeded}</span>
                   {/if}
                   {#if app.queueRunStats.failed > 0}
                     <span class="stat-fail">✗{app.queueRunStats.failed}</span>
                   {/if}
+                  {#if app.queueRunStats.skipped > 0}
+                    <span class="stat-skip">↷{app.queueRunStats.skipped}</span>
+                  {/if}
                 </div>
               </div>
             {:else}
+              {#if app.queuePlan.total > 1 && !hasBlockingConflicts}
+                <div class="queue-plan-summary">
+                  <div class="queue-plan-copy">
+                    <strong>{t("queue.smartPlanTitle")}</strong>
+                    <span>{t("queue.smartPlan", {
+                      first: app.queuePlan.firstWave,
+                      total: app.queuePlan.total,
+                      lanes: app.queuePlan.maxConcurrent,
+                    })}</span>
+                  </div>
+                  <div class="queue-wave-map" aria-label={t("queue.wavePlanLabel")}>
+                    {#each visiblePlanLevels() as wave, waveIdx}
+                      <div class="queue-wave">
+                        <span class="queue-wave-label">{t("queue.wave", { n: waveIdx + 1 })}</span>
+                        <div class="queue-wave-steps">
+                          {#each wave.slice(0, MAX_VISIBLE_WAVE_STEPS) as opId}
+                            {#if stepNumberForId(opId) > 0}
+                              <span
+                                class="queue-wave-step"
+                                style:--wave-color={waveStepColor(opId)}
+                                title={waveStepTitle(opId)}
+                              >{stepNumberForId(opId)}</span>
+                            {/if}
+                          {/each}
+                          {#if wave.length > MAX_VISIBLE_WAVE_STEPS}
+                            <span class="queue-wave-more">{t("queue.moreSteps", { count: wave.length - MAX_VISIBLE_WAVE_STEPS })}</span>
+                          {/if}
+                        </div>
+                      </div>
+                      {#if waveIdx < visiblePlanLevels().length - 1}
+                        <span class="queue-wave-arrow" aria-hidden="true">→</span>
+                      {/if}
+                    {/each}
+                    {#if app.queuePlan.levels.length > MAX_VISIBLE_WAVES}
+                      <span class="queue-wave-more queue-wave-more--levels">
+                        {t("queue.moreWaves", { count: app.queuePlan.levels.length - MAX_VISIBLE_WAVES })}
+                      </span>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+
               <!-- Queue cards list -->
               <div class="queue-list" bind:this={queueListEl}>
                 {#each app.opQueue as op, i (op.id)}
@@ -270,7 +363,7 @@
                     </div>
 
                     <!-- Step block: big number + action -->
-                    <div class="op-step" class:op-step--chained={op.dependsOn.length > 0}>
+                    <div class="op-step" class:op-step--chained={op.dependsOn.length > 0} class:op-step--batched={!!op.batchId}>
                       <span class="op-step-num">{i + 1}</span>
                       <span class="op-step-kind">{kindLabel(op.kind)}</span>
                     </div>
@@ -278,6 +371,12 @@
                     <!-- Content -->
                     <div class="op-content">
                       <div class="op-title">{op.title}</div>
+                      {#if batchLabel(op)}
+                        <div class="op-batch" title={op.batchTitle}>
+                          <span class="op-batch-mark" aria-hidden="true"></span>
+                          <span>{batchLabel(op)}</span>
+                        </div>
+                      {/if}
                       {#if dependencyLabel(op)}
                         <div class="op-chain" title={t("queue.parallelDisabledDeps")}>
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -345,7 +444,7 @@
                 {/each}
               </div>
 
-              {#if app.queueHasDependencies}
+              {#if app.queueHasDependencies || app.queuePlan.hasOrderingConstraints}
                 <div class="conflicts-box conflicts-box--dependencies">
                   <div class="conflicts-header">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -363,7 +462,10 @@
                   </div>
                   <div class="conflict-row">
                     <span class="conflict-severity-badge conflict-severity-badge--dependency">{t("queue.conflict.badge.dependency")}</span>
-                    <span class="conflict-text">{t("queue.dependencies.description")}</span>
+                    <span class="conflict-text">{t("queue.dependencies.description", {
+                      dependencies: app.queuePlan.dependencyEdges,
+                      ordered: app.queuePlan.orderingEdges,
+                    })}</span>
                   </div>
                 </div>
               {/if}
@@ -550,8 +652,8 @@
     align-items: center;
     height: 32px;
     flex-shrink: 0;
-    padding: 0 8px 0 0;
-    gap: 4px;
+    padding: 0 7px 0 0;
+    gap: 6px;
     overflow: hidden;
   }
 
@@ -609,26 +711,90 @@
   .badge--queue { background: #8b5cf6; }
   .badge--warn  { background: #f59e0b; }
 
-  .header-btn {
+  .jobs-actions {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
     flex-shrink: 0;
-    padding: 2px 7px;
+  }
+
+  .jobs-run-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    padding: 2px;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--surface-alt) 82%, transparent);
+    border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  }
+
+  .jobs-action-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--line);
+    margin: 0 1px;
+    flex-shrink: 0;
+  }
+
+  .header-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    flex-shrink: 0;
+    min-height: 22px;
+    padding: 3px 8px;
     background: none;
     border: 1px solid var(--line-strong);
-    border-radius: 4px;
+    border-radius: 5px;
     cursor: pointer;
     font-size: 11px;
+    font-weight: 650;
     color: var(--text-muted);
-    transition: background 0.1s, color 0.1s;
+    transition: background 0.1s, color 0.1s, border-color 0.1s, box-shadow 0.1s;
     white-space: nowrap;
 
     &:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
     &:disabled { opacity: 0.4; cursor: not-allowed; }
   }
 
-  .header-btn--accent {
-    border-color: var(--accent);
+  .header-btn--primary {
+    background: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 82%, #000);
+    color: #fff;
+    box-shadow: 0 1px 5px color-mix(in srgb, var(--accent) 26%, transparent);
+
+    &:hover:not(:disabled) {
+      background: var(--accent-light);
+      border-color: var(--accent-light);
+      color: #fff;
+    }
+  }
+
+  .header-btn--secondary {
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 44%, var(--line));
     color: var(--accent);
     &:hover:not(:disabled) { background: var(--accent-soft); }
+  }
+
+  .header-btn--ghost {
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .header-btn--danger-ghost {
+    border-color: color-mix(in srgb, var(--error, #ef4444) 24%, transparent);
+    color: color-mix(in srgb, var(--error, #ef4444) 70%, var(--text-muted));
+    background: color-mix(in srgb, var(--error, #ef4444) 6%, transparent);
+
+    &:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--error, #ef4444) 12%, transparent);
+      border-color: color-mix(in srgb, var(--error, #ef4444) 38%, transparent);
+      color: var(--error, #ef4444);
+    }
   }
 
   /* ── Body ── */
@@ -663,6 +829,109 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .queue-plan-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    background:
+      radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 36%),
+      linear-gradient(135deg, color-mix(in srgb, var(--accent) 9%, var(--surface-alt)), var(--surface-alt));
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+    color: var(--text-muted);
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+
+  .queue-plan-copy {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    flex-wrap: wrap;
+
+    strong {
+      color: var(--text);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+  }
+
+  .queue-wave-map {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    overflow-x: auto;
+    padding-bottom: 1px;
+    scrollbar-width: thin;
+  }
+
+  .queue-wave {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    padding: 5px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--surface) 82%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--line));
+  }
+
+  .queue-wave-label {
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .queue-wave-steps {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .queue-wave-step {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 19px;
+    height: 19px;
+    border-radius: 999px;
+    color: color-mix(in srgb, var(--wave-color) 82%, var(--text));
+    background: color-mix(in srgb, var(--wave-color) 13%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--wave-color) 38%, transparent);
+    font-size: 10px;
+    font-weight: 850;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .queue-wave-arrow {
+    flex-shrink: 0;
+    color: color-mix(in srgb, var(--accent) 58%, var(--text-muted));
+    font-size: 13px;
+    font-weight: 800;
+    opacity: 0.82;
+  }
+
+  .queue-wave-more {
+    flex-shrink: 0;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-muted) 9%, transparent);
+    color: var(--text-muted);
+    font-size: 9.5px;
+    font-weight: 750;
+    white-space: nowrap;
+  }
+
+  .queue-wave-more--levels {
+    border: 1px dashed color-mix(in srgb, var(--accent) 32%, var(--line));
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
   }
 
   .queue-card {
@@ -763,6 +1032,10 @@
     }
   }
 
+  .op-step--batched {
+    box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--kind-color) 42%, transparent);
+  }
+
   .op-content {
     flex: 1;
     min-width: 0;
@@ -778,6 +1051,37 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .op-batch {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    align-self: flex-start;
+    max-width: 100%;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    color: color-mix(in srgb, var(--kind-color) 72%, var(--text));
+    background:
+      linear-gradient(90deg,
+        color-mix(in srgb, var(--kind-color) 14%, transparent),
+        color-mix(in srgb, var(--kind-color) 6%, transparent));
+    border: 1px solid color-mix(in srgb, var(--kind-color) 24%, transparent);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .op-batch-mark {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--kind-color);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--kind-color) 14%, transparent);
+    flex-shrink: 0;
   }
 
   /* Chain indicator: clearly ties this op to an earlier step */
@@ -836,28 +1140,40 @@
   .op-controls {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
     flex-shrink: 0;
-    padding-right: 2px;
+    padding-right: 1px;
   }
 
   .icon-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 3px;
-    background: none;
-    border: none;
+    width: 22px;
+    height: 20px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--surface) 72%, transparent);
+    border: 1px solid transparent;
     cursor: pointer;
     color: var(--text-muted);
     padding: 0;
-    transition: background 0.1s, color 0.1s;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
 
-    &:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
+    &:hover:not(:disabled) {
+      background: var(--surface-hover);
+      border-color: var(--line);
+      color: var(--text);
+    }
     &:disabled { opacity: 0.25; cursor: default; }
-    &.icon-btn--remove:hover:not(:disabled) { color: var(--error, #ef4444); background: color-mix(in srgb, var(--error, #ef4444) 10%, transparent); }
+    &.icon-btn--remove {
+      color: color-mix(in srgb, var(--error, #ef4444) 68%, var(--text-muted));
+      background: color-mix(in srgb, var(--error, #ef4444) 5%, transparent);
+    }
+    &.icon-btn--remove:hover:not(:disabled) {
+      color: var(--error, #ef4444);
+      border-color: color-mix(in srgb, var(--error, #ef4444) 25%, transparent);
+      background: color-mix(in srgb, var(--error, #ef4444) 11%, transparent);
+    }
   }
 
   /* ── Conflicts ── */
@@ -1205,21 +1521,26 @@
   .queue-stats-view {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 4px 0;
+    gap: 7px;
+    padding: 8px 9px;
+    border-radius: 8px;
+    background:
+      radial-gradient(circle at 15% -20%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 48%),
+      var(--surface-alt);
+    border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
   }
 
   .queue-progress-track {
-    height: 6px;
-    background: var(--line-strong);
-    border-radius: 3px;
+    height: 7px;
+    background: color-mix(in srgb, var(--line-strong) 78%, transparent);
+    border-radius: 999px;
     overflow: hidden;
   }
 
   .queue-progress-fill {
     height: 100%;
-    background: var(--accent);
-    border-radius: 3px;
+    background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 74%, #fff));
+    border-radius: 999px;
     transition: width 0.4s ease;
   }
 
@@ -1235,4 +1556,14 @@
 
   .stat-ok   { font-size: 11px; font-weight: 700; color: var(--success, #16a34a); }
   .stat-fail { font-size: 11px; font-weight: 700; color: var(--error, #ef4444); }
+  .stat-skip { font-size: 11px; font-weight: 700; color: #b45309; }
+  .stat-running {
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 750;
+    white-space: nowrap;
+  }
 </style>

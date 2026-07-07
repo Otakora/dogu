@@ -10,7 +10,7 @@
 </script>
 
 {#if app.settingsOpen}
-  <Modal title={t("settingsDialog.title")} width="440px" onclose={() => app.closeSettings()}>
+  <Modal title={t("settingsDialog.title")} width="520px" onclose={() => app.closeSettings()}>
     {#snippet children()}
       <div class="settings-body">
 
@@ -153,6 +153,44 @@
           </div>
         </div>
 
+        <!-- Queue -->
+        <div class="setting-group">
+          <div class="setting-label">{t("settingsDialog.queue")}</div>
+          <div class="queue-card">
+            <div class="setting-row setting-row--top">
+              <div class="setting-name-block">
+                <span class="setting-name">{t("settingsDialog.queueMaxConcurrent")}</span>
+                <span class="setting-hint">{t("settingsDialog.queueMaxConcurrentHint")}</span>
+              </div>
+              <span class="queue-badge">{t("settingsDialog.queueMaxConcurrentValue", { count: app.queueMaxConcurrent })}</span>
+            </div>
+            <div class="queue-slider-row">
+              <input
+                type="range"
+                min="1"
+                max="6"
+                step="1"
+                value={app.queueMaxConcurrent}
+                oninput={(e) => app.updateSettings({ queueMaxConcurrent: parseInt((e.target as HTMLInputElement).value) || 3 })}
+                class="range-input range-input--wide"
+                aria-label={t("settingsDialog.queueMaxConcurrent")}
+              />
+              <input
+                type="number"
+                min="1"
+                max="6"
+                class="number-input"
+                value={app.queueMaxConcurrent}
+                oninput={(e) => app.updateSettings({ queueMaxConcurrent: parseInt((e.target as HTMLInputElement).value) || 3 })}
+                aria-label={t("settingsDialog.queueMaxConcurrent")}
+              />
+            </div>
+            <div class="queue-scale" aria-hidden="true">
+              <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span>
+            </div>
+          </div>
+        </div>
+
         <!-- Weight / summary -->
         <div class="setting-group">
           <div class="setting-label">{t("settingsDialog.properties")}</div>
@@ -235,6 +273,10 @@
     min-height: 28px;
   }
 
+  .setting-row--top {
+    align-items: flex-start;
+  }
+
   .setting-name {
     font-size: 13px;
     color: var(--text);
@@ -293,6 +335,11 @@
     accent-color: var(--accent);
   }
 
+  .range-input--wide {
+    width: 100%;
+    min-width: 160px;
+  }
+
   .range-val {
     font-size: 12px;
     color: var(--text-muted);
@@ -330,6 +377,48 @@
     font: inherit;
     font-size: 13px;
     text-align: right;
+  }
+
+  .queue-card {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 10px 11px;
+    border-radius: 9px;
+    background:
+      radial-gradient(circle at 8% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 38%),
+      linear-gradient(135deg, color-mix(in srgb, var(--accent) 7%, var(--surface-alt)), var(--surface-alt));
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  }
+
+  .queue-badge {
+    flex-shrink: 0;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+    font-size: 11px;
+    font-weight: 750;
+    white-space: nowrap;
+  }
+
+  .queue-slider-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 64px;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .queue-scale {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 4px;
+    color: var(--text-subtle);
+    font-size: 10px;
+    font-weight: 700;
+    padding: 0 72px 0 2px;
+    text-align: center;
   }
 
   .footer-left {

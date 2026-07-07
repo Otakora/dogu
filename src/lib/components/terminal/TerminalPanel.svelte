@@ -83,20 +83,14 @@
   });
 
   // ── Color sync: exact CWD match against browser tabs ─────
-  // Only colors the terminal tab when a content tab is browsing
-  // the exact same directory — no parent/child fuzzy matching.
+  // Use every browser tab, not only the focused pane. This keeps terminal
+  // colors stable in split view while still prioritising the focused tab.
   function terminalTabColor(cwd: string | null): string | null {
     if (!cwd) return null;
     const norm = (p: string) => p.replace(/[/\\]+$/, "").toLowerCase();
     const ncwd = norm(cwd);
-    // Prefer the active browser tab when it matches exactly
-    const active = app.tabs[app.activeTabIdx];
-    if (active?.currentPath && norm(active.currentPath) === ncwd) return active.color;
-    // Fall back to any other tab with an exact path match
-    for (const tab of app.tabs) {
-      if (tab.currentPath && norm(tab.currentPath) === ncwd) return tab.color;
-    }
-    return null;
+    const matches = app.allTabHighlights.filter(tab => tab.path && norm(tab.path) === ncwd);
+    return matches.find(tab => tab.isActive)?.color ?? matches[0]?.color ?? null;
   }
 
   // ── Resize ────────────────────────────────────────────────
@@ -298,7 +292,7 @@
 
       <!-- New tab (left-click = default, right-click = shell picker) -->
       <button
-        class="term-hdr-btn"
+        class="term-hdr-btn term-hdr-btn--primary"
         title={t("terminal.newTerminal")}
         aria-label={t("terminal.newTerminal")}
         onclick={() => addTab()}
@@ -311,15 +305,15 @@
 
       <div class="term-hdr-sep"></div>
 
-      <!-- Minimize -->
+      <!-- Hide panel; terminal sessions stay alive in the background. -->
       <button
-        class="term-hdr-btn"
-        title={t("terminal.minimize")}
-        aria-label={t("terminal.minimize")}
+        class="term-hdr-btn term-hdr-btn--quiet"
+        title={t("terminal.hidePanel")}
+        aria-label={t("terminal.hidePanel")}
         onclick={() => app.closeTerminalPanel()}
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="5" y1="12" x2="19" y2="12"/>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </button>
     </div>
@@ -341,6 +335,39 @@
         </div>
       {/if}
     </div>
+  </div>
+{:else if app.terminalTabs.length > 0}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="term-collapsed"
+    role="button"
+    tabindex="0"
+    title={t("terminal.showPanel")}
+    onclick={() => app.openTerminalPanel()}
+    onkeydown={(e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        app.openTerminalPanel();
+      }
+    }}
+  >
+    <span class="term-collapsed-label">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+      </svg>
+      {t("terminal.panel")}
+    </span>
+    <span class="term-collapsed-count">
+      {app.terminalTabs.length}
+      {app.terminalTabs.length === 1 ? t("terminal.session") : t("terminal.sessions")}
+    </span>
+    <span class="term-collapsed-active">{app.terminalTabs.find(tab => tab.id === app.activeTerminalId)?.title ?? app.terminalTabs[0]?.title}</span>
+    <span class="term-collapsed-action">
+      {t("terminal.showPanel")}
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+        <polyline points="18 15 12 9 6 15" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </span>
   </div>
 {/if}
 
@@ -376,7 +403,7 @@
   .term-header {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: 3px;
     height: 30px;
     padding: 0 6px;
     background: var(--surface);
@@ -434,6 +461,10 @@
     &.term-tab--active {
       background: #0d0d0d;
       color: #cccccc;
+      font-weight: 650;
+      box-shadow:
+        inset 0 1px 0 color-mix(in srgb, var(--tt-color, var(--accent)) 26%, transparent),
+        inset 0 -10px 18px color-mix(in srgb, var(--tt-color, var(--accent)) 7%, transparent);
     }
 
     &.term-tab--dragging {
@@ -464,6 +495,74 @@
     height: 7px;
     border-radius: 50%;
     opacity: 0.8;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tt-color) 12%, transparent);
+  }
+
+  .term-collapsed {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 30px;
+    padding: 0 10px;
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent),
+      var(--surface);
+    border-top: 1px solid var(--line);
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+
+    &:hover,
+    &:focus-visible {
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--accent) 11%, transparent), transparent),
+        var(--surface-hover);
+      color: var(--text);
+      outline: none;
+    }
+  }
+
+  .term-collapsed-label,
+  .term-collapsed-count,
+  .term-collapsed-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 750;
+    text-transform: uppercase;
+    letter-spacing: 0.055em;
+  }
+
+  .term-collapsed-label {
+    color: var(--accent);
+  }
+
+  .term-collapsed-count {
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+    color: color-mix(in srgb, var(--accent) 82%, var(--text));
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  .term-collapsed-active {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .term-collapsed-action {
+    color: var(--text-subtle);
   }
 
   .term-tab-title {
@@ -508,7 +607,7 @@
     height: 16px;
     background: var(--line);
     flex-shrink: 0;
-    margin: 0 3px;
+    margin: 0 2px;
   }
 
   .term-hdr-btn {
@@ -519,12 +618,38 @@
     align-items: center;
     justify-content: center;
     background: none;
-    border: none;
+    border: 1px solid transparent;
     color: var(--text-muted);
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
-    transition: background 0.1s, color 0.1s;
-    &:hover { background: var(--surface-hover); color: var(--text); }
+    transition: background 0.1s, color 0.1s, border-color 0.1s, box-shadow 0.1s;
+    &:hover {
+      background: var(--surface-hover);
+      border-color: var(--line);
+      color: var(--text);
+    }
+  }
+
+  .term-hdr-btn--primary {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+    color: var(--accent);
+
+    &:hover {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+      color: var(--accent);
+      box-shadow: 0 1px 5px color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+  }
+
+  .term-hdr-btn--quiet {
+    opacity: 0.82;
+
+    &:hover {
+      opacity: 1;
+      color: var(--text-muted);
+    }
   }
 
   .term-content {

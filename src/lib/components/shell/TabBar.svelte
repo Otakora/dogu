@@ -208,6 +208,7 @@
 
 <div
   class="tab-bar"
+  class:tab-bar--pane-focused={pane.isFocused}
   class:tab-bar--drop-target={foreignDrop !== null}
   data-pane-idx={pane.paneIdx}
   role="tablist"
@@ -255,18 +256,18 @@
         <div class="drop-indicator" aria-hidden="true"></div>
       {/if}
     {/each}
-  </div>
 
-  <button
-    class="tab-add"
-    aria-label={t("tabs.addTab")}
-    title={t("tabs.addTab")}
-    onclick={() => pane.addTab()}
-  >
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-      <path d="M7 1.5V12.5M1.5 7H12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-    </svg>
-  </button>
+    <button
+      class="tab-add"
+      aria-label={t("tabs.addTab")}
+      title={t("tabs.addTab")}
+      onclick={() => pane.addTab()}
+    >
+      <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+        <path d="M7 1.5V12.5M1.5 7H12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
 </div>
 
 {#if contextMenu}
@@ -288,7 +289,13 @@
     padding: 0 4px 0 0;
     flex-shrink: 0;
     overflow: hidden;
-    transition: box-shadow 0.15s;
+    transition: background 0.15s, box-shadow 0.15s;
+  }
+
+  .tab-bar--pane-focused {
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent 80%),
+      var(--surface);
   }
 
   /* Visual hint when a foreign tab is being dragged over this bar */
@@ -351,6 +358,19 @@
       border-bottom-color: var(--tab-color);
     }
 
+    .tab-bar--pane-focused &.active {
+      box-shadow:
+        inset 0 1px 0 color-mix(in srgb, var(--tab-color) 22%, transparent),
+        inset 0 -12px 20px color-mix(in srgb, var(--tab-color) 7%, transparent);
+      font-weight: 650;
+    }
+
+    .tab-bar:not(.tab-bar--pane-focused) &.active {
+      background: color-mix(in srgb, var(--tab-color) 5%, var(--surface));
+      color: var(--text-muted);
+      border-bottom-color: color-mix(in srgb, var(--tab-color) 55%, transparent);
+    }
+
     &.dragging {
       opacity: 0.4;
       cursor: grabbing;
@@ -409,19 +429,30 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 100%;
-    background: none;
-    border: none;
-    border-left: 1px solid transparent;
+    width: 36px;
+    min-width: 36px;
+    max-width: 36px;
+    height: calc(100% - 5px);
+    align-self: flex-end;
+    background: color-mix(in srgb, var(--surface-alt) 70%, transparent);
+    border: 1px solid var(--line);
+    border-bottom-color: transparent;
+    border-radius: 7px 7px 0 0;
     cursor: pointer;
     color: var(--text-muted);
-    transition: background 0.1s, color 0.1s;
-    margin-left: 2px;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+    margin-left: 4px;
+    margin-right: 4px;
 
     &:hover {
       background: var(--surface-hover);
+      border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+      border-bottom-color: transparent;
       color: var(--text);
+    }
+
+    .tab-bar--pane-focused & {
+      color: color-mix(in srgb, var(--accent) 72%, var(--text-muted));
     }
   }
 </style>

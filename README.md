@@ -2,8 +2,8 @@
   <img src="assets/Dogu-logo.png" alt="Dogu" width="280" />
 
   <h3>Dogu</h3>
-  <p><strong>A dual-pane file workbench for local, remote and queued file operations.</strong></p>
-  <p><em>Dōgu / 道具 means "tool" in Japanese: an instrument built to make practical work feel precise.</em></p>
+  <p><strong>A practical file workbench for local files, remotes and queued operations.</strong></p>
+  <p><em>Dōgu / 道具 means "tool" in Japanese.</em></p>
 
   <p>
     <a href="#english">English</a> ·
@@ -17,161 +17,183 @@
 
 ## English
 
-### What Dogu Is
+### What is Dogu?
 
-Dogu is a desktop file manager built around a dual-pane workflow. It combines local browsing, remote connections, archive handling, disc-image utilities and a smart operation queue in one interface.
+Dogu is a desktop file manager with two panes, remote connections and a queue that understands more than "do this later".
 
-The project is especially focused on workflows where file operations depend on one another: extracting archives, seeing the future output as ghost files, converting those files, moving the results, generating playlists and sending data to remote locations without having to wait manually between every step.
+It is built for the kind of file work that usually gets messy: extracting archives, moving things between machines, converting disc images, preparing multi-disc playlists, cleaning old files and chaining several steps without babysitting every folder by hand.
 
-### Development Status
+It started with ROM collection maintenance in mind, but most of the app behaves like a general-purpose file explorer with extra tools for archive and disc-image workflows.
 
-This README describes the current `dev` branch, which is ahead of `main` while Dogu evolves toward the next stable baseline.
+### A quick safety note ⚠️
 
-Dogu is under active development. It already performs real file operations, including destructive ones such as move, delete, overwrite, archive cleanup and source removal after conversion. Please use it carefully, especially with valuable data, remote storage or large batch operations.
+Dogu is in active development and it performs real operations on real files. Some options can delete originals, overwrite files, move folders or clean up sources after a conversion.
 
-Recommended safety habits while Dogu is evolving:
+Please use it like a power tool:
 
-- Test new workflows on disposable folders before using them on important collections.
-- Keep backups of data you cannot easily recreate.
-- Review queued operations before starting them, especially when delete-originals or overwrite options are enabled.
-- Treat ghost files and queued predictions as previews of planned work, not as a replacement for backups.
+- Try new workflows on test folders first.
+- Keep backups of anything important.
+- Review the queue before running destructive batches.
+- Treat ghost files as a preview of planned work, not as a backup or guarantee.
 
-### Main Capabilities
+### What Dogu is not
 
-#### Dual-Pane Explorer
+Dogu is not a launcher or an emulator frontend. It will not replace LaunchBox, RetroBat, Batocera or similar tools.
 
-- Browse two locations side by side, with independent history, path breadcrumbs and view state.
-- Use local and remote locations in either pane.
-- Copy, move, rename, delete, create files and folders, refresh, inspect properties and open files.
-- Pin favorite locations and browse known folders or local volumes from the sidebar.
-- Inspect local volumes and remote disk usage.
-- Drag files and folders between panels, into folders and onto breadcrumb path segments.
-- Supports local to local, local to remote, remote to local and remote to remote workflows.
-- Dragging onto queued ghost trees is supported through queued operations.
-- Uses conflict-aware names and visual feedback for planned operations.
+The goal is earlier in the pipeline: Dogu helps you prepare, move, convert and organize the files before they reach whatever frontend or emulator you actually use.
 
-#### Remote Connections
+### The everyday explorer bits 🧭
 
-- Manage remote connection profiles from the app.
-- Supported remote backends include SSH/SFTP, SCP-compatible SSH transfers, FTP/FTPS and SMB.
-- Browse remote directories, inspect remote disk usage and run remote-capable file operations.
-- Remote transfer preflights can warn, pause, skip or abort depending on the configured policy.
-- Remote terminals are available for SSH-style profiles.
+Dogu gives you a familiar two-pane file workflow:
 
-#### Smart Queue
+- Browse two locations side by side.
+- Use local folders or connected remotes in either pane.
+- Copy, move, rename, delete, create, refresh and inspect files.
+- Open files or open them with another app.
+- Pin favorite locations in the sidebar.
+- Browse known folders and local volumes.
+- Use breadcrumbs to jump to parent folders quickly.
+- Drag files and folders between panes, into folders or onto breadcrumb segments.
 
-Dogu's queue is not just a list of commands. It builds a dependency-aware execution plan so compatible work can run in parallel while dependent work waits for the correct previous result.
+Drag and drop supports local and remote combinations where the selected backend and operation allow it. If queue mode is active, planned ghost folders can also be used as part of queued workflows.
 
-Queue features include:
+### Remote locations 🌐
 
-- Queue mode for copy, move, delete, extract, compress, CHD, CSO, XISO, RVZ and M3U operations.
-- Visual job cards with progress, state, dependencies and conflict information.
-- Wave planning with configurable maximum concurrency.
-- Detection of blocking conflicts and parallel-only conflicts.
-- Recoverable job pauses for decisions such as retry, skip or abort.
-- Individual retry for failed jobs.
-- Global retry for all failed jobs.
-- Reordering where dependencies allow it.
-- Cascading removal of dependent ghost entries when queued jobs are removed.
+Dogu can connect to remote storage and use it from the same two-pane interface.
 
-#### Ghost Files And Folders
+Currently supported connection types include:
 
-When queue mode is enabled, Dogu can show planned outputs before they physically exist. These entries are displayed as ghost files or ghost folders.
+- SSH/SFTP.
+- SSH with SCP-style transfer mode.
+- FTP.
+- FTPS.
+- SMB, where the platform backend supports it.
 
-Ghost behavior currently covers:
+Remote support includes browsing, basic file operations, transfers and saved connection profiles. SSH/SFTP profiles can also open a remote terminal when the server allows an interactive shell.
 
-- Copy and move results.
-- Full archive extraction trees.
-- Archive compression outputs.
-- CHD conversion and CHD restoration outputs.
-- CSO, XISO and RVZ treatment outputs.
-- M3U playlist outputs.
-- Delete and cleanup predictions, including struck-through entries for planned removals.
+Disk usage is shown where Dogu can query it reliably. Some backends, such as FTP/FTPS and some SMB setups, may not expose portable free-space information.
 
-Ghost folders are navigable, so later operations can be prepared from content that will be generated by previous queued tasks. This is one of Dogu's central workflow ideas, but it is also an area that receives careful ongoing development because it touches conflict resolution, path remapping and queue dependency planning.
+### The queue is the heart of Dogu ⏳
 
-#### Archives And Compression
+Queue mode lets you prepare work before executing it. That is useful when one task depends on another, such as:
 
-- Extract archives to the current folder, named folders, separate folders or a custom destination.
-- Queue extraction and preview the output tree before execution.
+1. Extract an archive.
+2. Convert the files that will appear after extraction.
+3. Move the converted files somewhere else.
+4. Generate an M3U that points to the final paths.
+5. Delete temporary folders when everything else is done.
+
+Dogu tries to understand those relationships. It builds a plan, detects dependencies, warns about conflicts and runs compatible jobs in parallel when it is safe to do so.
+
+The queue currently supports:
+
+- Copy and move.
+- Delete.
+- Extract archives.
+- Compress files or folders.
+- Convert to CHD and restore from CHD.
+- Convert or restore CSO.
+- Pack or unpack XISO.
+- Convert or restore RVZ.
+- Generate M3U playlists.
+
+Queue tools include retry for one failed job, retry for all failed jobs, configurable concurrency, dependency-aware ordering and recoverable pauses for some errors.
+
+### Ghost files, without the mystery 👻
+
+Ghost files and folders appear only when queue mode is active. They are Dogu's way of saying: "this does not exist yet, but a queued operation is expected to create it".
+
+That makes it possible to prepare later steps before earlier ones have finished. For example, you can queue an extraction, enter the ghost folder it will create, then queue a conversion from files that will exist after extraction.
+
+Ghost predictions currently cover common queued outputs such as:
+
+- Copies and moves.
+- Local archive extraction previews.
+- Compression outputs.
+- CHD conversion and restoration outputs.
+- CSO, XISO and RVZ outputs.
+- M3U playlist files.
+- Planned cleanup or deletion marks.
+
+Remote archives may not always expose their full future contents before execution, because Dogu cannot inspect every remote archive without downloading or staging it first.
+
+### Archives and compression 📦
+
+Dogu can extract archives using bundled 7-Zip support. It can also preview many local archives before extraction and queue the result as ghost content.
+
+Archive workflows include:
+
+- Extract here, extract to a named folder or choose a custom destination.
+- Extract several archives into separate folders.
 - Extract to local or remote destinations.
-- Optionally delete source archives after successful extraction.
-- Compress files and folders to ZIP or 7Z using bundled 7-Zip support.
-- RAR compression is available only when a compatible external RAR/WinRAR installation is detected.
-- Compression supports destination selection, overwrite behavior, compression level and optional source deletion after success.
+- Optionally delete source archives after a successful extraction.
+- Compress to ZIP or 7Z.
+- Choose compression level and conflict behavior.
+- Optionally delete originals after successful compression.
 
-#### Disc-Image Workflows
+RAR extraction is handled through 7-Zip where supported. Dogu does not bundle a RAR compressor. Creating `.rar` files is only available if a compatible external RAR or WinRAR installation is detected.
 
-Dogu includes several ROM/disc-image treatment workflows aimed at collection maintenance.
+### Disc-image tools 💿
 
-Supported CHD workflows:
+Dogu includes a few helpers for disc-image and ROM maintenance.
 
-- Convert supported disc images to CHD.
-- Restore CHD back to disc-image formats.
-- Scan folders for valid disc sets.
-- Handle CUE/BIN sets, including linked BIN files.
-- Choose output naming based on source file, container folder or a custom name.
-- Output to same folder, parent folder, custom local folder or remote destination.
-- Optionally delete original files after success.
-- Optionally delete source subfolders after success.
-- Resolve output-name conflicts predictably.
+CHD workflows:
 
-Supported native image treatments:
+- Convert supported disc images to `.chd`.
+- Restore `.chd` files back to disc images.
+- Scan folders for CUE/BIN and other supported sets.
+- Handle CUE files and their linked BIN files together.
+- Choose output names and destinations.
+- Optionally delete originals after success.
+- Optionally remove source subfolders after success.
 
-- Convert ISO to CSO and restore CSO to ISO.
-- Pack folders or compatible Xbox images to XISO and unpack XISO to folders.
-- Convert GameCube/Wii ISO images to RVZ and restore RVZ to ISO.
-- RVZ can use the native `nod` engine, DolphinTool, or automatic fallback depending on settings.
+Other local disc-image treatments:
 
-Current limitation: CSO, XISO and RVZ treatments are local-only for now.
+- ISO to CSO, and CSO back to ISO.
+- Xbox ISO/folder to XISO, and XISO back to a folder.
+- GameCube/Wii ISO to RVZ, and RVZ back to ISO.
 
-#### M3U Playlist Generation
+CSO, XISO and RVZ operations are local-only right now. RVZ can use Dogu's native `nod` engine, DolphinTool, or automatic fallback depending on settings and available tools.
 
-- Scan folders for multi-disc sets.
-- Generate `.m3u` playlists with relative paths.
-- Preview detected groups and warnings before queueing or running.
-- Generate playlists after queued moves by predicting where files will be when the M3U job runs.
-- Supports queue dependencies so playlist generation waits for required file moves or conversions.
+### M3U playlists 🎵
 
-#### Interface And Settings
+Dogu can scan folders for multi-disc sets and generate `.m3u` playlists with relative paths.
+
+This also works with queued workflows: if previous jobs are moving or creating the disc files, Dogu tries to generate the playlist using the paths those files should have when the M3U job finally runs.
+
+### Settings and interface
+
+Dogu includes:
 
 - Light and dark themes.
-- English and Spanish localization.
-- Configurable font scale and compact UI mode.
-- Configurable default view behavior.
-- Configurable conflict behavior, including overwrite defaults and automatic rename-on-conflict.
-- Configurable queue mode and maximum queue concurrency.
-- Configurable CHD scan depth.
-- Configurable RVZ primary engine, fallback engine and automatic fallback behavior.
-- Tool status checks for bundled or optional helper tools.
-- Integrated terminal panel for local shells and SSH remote sessions.
+- English and Spanish UI text.
+- Font scale and compact mode.
+- Default view preferences.
+- Conflict behavior options.
+- Queue mode and maximum concurrency settings.
+- CHD scan depth settings.
+- RVZ engine and fallback settings.
+- Tool-status checks for bundled or optional helpers.
+- A built-in terminal panel for local shells and supported SSH sessions.
 
-### Bundled And Integrated Tools
+### Bundled and integrated tools
 
-| Tool | Used For | Notes |
+| Tool | Used for | Notes |
 | --- | --- | --- |
 | `chdman` 0.288 | CHD conversion and restoration | Bundled helper from MAME. |
-| 7-Zip 26.01 | Archive extraction and 7Z/ZIP compression | Bundled helper. |
-| `nod` 2.0.0-alpha.9 | RVZ conversion/restoration engine | Compiled into Dogu. |
+| 7-Zip 26.01 | Archive extraction and ZIP/7Z compression | Bundled helper. |
+| `nod` 2.0.0-alpha.9 | RVZ conversion/restoration | Compiled into Dogu. |
 | DolphinTool 2606 | Optional RVZ engine/fallback | Bundled where available and also searched on `PATH`. |
 
 Legal and redistribution details are documented in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [third_party/THIRD-PARTY-LICENSES.md](third_party/THIRD-PARTY-LICENSES.md).
 
-### Technology Stack
-
-- Tauri desktop shell.
-- SvelteKit frontend.
-- Rust backend.
-- TypeScript UI layer.
-- Bundled helper binaries for selected file-processing workflows.
-
 ### Development
 
-Prerequisites:
+Requirements:
 
 - Node.js 20 or newer.
 - Rust stable toolchain.
-- Platform build requirements for Tauri.
+- Platform requirements for Tauri.
 
 Install dependencies:
 
@@ -179,7 +201,7 @@ Install dependencies:
 npm install
 ```
 
-Run Dogu in development mode:
+Run the full Tauri app in development mode:
 
 ```bash
 npm run tauri:dev
@@ -193,24 +215,22 @@ npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-### Building
-
 Build release packages:
 
 ```bash
 npm run tauri:build
 ```
 
-Current packaging focus:
+Packaging notes:
 
-| Platform | Status |
+| Platform | Current status |
 | --- | --- |
 | Windows | NSIS installer builds are supported. |
-| Linux | DEB and Flatpak builds are supported in the automated release flow. |
-| Linux AppImage | Can be built locally, but is not currently the primary official automated artifact. |
-| macOS | Planned, not currently a maintained release target. |
+| Linux | DEB and Flatpak are supported in the automated release flow. |
+| Linux AppImage | Can be built locally in some flows, but is not the primary automated release artifact right now. |
+| macOS | Not currently a maintained release target. |
 
-More detailed build notes live in [docs/building.md](docs/building.md).
+More build details are available in [docs/building.md](docs/building.md).
 
 ---
 
@@ -220,151 +240,173 @@ More detailed build notes live in [docs/building.md](docs/building.md).
 
 ### Qué es Dogu
 
-Dogu es un gestor de archivos de escritorio basado en un flujo de trabajo de dos paneles. Combina navegación local, conexiones remotas, gestión de comprimidos, utilidades para imágenes de disco y una cola inteligente de operaciones dentro de una misma interfaz.
+Dogu es un gestor de archivos de escritorio con dos paneles, conexiones remotas y una cola que entiende algo más que "haz esto luego".
 
-El proyecto está especialmente pensado para flujos donde las operaciones dependen unas de otras: extraer comprimidos, ver los resultados futuros como archivos fantasma, convertir esos archivos, mover los resultados, generar listas M3U y enviar datos a ubicaciones remotas sin tener que esperar manualmente entre cada paso.
+Está pensado para ese trabajo con archivos que suele volverse lioso: extraer comprimidos, mover cosas entre máquinas, convertir imágenes de disco, preparar playlists multidisco, limpiar archivos antiguos y encadenar varios pasos sin tener que vigilar cada carpeta a mano.
 
-### Estado del desarrollo
+Nació pensando en el mantenimiento de colecciones de ROMs, pero gran parte de la app funciona como un explorador de archivos general con herramientas extra para comprimidos e imágenes de disco.
 
-Este README describe la rama `dev` actual, que va por delante de `main` mientras Dogu avanza hacia la siguiente base estable.
+### Nota rápida de seguridad ⚠️
 
-Dogu está en desarrollo activo. Ya ejecuta operaciones reales sobre archivos, incluyendo acciones destructivas como mover, borrar, sobrescribir, eliminar comprimidos tras extraer o eliminar orígenes tras convertir. Úsalo con cuidado, especialmente con datos importantes, almacenamiento remoto o lotes grandes de operaciones.
+Dogu está en desarrollo activo y ejecuta operaciones reales sobre archivos reales. Algunas opciones pueden eliminar originales, sobrescribir archivos, mover carpetas o limpiar orígenes después de una conversión.
 
-Recomendaciones mientras Dogu sigue evolucionando:
+Úsalo como una herramienta potente:
 
-- Prueba flujos nuevos sobre carpetas descartables antes de usarlos sobre colecciones importantes.
-- Mantén copias de seguridad de cualquier dato que no puedas recrear fácilmente.
-- Revisa la cola antes de iniciarla, especialmente si activas eliminar originales o sobrescribir.
-- Trata los archivos fantasma y las predicciones de cola como una vista previa del trabajo planificado, no como sustituto de una copia de seguridad.
+- Prueba flujos nuevos sobre carpetas de prueba.
+- Mantén copias de seguridad de cualquier cosa importante.
+- Revisa la cola antes de ejecutar lotes destructivos.
+- Trata los archivos fantasma como una vista previa del trabajo planificado, no como una copia de seguridad ni una garantía.
 
-### Capacidades principales
+### Lo que Dogu no es
 
-#### Explorador de dos paneles
+Dogu no es un launcher ni un frontend de emulación. No pretende sustituir a LaunchBox, RetroBat, Batocera o herramientas parecidas.
 
-- Navega por dos ubicaciones en paralelo, con historial, migas de pan de ruta y estado de vista independientes.
-- Usa ubicaciones locales y remotas en cualquiera de los paneles.
-- Copia, mueve, renombra, borra, crea archivos y carpetas, actualiza, inspecciona propiedades y abre archivos.
-- Fija ubicaciones favoritas y navega por carpetas conocidas o volúmenes locales desde la barra lateral.
-- Consulta volúmenes locales y uso de disco remoto.
-- Arrastra archivos y carpetas entre paneles, dentro de carpetas y sobre secciones de la barra de ruta.
-- Soporta flujos local a local, local a remoto, remoto a local y remoto a remoto.
-- Permite arrastrar sobre árboles fantasma mediante operaciones encoladas.
-- Usa nombres conscientes de conflictos y feedback visual para operaciones planificadas.
+Su sitio está un paso antes: Dogu ayuda a preparar, mover, convertir y ordenar los archivos antes de que lleguen al frontend o emulador que uses.
 
-#### Conexiones remotas
+### El explorador del día a día 🧭
 
-- Gestiona perfiles de conexión remota desde la aplicación.
-- Los backends remotos incluyen SSH/SFTP, transferencias SSH compatibles con SCP, FTP/FTPS y SMB.
-- Permite navegar directorios remotos, consultar uso de disco remoto y ejecutar operaciones sobre ubicaciones remotas.
-- Las transferencias remotas pueden avisar, pausar, omitir o abortar según la política configurada.
-- Hay terminales remotas disponibles para perfiles de tipo SSH.
+Dogu ofrece un flujo familiar de explorador en dos paneles:
 
-#### Cola inteligente
+- Navega por dos ubicaciones en paralelo.
+- Usa carpetas locales o remotas conectadas en cualquiera de los paneles.
+- Copia, mueve, renombra, borra, crea, actualiza e inspecciona archivos.
+- Abre archivos o ábrelos con otra aplicación.
+- Fija ubicaciones favoritas en la barra lateral.
+- Navega por carpetas conocidas y volúmenes locales.
+- Usa la barra de ruta para saltar rápido a carpetas superiores.
+- Arrastra archivos y carpetas entre paneles, dentro de carpetas o sobre segmentos de la ruta.
 
-La cola de Dogu no es solo una lista de comandos. Construye un plan de ejecución con dependencias para que el trabajo compatible pueda ejecutarse en paralelo mientras las tareas dependientes esperan al resultado correcto.
+El arrastre soporta combinaciones locales y remotas cuando el backend y la operación lo permiten. Si el modo cola está activo, los destinos fantasma también pueden formar parte de flujos encolados.
 
-La cola incluye:
+### Ubicaciones remotas 🌐
 
-- Modo cola para copiar, mover, borrar, extraer, comprimir, CHD, CSO, XISO, RVZ y M3U.
-- Tarjetas visuales con progreso, estado, dependencias e información de conflictos.
-- Planificación por oleadas con concurrencia máxima configurable.
-- Detección de conflictos bloqueantes y conflictos que solo impiden ejecución paralela.
-- Pausas recuperables para decidir si reintentar, omitir o abortar.
-- Reintento individual de tareas fallidas.
-- Reintento global de todas las tareas fallidas.
-- Reordenación cuando las dependencias lo permiten.
-- Eliminación en cascada de fantasmas dependientes al quitar tareas de la cola.
+Dogu puede conectarse a almacenamiento remoto y usarlo desde la misma interfaz de dos paneles.
 
-#### Archivos y carpetas fantasma
+Tipos de conexión soportados actualmente:
 
-Cuando el modo cola está activado, Dogu puede mostrar salidas planificadas antes de que existan físicamente. Estas entradas aparecen como archivos o carpetas fantasma.
+- SSH/SFTP.
+- SSH con modo de transferencia tipo SCP.
+- FTP.
+- FTPS.
+- SMB, cuando el backend de la plataforma lo soporta.
 
-El sistema de fantasmas cubre actualmente:
+El soporte remoto incluye navegación, operaciones básicas, transferencias y perfiles de conexión guardados. Los perfiles SSH/SFTP también pueden abrir un terminal remoto cuando el servidor permite una shell interactiva.
 
-- Resultados de copias y movimientos.
-- Árboles completos de extracción de comprimidos.
+El uso de disco se muestra cuando Dogu puede consultarlo de forma fiable. Algunos backends, como FTP/FTPS y ciertas configuraciones SMB, pueden no ofrecer información portable de espacio libre.
+
+### La cola es el corazón de Dogu ⏳
+
+El modo cola permite preparar trabajo antes de ejecutarlo. Eso viene muy bien cuando una tarea depende de otra, por ejemplo:
+
+1. Extraer un comprimido.
+2. Convertir los archivos que aparecerán tras la extracción.
+3. Mover los archivos convertidos a otra ubicación.
+4. Generar un M3U que apunte a las rutas finales.
+5. Borrar carpetas temporales cuando todo lo anterior haya terminado.
+
+Dogu intenta entender esas relaciones. Construye un plan, detecta dependencias, avisa de conflictos y ejecuta trabajos compatibles en paralelo cuando es seguro hacerlo.
+
+La cola soporta actualmente:
+
+- Copiar y mover.
+- Borrar.
+- Extraer comprimidos.
+- Comprimir archivos o carpetas.
+- Convertir a CHD y restaurar desde CHD.
+- Convertir o restaurar CSO.
+- Empaquetar o desempaquetar XISO.
+- Convertir o restaurar RVZ.
+- Generar playlists M3U.
+
+La cola incluye reintento de una tarea fallida, reintento de todas las fallidas, concurrencia configurable, ordenación por dependencias y pausas recuperables para algunos errores.
+
+### Archivos fantasma, sin misterio 👻
+
+Los archivos y carpetas fantasma solo aparecen cuando el modo cola está activo. Son la forma que tiene Dogu de decir: "esto todavía no existe, pero una operación en cola debería crearlo".
+
+Gracias a eso puedes preparar pasos posteriores antes de que terminen los anteriores. Por ejemplo, puedes encolar una extracción, entrar en la carpeta fantasma que va a crear y preparar una conversión sobre archivos que existirán tras extraer.
+
+Las predicciones fantasma cubren actualmente salidas habituales como:
+
+- Copias y movimientos.
+- Previsualizaciones de extracción de comprimidos locales.
 - Salidas de compresión.
-- Conversión a CHD y restauración desde CHD.
-- Salidas de tratamientos CSO, XISO y RVZ.
-- Listas M3U generadas.
-- Predicciones de borrado y limpieza, incluyendo entradas tachadas cuando está previsto eliminarlas.
+- Conversión y restauración CHD.
+- Salidas CSO, XISO y RVZ.
+- Archivos M3U.
+- Marcas de limpieza o borrado planificado.
 
-Las carpetas fantasma son navegables, por lo que se pueden preparar operaciones posteriores sobre contenido que será generado por tareas previas de la cola. Esta es una de las ideas centrales de Dogu, aunque también es una zona que se sigue desarrollando con especial cuidado porque afecta a conflictos, remapeo de rutas y dependencias de ejecución.
+Los comprimidos remotos no siempre pueden mostrar todo su contenido futuro antes de ejecutarse, porque Dogu no puede inspeccionar cualquier archivo remoto sin descargarlo o prepararlo antes.
 
-#### Comprimidos y compresión
+### Comprimidos y compresión 📦
 
-- Extrae comprimidos en la carpeta actual, en carpetas nombradas, en carpetas separadas o en un destino personalizado.
-- Permite encolar extracciones y previsualizar el árbol de salida antes de ejecutar.
-- Extrae hacia destinos locales o remotos.
-- Puede eliminar los comprimidos de origen tras una extracción correcta.
-- Comprime archivos y carpetas a ZIP o 7Z usando soporte integrado de 7-Zip.
-- La compresión RAR solo está disponible si Dogu detecta una instalación externa compatible de RAR/WinRAR.
-- La compresión soporta selección de destino, comportamiento ante sobrescritura, nivel de compresión y eliminación opcional de orígenes tras completarse.
+Dogu puede extraer comprimidos usando soporte integrado de 7-Zip. También puede previsualizar muchos comprimidos locales antes de extraerlos y encolar el resultado como contenido fantasma.
 
-#### Flujos de imágenes de disco
+Flujos con comprimidos:
 
-Dogu incluye varios tratamientos de ROMs e imágenes de disco orientados al mantenimiento de colecciones.
+- Extraer aquí, extraer a una carpeta con nombre o elegir un destino personalizado.
+- Extraer varios comprimidos en carpetas separadas.
+- Extraer a destinos locales o remotos.
+- Eliminar los comprimidos de origen tras una extracción correcta.
+- Comprimir a ZIP o 7Z.
+- Elegir nivel de compresión y comportamiento ante conflictos.
+- Eliminar originales después de una compresión correcta.
 
-Flujos CHD soportados:
+La extracción RAR se gestiona mediante 7-Zip cuando está soportada. Dogu no incluye un compresor RAR. Crear archivos `.rar` solo está disponible si se detecta una instalación externa compatible de RAR o WinRAR.
 
-- Convertir imágenes de disco compatibles a CHD.
-- Restaurar CHD a formatos de imagen de disco.
-- Escanear carpetas buscando conjuntos de disco válidos.
-- Gestionar conjuntos CUE/BIN, incluyendo BIN enlazados desde CUE.
-- Elegir nombres de salida según archivo origen, carpeta contenedora o nombre personalizado.
-- Sacar resultados en la misma carpeta, carpeta superior, carpeta local personalizada o destino remoto.
+### Herramientas de imágenes de disco 💿
+
+Dogu incluye algunas utilidades para mantenimiento de ROMs e imágenes de disco.
+
+Flujos CHD:
+
+- Convertir imágenes de disco compatibles a `.chd`.
+- Restaurar archivos `.chd` a imágenes de disco.
+- Escanear carpetas buscando conjuntos CUE/BIN y otros formatos soportados.
+- Tratar archivos CUE y sus BIN enlazados como un conjunto.
+- Elegir nombres y destinos de salida.
 - Eliminar originales opcionalmente tras completar con éxito.
 - Eliminar subcarpetas de origen opcionalmente tras completar con éxito.
-- Resolver conflictos de nombre de forma predecible.
 
-Tratamientos nativos soportados:
+Otros tratamientos locales:
 
-- Convertir ISO a CSO y restaurar CSO a ISO.
-- Empaquetar carpetas o imágenes Xbox compatibles a XISO y desempaquetar XISO a carpetas.
-- Convertir ISO de GameCube/Wii a RVZ y restaurar RVZ a ISO.
-- RVZ puede usar el motor nativo `nod`, DolphinTool o fallback automático según la configuración.
+- ISO a CSO, y CSO de vuelta a ISO.
+- ISO/carpeta Xbox a XISO, y XISO de vuelta a carpeta.
+- ISO de GameCube/Wii a RVZ, y RVZ de vuelta a ISO.
 
-Limitación actual: los tratamientos CSO, XISO y RVZ son solo locales por ahora.
+Las operaciones CSO, XISO y RVZ son solo locales por ahora. RVZ puede usar el motor nativo `nod`, DolphinTool o fallback automático según la configuración y las herramientas disponibles.
 
-#### Generación de playlists M3U
+### Playlists M3U 🎵
 
-- Escanea carpetas buscando conjuntos multidisco.
-- Genera listas `.m3u` con rutas relativas.
-- Previsualiza grupos detectados y avisos antes de encolar o ejecutar.
-- Genera playlists después de movimientos encolados prediciendo dónde estarán los archivos cuando se ejecute la tarea M3U.
-- Usa dependencias de cola para que la generación espere a los movimientos o conversiones necesarios.
+Dogu puede escanear carpetas buscando conjuntos multidisco y generar playlists `.m3u` con rutas relativas.
 
-#### Interfaz y ajustes
+También encaja con flujos en cola: si tareas anteriores van a mover o crear los archivos de disco, Dogu intenta generar la playlist usando las rutas que deberían tener cuando por fin se ejecute la tarea M3U.
+
+### Ajustes e interfaz
+
+Dogu incluye:
 
 - Temas claro y oscuro.
-- Internacionalización en inglés y español.
-- Escala de fuente configurable y modo compacto.
-- Comportamiento de vista predeterminada configurable.
-- Comportamiento de conflictos configurable, incluyendo sobrescritura por defecto y renombrado automático ante conflictos.
-- Modo cola y concurrencia máxima de cola configurables.
+- Textos de interfaz en inglés y español.
+- Escala de fuente y modo compacto.
+- Preferencias de vista por defecto.
+- Opciones de comportamiento ante conflictos.
+- Modo cola y concurrencia máxima configurables.
 - Profundidad de escaneo CHD configurable.
-- Motor primario, motor de respaldo y fallback automático para RVZ configurables.
-- Comprobación de estado para herramientas integradas u opcionales.
-- Panel de terminal integrado para shells locales y sesiones remotas SSH.
+- Ajustes de motor y fallback para RVZ.
+- Comprobación de estado de herramientas integradas u opcionales.
+- Panel de terminal integrado para shells locales y sesiones SSH soportadas.
 
 ### Herramientas integradas
 
 | Herramienta | Uso | Notas |
 | --- | --- | --- |
 | `chdman` 0.288 | Conversión y restauración CHD | Herramienta integrada procedente de MAME. |
-| 7-Zip 26.01 | Extracción de comprimidos y compresión 7Z/ZIP | Herramienta integrada. |
-| `nod` 2.0.0-alpha.9 | Motor de conversión/restauración RVZ | Compilado dentro de Dogu. |
+| 7-Zip 26.01 | Extracción de comprimidos y compresión ZIP/7Z | Herramienta integrada. |
+| `nod` 2.0.0-alpha.9 | Conversión/restauración RVZ | Compilado dentro de Dogu. |
 | DolphinTool 2606 | Motor opcional/fallback para RVZ | Integrado cuando está disponible y también buscado en `PATH`. |
 
 Los detalles legales y de redistribución están documentados en [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) y [third_party/THIRD-PARTY-LICENSES.md](third_party/THIRD-PARTY-LICENSES.md).
-
-### Stack técnico
-
-- Tauri como contenedor de escritorio.
-- SvelteKit en el frontend.
-- Rust en el backend.
-- TypeScript en la capa de interfaz.
-- Binarios auxiliares integrados para flujos concretos de procesamiento de archivos.
 
 ### Desarrollo
 
@@ -372,7 +414,7 @@ Requisitos:
 
 - Node.js 20 o superior.
 - Toolchain estable de Rust.
-- Requisitos de sistema necesarios para compilar aplicaciones Tauri.
+- Requisitos de plataforma necesarios para Tauri.
 
 Instalar dependencias:
 
@@ -380,7 +422,7 @@ Instalar dependencias:
 npm install
 ```
 
-Ejecutar Dogu en modo desarrollo:
+Ejecutar la app completa de Tauri en modo desarrollo:
 
 ```bash
 npm run tauri:dev
@@ -394,21 +436,19 @@ npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-### Compilación
-
 Construir paquetes de release:
 
 ```bash
 npm run tauri:build
 ```
 
-Estado actual de empaquetado:
+Notas de empaquetado:
 
-| Plataforma | Estado |
+| Plataforma | Estado actual |
 | --- | --- |
 | Windows | Los instaladores NSIS están soportados. |
 | Linux | DEB y Flatpak están soportados en el flujo automatizado de release. |
-| Linux AppImage | Puede compilarse localmente, pero no es el artefacto automatizado oficial principal ahora mismo. |
-| macOS | Planeado, pero no es actualmente un objetivo de release mantenido. |
+| Linux AppImage | Puede compilarse localmente en algunos flujos, pero ahora mismo no es el artefacto principal de release automatizada. |
+| macOS | No es actualmente un objetivo de release mantenido. |
 
-Hay más notas de compilación en [docs/building.md](docs/building.md).
+Hay más detalles de compilación en [docs/building.md](docs/building.md).

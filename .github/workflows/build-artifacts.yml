@@ -67,7 +67,7 @@ jobs:
       - name: Build Windows artifact
         run: python tools/release.py build-windows
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dogu-windows-x64-${{ needs.verify-version.outputs.version }}
           path: dist/dogu-windows-x64-*-setup.exe
@@ -105,7 +105,7 @@ jobs:
       - name: Build Linux DEB artifact
         run: python3 tools/release.py build-linux-deb
       - name: Upload Linux DEB
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dogu-linux-deb-${{ needs.verify-version.outputs.version }}
           path: dist/dogu-linux-x86_64-*.deb
@@ -144,7 +144,7 @@ jobs:
       - name: Build Linux Flatpak artifact
         run: python3 tools/release.py build-linux-flatpak
       - name: Upload Linux Flatpak
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dogu-linux-flatpak-${{ needs.verify-version.outputs.version }}
           path: dist/dogu-linux-x86_64-*.flatpak
@@ -169,7 +169,7 @@ jobs:
           cd release-artifacts
           sha256sum * > SHA256SUMS.txt
       - name: Upload checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dogu-checksums-${{ needs.verify-version.outputs.version }}
           path: release-artifacts/SHA256SUMS.txt

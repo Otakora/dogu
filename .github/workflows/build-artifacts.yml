@@ -19,7 +19,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verify project version metadata
         id: version
         shell: python
@@ -54,7 +54,7 @@ jobs:
     runs-on: windows-latest
     needs: verify-version
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: verify-version
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -114,7 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: verify-version
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

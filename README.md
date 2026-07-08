@@ -1,321 +1,414 @@
 <div align="center">
+  <img src="assets/Dogu-logo.png" alt="Dogu" width="280" />
 
-<img src="assets/Dogu-logo.png" alt="Dogu" width="280" />
+  <h3>Dogu</h3>
+  <p><strong>A dual-pane file workbench for local, remote and queued file operations.</strong></p>
+  <p><em>Dōgu / 道具 means "tool" in Japanese: an instrument built to make practical work feel precise.</em></p>
 
-### 道具 · A single workbench for the messy work of managing a ROM collection.
-
-*Dōgu (道具) — Japanese for "tool" or "implement".*
-
-[English](#english) · [Español](#español)
-
+  <p>
+    <a href="#english">English</a> ·
+    <a href="#espanol">Español</a>
+  </p>
 </div>
 
 ---
 
+<a id="english"></a>
+
 ## English
 
-### What is Dogu?
+### What Dogu Is
 
-Dogu is a desktop application for **handling the data behind a ROM collection**: moving files
-between machines, keeping an eye on disk space, converting formats, unpacking archives and
-building playlists — all from one window.
+Dogu is a desktop file manager built around a dual-pane workflow. It combines local browsing, remote connections, archive handling, disc-image utilities and a smart operation queue in one interface.
 
-It grew out of a simple frustration: doing this kind of maintenance usually means juggling a
-file explorer, an SFTP client, 7-Zip, a terminal and a couple of home-made `chdman` scripts,
-all open at once. Dogu folds every one of those steps into a single tool so you stop
-alt-tabbing between half a dozen programs to prepare one folder of games.
+The project is especially focused on workflows where file operations depend on one another: extracting archives, seeing the future output as ghost files, converting those files, moving the results, generating playlists and sending data to remote locations without having to wait manually between every step.
 
-### Development status and safety
+### Development Status
 
-Dogu is in active development. It already performs real file operations, remote transfers and
-optional destructive cleanup steps, so treat it as a power tool: test new workflows on copied
-data first, keep backups of anything important and review queued delete / move / "delete
-originals" operations before running them. The app tries to predict conflicts and protect the
-queue, but it should not be your only safety net yet.
+This README describes the current `dev` branch, which is ahead of `main` while Dogu evolves toward the next stable baseline.
 
-### What Dogu is *not*
+Dogu is under active development. It already performs real file operations, including destructive ones such as move, delete, overwrite, archive cleanup and source removal after conversion. Please use it carefully, especially with valuable data, remote storage or large batch operations.
 
-It is **not** a launcher or a frontend. If you want to browse box art and press play — that is
-LaunchBox, RetroBat or Batocera's job. Dogu lives one step earlier in the pipeline: it is the
-place where you *curate, transfer and convert* the files before they ever reach an emulator.
+Recommended safety habits while Dogu is evolving:
 
-| | Frontends (LaunchBox, Batocera…) | **Dogu** |
-|---|---|---|
-| Purpose | Browse and launch games | Move, convert and organize the files |
-| You interact with | Cover art, metadata, emulators | Real files, folders, disks and remotes |
-| The question it answers | *"What do I want to play?"* | *"How do I get these ROMs where they need to be?"* |
+- Test new workflows on disposable folders before using them on important collections.
+- Keep backups of data you cannot easily recreate.
+- Review queued operations before starting them, especially when delete-originals or overwrite options are enabled.
+- Treat ghost files and queued predictions as previews of planned work, not as a replacement for backups.
 
-### What it does
+### Main Capabilities
 
-**📁 Dual-pane file explorer** — Two independent panes side by side, each with its own tabs,
-history and view mode. Drag tabs between panes, edit paths directly, search with `Ctrl+F`, and
-switch between list and grid views. The classic copy / cut / paste / rename / delete you'd
-expect, plus a properties panel. Files and folders can also be dragged between panes, into
-folders or onto breadcrumb segments for quick copy/move operations.
+#### Dual-Pane Explorer
 
-**🌐 Persistent remote connections** — Connect over **SSH/SFTP**, **SCP**, **FTP**, **FTPS**
-and **SMB**. Save connection profiles, keep several sessions open at once and switch between
-them from the sidebar. Transfers work in every direction: local → remote, remote → local and
-remote → remote.
+- Browse two locations side by side, with independent history, path breadcrumbs and view state.
+- Use local and remote locations in either pane.
+- Copy, move, rename, delete, create files and folders, refresh, inspect properties and open files.
+- Pin favorite locations and browse known folders or local volumes from the sidebar.
+- Inspect local volumes and remote disk usage.
+- Drag files and folders between panels, into folders and onto breadcrumb path segments.
+- Supports local to local, local to remote, remote to local and remote to remote workflows.
+- Dragging onto queued ghost trees is supported through queued operations.
+- Uses conflict-aware names and visual feedback for planned operations.
 
-**💾 Space awareness, everywhere** — Local disks *and* SSH remotes show a live free/total usage
-bar in the sidebar. You know at a glance whether that batch of games actually fits before you
-start moving it.
+#### Remote Connections
 
-**🖥️ Built-in terminal** — A real local shell (PowerShell / bash / zsh) and SSH terminals for
-your remotes, each opening at the pane's current path. Resizable, multi-tab, no context switch.
+- Manage remote connection profiles from the app.
+- Supported remote backends include SSH/SFTP, SCP-compatible SSH transfers, FTP/FTPS and SMB.
+- Browse remote directories, inspect remote disk usage and run remote-capable file operations.
+- Remote transfer preflights can warn, pause, skip or abort depending on the configured policy.
+- Remote terminals are available for SSH-style profiles.
 
-**⏳ Smart operation queue** — This is where Dogu earns its keep. Flip on queue mode and your
-copy / move / delete / extract / compress / convert operations stack up instead of firing one by
-one. Before you run them, Dogu **analyzes the whole batch for conflicts** — it compares every
-operation's sources, destinations and deletions and warns you when they collide:
+#### Smart Queue
 
-- 🟥 **Blocking conflicts** — e.g. one operation would delete files another needs as input. The
-  queue won't let you run these in any mode until you fix them.
-- 🟨 **Parallel-only conflicts** — e.g. two operations write to the same folder. Safe if run in
-  order, risky at the same time — so Dogu only offers sequential execution.
+Dogu's queue is not just a list of commands. It builds a dependency-aware execution plan so compatible work can run in parallel while dependent work waits for the correct previous result.
 
-Then you choose: run everything **in parallel** for speed, or **sequentially** for safety, with
-live stats (completed / succeeded / failed) as it goes. It's the difference between babysitting a
-pile of scripts and queueing a night's worth of work in one confident click.
+Queue features include:
 
-The queue also shows **ghost files and folders** for outputs that do not exist yet, so you can
-chain extraction, conversion, playlist generation and transfers before the first operation has
-run. Failed operations can be retried individually, or all failed queue items can be retried in
-one pass after you fix the cause.
+- Queue mode for copy, move, delete, extract, compress, CHD, CSO, XISO, RVZ and M3U operations.
+- Visual job cards with progress, state, dependencies and conflict information.
+- Wave planning with configurable maximum concurrency.
+- Detection of blocking conflicts and parallel-only conflicts.
+- Recoverable job pauses for decisions such as retry, skip or abort.
+- Individual retry for failed jobs.
+- Global retry for all failed jobs.
+- Reordering where dependencies allow it.
+- Cascading removal of dependent ghost entries when queued jobs are removed.
 
-**📦 Archive extraction** — Unpack `.zip`, `.7z`, `.rar` and more, one at a time or in bulk,
-with destination options and a preview. **7-Zip is bundled** — nothing to install.
+#### Ghost Files And Folders
 
-**💿 CHD conversion** — Convert `.cue`, `.gdi`, `.toc`, `.iso` and `.bin+.cue` to `.chd`, and
-restore back out again. **chdman is bundled** too, with a real-time progress log.
+When queue mode is enabled, Dogu can show planned outputs before they physically exist. These entries are displayed as ghost files or ghost folders.
 
-**🎵 M3U playlist generator** — Build `.m3u` playlists from folders or selections, with
-multi-disc detection and grouping by title.
+Ghost behavior currently covers:
 
-### Tech stack
+- Copy and move results.
+- Full archive extraction trees.
+- Archive compression outputs.
+- CHD conversion and CHD restoration outputs.
+- CSO, XISO and RVZ treatment outputs.
+- M3U playlist outputs.
+- Delete and cleanup predictions, including struck-through entries for planned removals.
 
-| Layer | Technology |
-|-------|-----------|
-| Backend | Rust + Tauri v2 |
-| Frontend | Svelte 5 (runes) + TypeScript + Tailwind CSS v4 + Vite 8 |
-| Remote | `remotefs` — SMB / SSH / FTP / FTPS |
-| Bundled tools | chdman v0.288, 7-Zip |
-| Packaging | NSIS (Windows), AppImage / DEB / Flatpak (Linux) |
+Ghost folders are navigable, so later operations can be prepared from content that will be generated by previous queued tasks. This is one of Dogu's central workflow ideas, but it is also an area that receives careful ongoing development because it touches conflict resolution, path remapping and queue dependency planning.
+
+#### Archives And Compression
+
+- Extract archives to the current folder, named folders, separate folders or a custom destination.
+- Queue extraction and preview the output tree before execution.
+- Extract to local or remote destinations.
+- Optionally delete source archives after successful extraction.
+- Compress files and folders to ZIP or 7Z using bundled 7-Zip support.
+- RAR compression is available only when a compatible external RAR/WinRAR installation is detected.
+- Compression supports destination selection, overwrite behavior, compression level and optional source deletion after success.
+
+#### Disc-Image Workflows
+
+Dogu includes several ROM/disc-image treatment workflows aimed at collection maintenance.
+
+Supported CHD workflows:
+
+- Convert supported disc images to CHD.
+- Restore CHD back to disc-image formats.
+- Scan folders for valid disc sets.
+- Handle CUE/BIN sets, including linked BIN files.
+- Choose output naming based on source file, container folder or a custom name.
+- Output to same folder, parent folder, custom local folder or remote destination.
+- Optionally delete original files after success.
+- Optionally delete source subfolders after success.
+- Resolve output-name conflicts predictably.
+
+Supported native image treatments:
+
+- Convert ISO to CSO and restore CSO to ISO.
+- Pack folders or compatible Xbox images to XISO and unpack XISO to folders.
+- Convert GameCube/Wii ISO images to RVZ and restore RVZ to ISO.
+- RVZ can use the native `nod` engine, DolphinTool, or automatic fallback depending on settings.
+
+Current limitation: CSO, XISO and RVZ treatments are local-only for now.
+
+#### M3U Playlist Generation
+
+- Scan folders for multi-disc sets.
+- Generate `.m3u` playlists with relative paths.
+- Preview detected groups and warnings before queueing or running.
+- Generate playlists after queued moves by predicting where files will be when the M3U job runs.
+- Supports queue dependencies so playlist generation waits for required file moves or conversions.
+
+#### Interface And Settings
+
+- Light and dark themes.
+- English and Spanish localization.
+- Configurable font scale and compact UI mode.
+- Configurable default view behavior.
+- Configurable conflict behavior, including overwrite defaults and automatic rename-on-conflict.
+- Configurable queue mode and maximum queue concurrency.
+- Configurable CHD scan depth.
+- Configurable RVZ primary engine, fallback engine and automatic fallback behavior.
+- Tool status checks for bundled or optional helper tools.
+- Integrated terminal panel for local shells and SSH remote sessions.
+
+### Bundled And Integrated Tools
+
+| Tool | Used For | Notes |
+| --- | --- | --- |
+| `chdman` 0.288 | CHD conversion and restoration | Bundled helper from MAME. |
+| 7-Zip 26.01 | Archive extraction and 7Z/ZIP compression | Bundled helper. |
+| `nod` 2.0.0-alpha.9 | RVZ conversion/restoration engine | Compiled into Dogu. |
+| DolphinTool 2606 | Optional RVZ engine/fallback | Bundled where available and also searched on `PATH`. |
+
+Legal and redistribution details are documented in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [third_party/THIRD-PARTY-LICENSES.md](third_party/THIRD-PARTY-LICENSES.md).
+
+### Technology Stack
+
+- Tauri desktop shell.
+- SvelteKit frontend.
+- Rust backend.
+- TypeScript UI layer.
+- Bundled helper binaries for selected file-processing workflows.
 
 ### Development
 
-Requirements: Node.js 20+, Rust stable.
+Prerequisites:
 
-```powershell
+- Node.js 20 or newer.
+- Rust stable toolchain.
+- Platform build requirements for Tauri.
+
+Install dependencies:
+
+```bash
 npm install
+```
+
+Run Dogu in development mode:
+
+```bash
 npm run tauri:dev
 ```
 
-`tauri:dev` starts the Rust backend and the Vite server together; the app window opens
-automatically with frontend hot-reload.
+Useful checks:
 
-To type-check without launching the app:
-
-```powershell
-npm run check          # svelte-check (TypeScript + Svelte)
-cargo check            # Rust (from src-tauri/)
+```bash
+npm run check
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
-
-> `npm run dev` starts **only the frontend** in the browser — Tauri's `invoke()` calls won't
-> work there. It's useful just for iterating on pure styling or components without compiling Rust.
 
 ### Building
 
-Requirements: Node.js 20+, Rust stable, Python 3.12+.
-
-```powershell
-# Windows (run on Windows)
-python tools/release.py build-windows
-```
+Build release packages:
 
 ```bash
-# Linux — AppImage + DEB (run on Linux)
-python3 tools/release.py build-linux-native
-
-# Linux — Flatpak (includes the native build first)
-python3 tools/release.py build-linux-flatpak
+npm run tauri:build
 ```
 
-Artifacts land in `dist/`. Full guide with system dependencies: [docs/building.md](docs/building.md)
+Current packaging focus:
 
-### Bundled third-party tools
+| Platform | Status |
+| --- | --- |
+| Windows | NSIS installer builds are supported. |
+| Linux | DEB and Flatpak builds are supported in the automated release flow. |
+| Linux AppImage | Can be built locally, but is not currently the primary official automated artifact. |
+| macOS | Planned, not currently a maintained release target. |
 
-These binaries ship inside `third_party/` — users don't install anything separately. Their
-license texts travel with the app and are credited in **Settings → Credits & Licenses**.
-
-| Tool | Source | License | Platforms |
-|------|--------|---------|-----------|
-| chdman v0.288 | [MAME](https://mamedev.org/) | GPL-2.0 | Windows, Linux |
-| 7-Zip | [7-zip.org](https://7-zip.org/) | LGPL-2.1 | Windows (`7z`/`7za`), Linux (`7zz`) |
-
-See [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) for the full attribution.
-
-### Target platforms
-
-| Platform | Distribution formats |
-|----------|----------------------|
-| Windows | NSIS installer |
-| Linux | AppImage, DEB, Flatpak |
+More detailed build notes live in [docs/building.md](docs/building.md).
 
 ---
 
+<a id="espanol"></a>
+
 ## Español
 
-### ¿Qué es Dogu?
+### Qué es Dogu
 
-Dogu es una aplicación de escritorio para **tratar los datos que hay detrás de una colección de
-ROMs**: mover archivos entre máquinas, vigilar el espacio en disco, convertir formatos,
-descomprimir y generar listas de reproducción — todo desde una sola ventana.
+Dogu es un gestor de archivos de escritorio basado en un flujo de trabajo de dos paneles. Combina navegación local, conexiones remotas, gestión de comprimidos, utilidades para imágenes de disco y una cola inteligente de operaciones dentro de una misma interfaz.
 
-Nació de una frustración sencilla: este tipo de mantenimiento suele obligarte a hacer malabares
-con un explorador de archivos, un cliente SFTP, 7-Zip, una terminal y un par de scripts caseros
-de `chdman`, todos abiertos a la vez. Dogu reúne cada uno de esos pasos en una única herramienta
-para que dejes de saltar entre media docena de programas solo para preparar una carpeta de juegos.
+El proyecto está especialmente pensado para flujos donde las operaciones dependen unas de otras: extraer comprimidos, ver los resultados futuros como archivos fantasma, convertir esos archivos, mover los resultados, generar listas M3U y enviar datos a ubicaciones remotas sin tener que esperar manualmente entre cada paso.
 
-### Estado de desarrollo y seguridad
+### Estado del desarrollo
 
-Dogu está en desarrollo activo. Ya ejecuta operaciones reales sobre archivos, transferencias
-remotas y limpiezas destructivas opcionales, así que úsalo como una herramienta potente: prueba
-flujos nuevos sobre copias de datos, mantén copias de seguridad de lo importante y revisa las
-operaciones en cola de borrar / mover / "eliminar originales" antes de ejecutarlas. La app intenta
-predecir conflictos y proteger la cola, pero todavía no debería ser tu única red de seguridad.
+Este README describe la rama `dev` actual, que va por delante de `main` mientras Dogu avanza hacia la siguiente base estable.
 
-### Lo que Dogu *no* es
+Dogu está en desarrollo activo. Ya ejecuta operaciones reales sobre archivos, incluyendo acciones destructivas como mover, borrar, sobrescribir, eliminar comprimidos tras extraer o eliminar orígenes tras convertir. Úsalo con cuidado, especialmente con datos importantes, almacenamiento remoto o lotes grandes de operaciones.
 
-**No** es un launcher ni un frontend. Si lo que quieres es ver carátulas y darle a jugar, de eso
-se encargan LaunchBox, RetroBat o Batocera. Dogu vive un paso antes en el proceso: es el lugar
-donde *organizas, transfieres y conviertes* los archivos antes de que lleguen a un emulador.
+Recomendaciones mientras Dogu sigue evolucionando:
 
-| | Frontends (LaunchBox, Batocera…) | **Dogu** |
-|---|---|---|
-| Objetivo | Explorar y lanzar juegos | Mover, convertir y organizar los archivos |
-| Interactúas con | Carátulas, metadatos, emuladores | Archivos, carpetas, discos y remotos reales |
-| Pregunta que responde | *«¿A qué quiero jugar?»* | *«¿Cómo llevo estas ROMs a donde deben estar?»* |
+- Prueba flujos nuevos sobre carpetas descartables antes de usarlos sobre colecciones importantes.
+- Mantén copias de seguridad de cualquier dato que no puedas recrear fácilmente.
+- Revisa la cola antes de iniciarla, especialmente si activas eliminar originales o sobrescribir.
+- Trata los archivos fantasma y las predicciones de cola como una vista previa del trabajo planificado, no como sustituto de una copia de seguridad.
 
-### Qué hace
+### Capacidades principales
 
-**📁 Explorador de doble panel** — Dos paneles independientes lado a lado, cada uno con sus
-propias pestañas, historial y modo de vista. Arrastra pestañas entre paneles, edita rutas
-directamente, busca con `Ctrl+F` y alterna entre vista de lista y cuadrícula. El clásico
-copiar / cortar / pegar / renombrar / eliminar de siempre, más un panel de propiedades. También
-puedes arrastrar archivos y carpetas entre paneles, dentro de carpetas o sobre secciones de la
-barra de ruta para copiar/mover rápidamente.
+#### Explorador de dos paneles
 
-**🌐 Conexiones remotas persistentes** — Conecta por **SSH/SFTP**, **SCP**, **FTP**, **FTPS** y
-**SMB**. Guarda perfiles de conexión, mantén varias sesiones abiertas a la vez y cambia entre
-ellas desde la barra lateral. Las transferencias funcionan en todas las direcciones:
-local → remoto, remoto → local y remoto → remoto.
+- Navega por dos ubicaciones en paralelo, con historial, migas de pan de ruta y estado de vista independientes.
+- Usa ubicaciones locales y remotas en cualquiera de los paneles.
+- Copia, mueve, renombra, borra, crea archivos y carpetas, actualiza, inspecciona propiedades y abre archivos.
+- Fija ubicaciones favoritas y navega por carpetas conocidas o volúmenes locales desde la barra lateral.
+- Consulta volúmenes locales y uso de disco remoto.
+- Arrastra archivos y carpetas entre paneles, dentro de carpetas y sobre secciones de la barra de ruta.
+- Soporta flujos local a local, local a remoto, remoto a local y remoto a remoto.
+- Permite arrastrar sobre árboles fantasma mediante operaciones encoladas.
+- Usa nombres conscientes de conflictos y feedback visual para operaciones planificadas.
 
-**💾 Espacio a la vista, en todas partes** — Los discos locales *y* los remotos SSH muestran una
-barra de uso libre/total en tiempo real en la barra lateral. Sabes de un vistazo si ese lote de
-juegos cabe de verdad antes de empezar a moverlo.
+#### Conexiones remotas
 
-**🖥️ Terminal integrado** — Un shell local real (PowerShell / bash / zsh) y terminales SSH para
-tus remotos, cada uno abriéndose en la ruta actual del panel. Redimensionable, con varias
-pestañas y sin cambiar de aplicación.
+- Gestiona perfiles de conexión remota desde la aplicación.
+- Los backends remotos incluyen SSH/SFTP, transferencias SSH compatibles con SCP, FTP/FTPS y SMB.
+- Permite navegar directorios remotos, consultar uso de disco remoto y ejecutar operaciones sobre ubicaciones remotas.
+- Las transferencias remotas pueden avisar, pausar, omitir o abortar según la política configurada.
+- Hay terminales remotas disponibles para perfiles de tipo SSH.
 
-**⏳ Cola de operaciones inteligente** — Aquí es donde Dogu se gana el sueldo. Activa el modo
-cola y tus operaciones de copia / movimiento / borrado / extracción / compresión / conversión se
-acumulan en lugar de dispararse una a una. Antes de ejecutarlas, Dogu **analiza todo el lote en
-busca de conflictos**: compara los orígenes, destinos y borrados de cada operación y te avisa
-cuando chocan:
+#### Cola inteligente
 
-- 🟥 **Conflictos bloqueantes** — p. ej. una operación borraría archivos que otra necesita como
-  entrada. La cola no te deja ejecutarlos en ningún modo hasta que lo resuelvas.
-- 🟨 **Conflictos solo-en-paralelo** — p. ej. dos operaciones escriben en la misma carpeta.
-  Seguro si se ejecutan en orden, arriesgado a la vez — así que Dogu solo ofrece ejecución secuencial.
+La cola de Dogu no es solo una lista de comandos. Construye un plan de ejecución con dependencias para que el trabajo compatible pueda ejecutarse en paralelo mientras las tareas dependientes esperan al resultado correcto.
 
-Después eliges: ejecutar todo **en paralelo** por velocidad, o **en secuencia** por seguridad, con
-estadísticas en vivo (completadas / correctas / fallidas) sobre la marcha. Es la diferencia entre
-vigilar un montón de scripts y encolar el trabajo de toda una noche en un único clic con confianza.
+La cola incluye:
 
-La cola también muestra **archivos y carpetas fantasma** para salidas que todavía no existen, de
-forma que puedes encadenar extracciones, conversiones, listas M3U y transferencias antes de que
-arranque la primera operación. Las operaciones fallidas se pueden reintentar de forma individual
-o reintentar todas las fallidas en una sola pasada cuando corrijas la causa.
+- Modo cola para copiar, mover, borrar, extraer, comprimir, CHD, CSO, XISO, RVZ y M3U.
+- Tarjetas visuales con progreso, estado, dependencias e información de conflictos.
+- Planificación por oleadas con concurrencia máxima configurable.
+- Detección de conflictos bloqueantes y conflictos que solo impiden ejecución paralela.
+- Pausas recuperables para decidir si reintentar, omitir o abortar.
+- Reintento individual de tareas fallidas.
+- Reintento global de todas las tareas fallidas.
+- Reordenación cuando las dependencias lo permiten.
+- Eliminación en cascada de fantasmas dependientes al quitar tareas de la cola.
 
-**📦 Extracción de comprimidos** — Descomprime `.zip`, `.7z`, `.rar` y más, de uno en uno o en
-masa, con opciones de destino y previsualización. **7-Zip viene integrado** — nada que instalar.
+#### Archivos y carpetas fantasma
 
-**💿 Conversión CHD** — Convierte `.cue`, `.gdi`, `.toc`, `.iso` y `.bin+.cue` a `.chd`, y
-restaura de vuelta. **chdman también viene integrado**, con un log de progreso en tiempo real.
+Cuando el modo cola está activado, Dogu puede mostrar salidas planificadas antes de que existan físicamente. Estas entradas aparecen como archivos o carpetas fantasma.
 
-**🎵 Generador de listas M3U** — Crea listas `.m3u` a partir de carpetas o selecciones, con
-detección de multidisco y agrupación por título.
+El sistema de fantasmas cubre actualmente:
+
+- Resultados de copias y movimientos.
+- Árboles completos de extracción de comprimidos.
+- Salidas de compresión.
+- Conversión a CHD y restauración desde CHD.
+- Salidas de tratamientos CSO, XISO y RVZ.
+- Listas M3U generadas.
+- Predicciones de borrado y limpieza, incluyendo entradas tachadas cuando está previsto eliminarlas.
+
+Las carpetas fantasma son navegables, por lo que se pueden preparar operaciones posteriores sobre contenido que será generado por tareas previas de la cola. Esta es una de las ideas centrales de Dogu, aunque también es una zona que se sigue desarrollando con especial cuidado porque afecta a conflictos, remapeo de rutas y dependencias de ejecución.
+
+#### Comprimidos y compresión
+
+- Extrae comprimidos en la carpeta actual, en carpetas nombradas, en carpetas separadas o en un destino personalizado.
+- Permite encolar extracciones y previsualizar el árbol de salida antes de ejecutar.
+- Extrae hacia destinos locales o remotos.
+- Puede eliminar los comprimidos de origen tras una extracción correcta.
+- Comprime archivos y carpetas a ZIP o 7Z usando soporte integrado de 7-Zip.
+- La compresión RAR solo está disponible si Dogu detecta una instalación externa compatible de RAR/WinRAR.
+- La compresión soporta selección de destino, comportamiento ante sobrescritura, nivel de compresión y eliminación opcional de orígenes tras completarse.
+
+#### Flujos de imágenes de disco
+
+Dogu incluye varios tratamientos de ROMs e imágenes de disco orientados al mantenimiento de colecciones.
+
+Flujos CHD soportados:
+
+- Convertir imágenes de disco compatibles a CHD.
+- Restaurar CHD a formatos de imagen de disco.
+- Escanear carpetas buscando conjuntos de disco válidos.
+- Gestionar conjuntos CUE/BIN, incluyendo BIN enlazados desde CUE.
+- Elegir nombres de salida según archivo origen, carpeta contenedora o nombre personalizado.
+- Sacar resultados en la misma carpeta, carpeta superior, carpeta local personalizada o destino remoto.
+- Eliminar originales opcionalmente tras completar con éxito.
+- Eliminar subcarpetas de origen opcionalmente tras completar con éxito.
+- Resolver conflictos de nombre de forma predecible.
+
+Tratamientos nativos soportados:
+
+- Convertir ISO a CSO y restaurar CSO a ISO.
+- Empaquetar carpetas o imágenes Xbox compatibles a XISO y desempaquetar XISO a carpetas.
+- Convertir ISO de GameCube/Wii a RVZ y restaurar RVZ a ISO.
+- RVZ puede usar el motor nativo `nod`, DolphinTool o fallback automático según la configuración.
+
+Limitación actual: los tratamientos CSO, XISO y RVZ son solo locales por ahora.
+
+#### Generación de playlists M3U
+
+- Escanea carpetas buscando conjuntos multidisco.
+- Genera listas `.m3u` con rutas relativas.
+- Previsualiza grupos detectados y avisos antes de encolar o ejecutar.
+- Genera playlists después de movimientos encolados prediciendo dónde estarán los archivos cuando se ejecute la tarea M3U.
+- Usa dependencias de cola para que la generación espere a los movimientos o conversiones necesarios.
+
+#### Interfaz y ajustes
+
+- Temas claro y oscuro.
+- Internacionalización en inglés y español.
+- Escala de fuente configurable y modo compacto.
+- Comportamiento de vista predeterminada configurable.
+- Comportamiento de conflictos configurable, incluyendo sobrescritura por defecto y renombrado automático ante conflictos.
+- Modo cola y concurrencia máxima de cola configurables.
+- Profundidad de escaneo CHD configurable.
+- Motor primario, motor de respaldo y fallback automático para RVZ configurables.
+- Comprobación de estado para herramientas integradas u opcionales.
+- Panel de terminal integrado para shells locales y sesiones remotas SSH.
+
+### Herramientas integradas
+
+| Herramienta | Uso | Notas |
+| --- | --- | --- |
+| `chdman` 0.288 | Conversión y restauración CHD | Herramienta integrada procedente de MAME. |
+| 7-Zip 26.01 | Extracción de comprimidos y compresión 7Z/ZIP | Herramienta integrada. |
+| `nod` 2.0.0-alpha.9 | Motor de conversión/restauración RVZ | Compilado dentro de Dogu. |
+| DolphinTool 2606 | Motor opcional/fallback para RVZ | Integrado cuando está disponible y también buscado en `PATH`. |
+
+Los detalles legales y de redistribución están documentados en [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) y [third_party/THIRD-PARTY-LICENSES.md](third_party/THIRD-PARTY-LICENSES.md).
 
 ### Stack técnico
 
-| Capa | Tecnología |
-|------|-----------|
-| Backend | Rust + Tauri v2 |
-| Frontend | Svelte 5 (runes) + TypeScript + Tailwind CSS v4 + Vite 8 |
-| Remoto | `remotefs` — SMB / SSH / FTP / FTPS |
-| Herramientas integradas | chdman v0.288, 7-Zip |
-| Empaquetado | NSIS (Windows), AppImage / DEB / Flatpak (Linux) |
+- Tauri como contenedor de escritorio.
+- SvelteKit en el frontend.
+- Rust en el backend.
+- TypeScript en la capa de interfaz.
+- Binarios auxiliares integrados para flujos concretos de procesamiento de archivos.
 
 ### Desarrollo
 
-Requisitos: Node.js 20+, Rust stable.
+Requisitos:
 
-```powershell
+- Node.js 20 o superior.
+- Toolchain estable de Rust.
+- Requisitos de sistema necesarios para compilar aplicaciones Tauri.
+
+Instalar dependencias:
+
+```bash
 npm install
+```
+
+Ejecutar Dogu en modo desarrollo:
+
+```bash
 npm run tauri:dev
 ```
 
-`tauri:dev` arranca el backend Rust y el servidor Vite juntos; la ventana de la app se abre
-automáticamente con hot-reload en el frontend.
+Comprobaciones útiles:
 
-Para verificar tipos sin lanzar la app:
-
-```powershell
-npm run check          # svelte-check (TypeScript + Svelte)
-cargo check            # Rust (desde src-tauri/)
+```bash
+npm run check
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
-
-> `npm run dev` arranca **solo el frontend** en el navegador — los `invoke()` de Tauri no
-> funcionan ahí. Sirve únicamente para iterar en estilos o componentes puros sin compilar Rust.
 
 ### Compilación
 
-Requisitos: Node.js 20+, Rust stable, Python 3.12+.
-
-```powershell
-# Windows (ejecutar en Windows)
-python tools/release.py build-windows
-```
+Construir paquetes de release:
 
 ```bash
-# Linux — AppImage + DEB (ejecutar en Linux)
-python3 tools/release.py build-linux-native
-
-# Linux — Flatpak (incluye antes el build nativo)
-python3 tools/release.py build-linux-flatpak
+npm run tauri:build
 ```
 
-Los artefactos se generan en `dist/`. Guía completa con dependencias de sistema:
-[docs/building.md](docs/building.md)
+Estado actual de empaquetado:
 
-### Herramientas de terceros integradas
+| Plataforma | Estado |
+| --- | --- |
+| Windows | Los instaladores NSIS están soportados. |
+| Linux | DEB y Flatpak están soportados en el flujo automatizado de release. |
+| Linux AppImage | Puede compilarse localmente, pero no es el artefacto automatizado oficial principal ahora mismo. |
+| macOS | Planeado, pero no es actualmente un objetivo de release mantenido. |
 
-Estos binarios se empaquetan dentro de `third_party/` — el usuario no instala nada por separado.
-Sus textos de licencia viajan con la app y se acreditan en **Configuración → Créditos y licencias**.
-
-| Herramienta | Fuente | Licencia | Plataformas |
-|------------|--------|----------|-------------|
-| chdman v0.288 | [MAME](https://mamedev.org/) | GPL-2.0 | Windows, Linux |
-| 7-Zip | [7-zip.org](https://7-zip.org/) | LGPL-2.1 | Windows (`7z`/`7za`), Linux (`7zz`) |
-
-Consulta [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) para la atribución completa.
-
-### Plataformas objetivo
-
-| Plataforma | Formatos de distribución |
-|-----------|--------------------------|
-| Windows | Instalador NSIS |
-| Linux | AppImage, DEB, Flatpak |
+Hay más notas de compilación en [docs/building.md](docs/building.md).

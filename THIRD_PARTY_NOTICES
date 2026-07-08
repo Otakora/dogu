@@ -1,8 +1,8 @@
 THIRD-PARTY NOTICES
 ===================
 
-Dogu bundles the following third-party tools as pre-compiled binaries.
-Their license files are included alongside each binary under third_party/.
+Dogu bundles or integrates the following third-party tools and libraries.
+License files and redistribution notes are included under third_party/.
 
 
 chdman v0.288
@@ -35,3 +35,28 @@ Licenses:
 Full license text (Windows): third_party/7zip/windows/License.txt
 Full license text (Linux):   third_party/7zip/linux/License.txt
 Homepage: https://www.7-zip.org/
+
+
+DolphinTool 2606
+----------------
+Part of the Dolphin Emulator project.
+
+License: GNU General Public License, version 2 or later (GPL-2.0-or-later)
+Used for: optional RVZ conversion/restoration engine and fallback.
+
+Full license text and source-offer details:
+  third_party/THIRD-PARTY-LICENSES.md
+
+Source code and releases: https://github.com/dolphin-emu/dolphin
+
+
+nod v2.0.0-alpha.9
+------------------
+Rust library used as Dogu's native RVZ conversion/restoration engine.
+
+License: MIT OR Apache-2.0
+
+Full license text:
+  third_party/THIRD-PARTY-LICENSES.md
+
+Source code and releases: https://github.com/encounter/nod

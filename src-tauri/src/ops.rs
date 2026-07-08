@@ -374,6 +374,10 @@ pub fn delete_paths(app: &AppHandle, job_id: &str, paths: Vec<PathBuf>) -> Resul
 fn delete_path_with_log(app: &AppHandle, job_id: &str, path: &Path, depth: usize) -> Result<()> {
     let indent = "  ".repeat(depth);
     emit_log(app, job_id, format!("{indent}{}", path.display()))?;
+    if !path.exists() {
+        emit_log(app, job_id, format!("{indent}  omitido: ya no existe"))?;
+        return Ok(());
+    }
     if path.is_dir() {
         let mut children = fs::read_dir(path)?
             .filter_map(|entry| entry.ok().map(|item| item.path()))
@@ -1342,7 +1346,8 @@ pub fn convert_to_chd(
 ) -> Result<()> {
     let chdman = chdman_path(app).ok_or_else(|| anyhow!("No se encontro chdman integrado."))?;
     ensure_executable(&chdman)?;
-    let analysis = scan_selection(paths, usize::MAX, None)?;
+    let scan_inputs = recover_missing_chd_scan_inputs(paths);
+    let analysis = scan_selection(&scan_inputs, usize::MAX, None)?;
     let selected_root = paths.iter().find(|path| path.is_dir()).cloned();
     let mut touched_directories = BTreeSet::new();
 
@@ -1418,14 +1423,22 @@ pub fn convert_to_chd(
                 required_paths: vec![effective_source_path.to_string_lossy().to_string()],
                 missing_files: vec![],
             });
-        let container_dir = effective_source_path
+        let original_container_dir = source_path
             .parent()
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| effective_source_path.clone());
+            .unwrap_or_else(|| source_path.clone());
+        let mut staging_guard: Option<TempGuard> = None;
+        let (run_source_path, run_source_command) = if !source_is_remote && should_stage_local_chd_source(source) {
+            let (staged_source_path, guard) = stage_local_chd_source(app, job_id, source)?;
+            staging_guard = Some(guard);
+            (staged_source_path, source.command.clone())
+        } else {
+            (effective_source_path.clone(), local_source.command.clone())
+        };
 
-        let source_name = effective_source_path
+        let source_name = source_path
             .file_name()
-            .unwrap_or(effective_source_path.as_os_str())
+            .unwrap_or(source_path.as_os_str())
             .to_string_lossy()
             .to_string();
 
@@ -1459,10 +1472,10 @@ pub fn convert_to_chd(
                 .unwrap_or_else(|| RemoteTransferPolicy {
                     on_error: "abort".to_string(),
                 });
-            let chd_name = build_chd_output_filename(&effective_source_path, &options, is_single);
+            let chd_name = build_chd_output_filename(&source_path, &options, is_single);
             let chdman_c = chdman.clone();
-            let source_cmd = local_source.command.clone();
-            let effective_source_c = effective_source_path.clone();
+            let source_cmd = run_source_command.clone();
+            let run_source_c = run_source_path.clone();
             let overwrite = options.overwrite;
 
             run_remote_file_cycle(
@@ -1482,7 +1495,7 @@ pub fn convert_to_chd(
                         prog_span,
                         &chdman_c,
                         &source_cmd,
-                        &effective_source_c,
+                        &run_source_c,
                         &output_path,
                         overwrite,
                     )?;
@@ -1491,8 +1504,8 @@ pub fn convert_to_chd(
             )?;
         } else {
             let mut output_path = build_chd_output_path(
-                &effective_source_path,
-                &container_dir,
+                &source_path,
+                &original_container_dir,
                 selected_root.as_deref(),
                 &options,
                 is_single,
@@ -1501,6 +1514,25 @@ pub fn convert_to_chd(
             if output_path.exists() && !options.overwrite && options.rename_on_conflict {
                 output_path = unique_path(&output_path);
             }
+            let final_output_path = output_path.clone();
+            let output_path = if staging_guard.is_some() {
+                let staging_dir = staging_guard
+                    .as_ref()
+                    .map(|guard| guard.0.join("chd-out"))
+                    .expect("staging_guard checked above");
+                fs::create_dir_all(&staging_dir)?;
+                let staged = staging_dir.join(
+                    final_output_path
+                        .file_name()
+                        .unwrap_or_else(|| final_output_path.as_os_str()),
+                );
+                if staged.exists() {
+                    remove_single_path(&staged)?;
+                }
+                staged
+            } else {
+                output_path
+            };
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -1510,8 +1542,8 @@ pub fn convert_to_chd(
                 prog_base,
                 prog_span,
                 &chdman,
-                &local_source.command,
-                &effective_source_path,
+                &run_source_command,
+                &run_source_path,
                 &output_path,
                 options.overwrite,
             )
@@ -1519,10 +1551,16 @@ pub fn convert_to_chd(
                 let _ = emit_log(app, job_id, e.to_string());
                 e
             })?;
+            if output_path != final_output_path {
+                if final_output_path.exists() && options.overwrite {
+                    remove_single_path(&final_output_path)?;
+                }
+                move_path(&output_path, &final_output_path)?;
+            }
             emit_log(
                 app,
                 job_id,
-                format!("CHD creado: {}", output_path.display()),
+                format!("CHD creado: {}", final_output_path.display()),
             )?;
         }
 
@@ -1553,7 +1591,7 @@ pub fn convert_to_chd(
 
         // Track local container dirs so we can remove them if they're empty after cleanup.
         if options.delete_original_subfolders && !source_is_remote {
-            touched_directories.insert(container_dir);
+            touched_directories.insert(original_container_dir.clone());
         }
 
         emit_progress(
@@ -1583,6 +1621,56 @@ pub fn convert_to_chd(
     Ok(())
 }
 
+fn should_stage_local_chd_source(source: &ChdSourceDto) -> bool {
+    source.command == "createcd"
+        && source.required_paths.iter().any(|path| path.len() >= 240)
+}
+
+fn stage_local_chd_source(
+    app: &AppHandle,
+    job_id: &str,
+    source: &ChdSourceDto,
+) -> Result<(PathBuf, TempGuard)> {
+    let container_dir = PathBuf::from(&source.container_dir);
+    let source_path = PathBuf::from(&source.source_path);
+    let staging_root = temp_download_dir(app, job_id)?;
+    let container_name = container_dir
+        .file_name()
+        .unwrap_or_else(|| container_dir.as_os_str());
+    let staged_container = staging_root.join(container_name);
+    copy_path(&container_dir, &staged_container)?;
+    let staged_source = staged_container.join(
+        source_path
+            .file_name()
+            .unwrap_or_else(|| source_path.as_os_str()),
+    );
+    Ok((staged_source, TempGuard(staging_root)))
+}
+
+fn recover_missing_chd_scan_inputs(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for path in paths {
+        let recovered = if path.exists() || path.to_string_lossy().starts_with("remote://") {
+            path.clone()
+        } else {
+            path.ancestors()
+                .skip(1)
+                .find(|ancestor| ancestor.exists() && ancestor.is_dir())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| path.clone())
+        };
+
+        let key = recovered.to_string_lossy().to_lowercase();
+        if seen.insert(key) {
+            result.push(recovered);
+        }
+    }
+
+    result
+}
+
 fn run_chdman_convert(
     app: &AppHandle,
     job_id: &str,
@@ -1596,6 +1684,9 @@ fn run_chdman_convert(
 ) -> Result<()> {
     let mut cmd = Command::new(chdman);
     cmd.arg(command).arg("-i").arg(source).arg("-o").arg(output);
+    if let Some(source_dir) = source.parent() {
+        cmd.current_dir(source_dir);
+    }
     if overwrite {
         cmd.arg("-f");
     }

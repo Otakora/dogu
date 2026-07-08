@@ -23,9 +23,14 @@
     onclose: () => void;
     /**
      * Called instead of running immediately when queue mode is on. Receives the
-     * generation payload and the .m3u output paths (for ghost prediction).
+     * generation groups so the caller can rebuild the payload against queued
+     * path changes before execution.
      */
-    onEnqueue?: (payload: M3uGeneratePayload, outputPaths: string[], sources: string[]) => void;
+    onEnqueue?: (
+      groups: Array<{ outputPath: string; baseName: string; absoluteEntries: string[] }>,
+      useRelativePaths: boolean,
+      overwrite: boolean,
+    ) => void;
   };
 
   let { dirs, currentDir = "", onclose, onEnqueue }: Props = $props();
@@ -100,9 +105,15 @@
     // Queue mode: hand the op to the caller (which shows a .m3u ghost) instead
     // of generating right away.
     if (app.queueMode && onEnqueue) {
-      const outputPaths = toGenerate.map((g) => g.outputPath);
-      const sources = toGenerate.flatMap((g) => g.entries.map((e) => e.absolutePath));
-      onEnqueue(payload, outputPaths, sources);
+      onEnqueue(
+        toGenerate.map((g) => ({
+          outputPath: g.outputPath,
+          baseName: g.baseName,
+          absoluteEntries: g.entries.map((e) => e.absolutePath),
+        })),
+        opts.useRelativePaths,
+        overwrite,
+      );
       onclose();
       return;
     }

@@ -166,7 +166,7 @@ El job de Linux instala solo las dependencias necesarias para validar el backend
 Ahora se ejecuta:
 
 - manualmente desde GitHub Actions (`workflow_dispatch`)
-- automaticamente al subir un tag `v*` como `v0.2.1`
+- automaticamente al subir un tag `v*` como `v0.2.3`
 
 En ese flujo se generan los instaladores y paquetes de distribucion:
 

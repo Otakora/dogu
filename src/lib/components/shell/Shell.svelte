@@ -24,7 +24,6 @@
     M3uGeneratePayload,
   } from "../../types/index.js";
   import {
-    predictCopyMove,
     predictCompress,
     predictChdConvert,
     predictChdRestore,
@@ -38,6 +37,8 @@
     normalizePath,
     basenameOf,
     dirnameOf,
+    joinPath,
+    stemOf,
   } from "../../utils/ghosts.js";
 
   import Sidebar from "./Sidebar.svelte";
@@ -57,6 +58,14 @@
   import ToolStatusScreen from "../dialogs/ToolStatusScreen.svelte";
   import M3uDialog from "../dialogs/M3uDialog.svelte";
   import { t, tn } from "../../i18n/index.js";
+  import type { FileTransferItem, FileTransferOperation } from "../../utils/transfers.js";
+  import { inferFileTransferOperation, isNoOpFileTransfer, isRecursiveFileTransfer } from "../../utils/transfers.js";
+
+  type QueuedM3uGroup = {
+    outputPath: string;
+    baseName: string;
+    absoluteEntries: string[];
+  };
 
   // ── Pane refs for imperative calls ──────────────────────
   let pane0 = $state<ReturnType<typeof Pane> | undefined>(undefined);
@@ -217,6 +226,17 @@
     focusedPane()?.refresh();
   }
 
+  function refreshVisibleLocations(paths: string[]) {
+    const watched = new Set(paths.map((path) => normalizePath(path)));
+    const paneRefs = [pane0, pane1];
+    app.panes.forEach((paneState, idx) => {
+      const currentPath = paneState.tabs[paneState.activeTabIdx]?.currentPath;
+      if (currentPath && watched.has(normalizePath(currentPath))) {
+        paneRefs[idx]?.refresh();
+      }
+    });
+  }
+
   // ── Keyboard shortcuts ────────────────────────────────────
   function handleAppKey(e: KeyboardEvent) {
     if (e.key === "F5") { e.preventDefault(); focusedPane()?.refresh(); return; }
@@ -275,7 +295,9 @@
     if (paths.length === 0) return;
 
     if (app.queueMode) {
-      enqueueOrRun(buildDeleteOp(paths));
+      const op = buildDeleteOp(paths);
+      if (op) enqueueOrRun(op);
+      else app.notify("info", t("shell.deleteAlreadyCovered"));
       return;
     }
 
@@ -295,27 +317,56 @@
     }
   }
 
-  function buildDeleteOp(paths: string[]): QueuedOp {
+  function queuedDeleteCoversPath(path: string): boolean {
+    return app.opQueue.some((op) =>
+      op.deletes.some((deletedPath) => pathContainsOrEquals(deletedPath, path))
+    );
+  }
+
+  function pathContainsOrEquals(parent: string, child: string): boolean {
+    const p = normalizePath(parent);
+    const c = normalizePath(child);
+    if (!p) return c === p;
+    return c === p || c.startsWith(`${p}/`);
+  }
+
+  function compactDeletePaths(paths: string[]): string[] {
+    const unique = uniquePaths(paths)
+      .filter((path) => !queuedDeleteCoversPath(path))
+      .sort((a, b) => normalizePath(a).split("/").length - normalizePath(b).split("/").length);
+
+    const compacted: string[] = [];
+    for (const path of unique) {
+      if (compacted.some((parent) => pathContainsOrEquals(parent, path))) continue;
+      compacted.push(path);
+    }
+    return compacted;
+  }
+
+  function buildDeleteOp(paths: string[]): QueuedOp | null {
+    const deletePaths = compactDeletePaths(paths);
+    if (deletePaths.length === 0) return null;
     return {
       id: newQueueId(),
       title: t("shell.deleting"),
       kind: 'delete',
       sources: [],
       destinations: [],
-      deletes: paths,
+      deletes: deletePaths,
       produces: [],
       dependsOn: [],
       overwrite: false,
       renameOnConflict: false,
-      execute: () => executeDelete(paths),
+      execute: (jobId, retryQueuedOp) => executeDelete(deletePaths, jobId, retryQueuedOp),
     };
   }
 
-  async function executeDelete(paths: string[]): Promise<boolean> {
-    const jobId = newJobId();
+  async function executeDelete(paths: string[], providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
+    const jobId = providedJobId ?? newJobId();
     app.startJob(jobId, t("shell.deleting"), {
       statusMessageOnSuccess: t("shell.deleted"),
       statusMessageOnFailure: t("shell.deleteFailed"),
+      retryQueuedOp,
     });
     const done = app.waitForJob(jobId);
     try {
@@ -348,30 +399,17 @@
 
     if (isCut) app.setClipboard(null);
 
-    const opId = newQueueId();
-    const overwrite = app.settings.defaultOverwriteOnConflict;
-    const renameOnConflict = app.settings.renameOnConflict;
-    enqueueOrRun({
-      id: opId,
-      title: isCut ? t("shell.moving") : t("shell.copying"),
-      kind: isCut ? 'move' : 'copy',
-      sources: paths,
-      destinations: [dest],
-      deletes: isCut ? paths : [],
-      produces: predictCopyMove(paths, dest, opId),
-      dependsOn: [],
-      overwrite,
-      renameOnConflict,
-      execute: () => executePaste(paths, dest, isCut, overwrite, renameOnConflict),
-    });
+    const items = paths.map((path) => ({ path, isDir: !/\.[^./\\]+$/.test(path) }));
+    enqueueOrRun(buildTransferOp(items, dest, isCut ? "move" : "copy"));
   }
 
-  async function executePaste(paths: string[], dest: string, isCut: boolean, overwrite: boolean, renameOnConflict: boolean): Promise<boolean> {
-    const jobId = newJobId();
+  async function executePaste(paths: string[], dest: string, isCut: boolean, overwrite: boolean, renameOnConflict: boolean, providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
+    const jobId = providedJobId ?? newJobId();
     const op = isCut ? "cut" : "copy";
     app.startJob(jobId, op === "copy" ? t("shell.copying") : t("shell.moving"), {
       statusMessageOnSuccess: op === "copy" ? t("shell.copied") : t("shell.moved"),
       statusMessageOnFailure: op === "copy" ? t("shell.copyFailed") : t("shell.moveFailed"),
+      retryQueuedOp,
     });
     const done = app.waitForJob(jobId);
     try {
@@ -380,7 +418,56 @@
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
     }
-    return await done;
+    const ok = await done;
+    if (ok) refreshVisibleLocations([dest, ...paths.map((path) => dirnameOf(path))]);
+    return ok;
+  }
+
+  function isQueueBackedPath(path: string): boolean {
+    const key = normalizePath(path);
+    return app.queueGhosts.some((ghost) => {
+      const ghostKey = normalizePath(ghost.path);
+      return key === ghostKey || (ghost.isDir && key.startsWith(ghostKey + "/"));
+    });
+  }
+
+  function transferTouchesGhostTree(items: FileTransferItem[], dest: string): boolean {
+    return isQueueBackedPath(dest) || items.some((item) => isQueueBackedPath(item.path));
+  }
+
+  function buildTransferOp(items: FileTransferItem[], dest: string, operation: FileTransferOperation): QueuedOp {
+    const paths = items.map((item) => item.path);
+    const opId = newQueueId();
+    const overwrite = app.settings.defaultOverwriteOnConflict;
+    const renameOnConflict = app.settings.renameOnConflict;
+    const isMove = operation === "move";
+    return {
+      id: opId,
+      title: isMove ? t("shell.moving") : t("shell.copying"),
+      kind: isMove ? "move" : "copy",
+      sources: paths,
+      destinations: [dest],
+      deletes: isMove ? paths : [],
+      produces: items.map((item) => buildGhost(joinPath(dest, basenameOf(item.path)), item.isDir, opId, false)),
+      dependsOn: [],
+      overwrite,
+      renameOnConflict,
+      execute: (jobId, retryQueuedOp) => executePaste(paths, dest, isMove, overwrite, renameOnConflict, jobId, retryQueuedOp),
+    };
+  }
+
+  function handleDropItems(items: FileTransferItem[], dest: string, preferredOperation?: FileTransferOperation | null) {
+    if (items.length === 0) return;
+    const operation = inferFileTransferOperation(items, dest, preferredOperation);
+    if (isNoOpFileTransfer(items, dest, operation)) return;
+    if (isRecursiveFileTransfer(items, dest)) return;
+    const op = buildTransferOp(items, dest, operation);
+    if (transferTouchesGhostTree(items, dest) && !app.queueMode) {
+      app.addToQueue(op);
+      app.notify("info", t("queue.operationQueued"));
+      return;
+    }
+    enqueueOrRun(op);
   }
 
   // ── Extraction ────────────────────────────────────────────
@@ -421,7 +508,7 @@
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: () => executeExtraction(archives, opts),
+      execute: (jobId, retryQueuedOp) => executeExtraction(archives, opts, jobId, retryQueuedOp),
     };
   }
 
@@ -473,11 +560,12 @@
     enqueueOps(ops);
   }
 
-  async function executeExtraction(archives: string[], opts: ExtractionOptionsPayload): Promise<boolean> {
-    const jobId = newJobId();
+  async function executeExtraction(archives: string[], opts: ExtractionOptionsPayload, providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
+    const jobId = providedJobId ?? newJobId();
     app.startJob(jobId, t("shell.extracting"), {
       statusMessageOnSuccess: t("shell.extractionComplete"),
       statusMessageOnFailure: t("shell.extractionFailed"),
+      retryQueuedOp,
     });
     const done = app.waitForJob(jobId);
     try {
@@ -496,9 +584,81 @@
     m3uDirs = dirs;
   }
 
-  function buildM3uOp(rawPayload: M3uGeneratePayload, outputPaths: string[], sources: string[]): QueuedOp {
+  function m3uRelativePath(fromDir: string, targetFile: string): string {
+    const from = fromDir.replace(/\\/g, "/").replace(/\/+$/, "");
+    const target = targetFile.replace(/\\/g, "/").replace(/\/+$/, "");
+    const prefix = `${from}/`;
+    return target.startsWith(prefix) ? target.slice(prefix.length) : targetFile;
+  }
+
+  function appendRelativePath(base: string, rel: string): string {
+    const parts = rel.split(/[\\/]+/).filter(Boolean);
+    return parts.reduce((acc, part) => joinPath(acc, part), base);
+  }
+
+  function relativePathWithin(root: string, path: string): string | null {
+    const rootParts = root.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean);
+    const pathParts = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean);
+    if (pathParts.length < rootParts.length) return null;
+    for (let i = 0; i < rootParts.length; i++) {
+      if (rootParts[i].toLowerCase() !== pathParts[i].toLowerCase()) return null;
+    }
+    return pathParts.slice(rootParts.length).join("/");
+  }
+
+  function remapPathThroughQueuedOps(path: string): string {
+    let current = path;
+    for (const op of app.opQueue) {
+      if (op.kind !== "copy" && op.kind !== "move") continue;
+      const outputs = app.resolvedOutputsFor(op.id);
+      for (let i = 0; i < op.sources.length; i++) {
+        const source = op.sources[i];
+        const output = outputs[i]?.path;
+        if (!output) continue;
+        const rel = relativePathWithin(source, current);
+        if (rel === null) continue;
+        current = rel ? appendRelativePath(output, rel) : output;
+        break;
+      }
+    }
+    return current;
+  }
+
+  function buildQueuedM3uPayload(
+    groups: QueuedM3uGroup[],
+    useRelativePaths: boolean,
+    overwrite: boolean,
+  ): { payload: M3uGeneratePayload; outputPaths: string[]; sources: string[] } {
+    const resolvedGroups = groups.map((group) => {
+      const outputPath = remapPathThroughQueuedOps(group.outputPath);
+      const absoluteEntries = uniquePaths(group.absoluteEntries.map((entry) => remapPathThroughQueuedOps(entry)));
+      return {
+        outputPath,
+        baseName: group.baseName,
+        absoluteEntries,
+        entries: absoluteEntries.map((entry) =>
+          useRelativePaths ? m3uRelativePath(dirnameOf(outputPath), entry) : entry,
+        ),
+      };
+    });
+    return {
+      payload: {
+        overwrite,
+        renameOnConflict: app.settings.renameOnConflict,
+        groups: resolvedGroups.map((group) => ({
+          outputPath: group.outputPath,
+          baseName: group.baseName,
+          entries: group.entries,
+        })),
+      },
+      outputPaths: resolvedGroups.map((group) => group.outputPath),
+      sources: uniquePaths(resolvedGroups.flatMap((group) => group.absoluteEntries)),
+    };
+  }
+
+  function buildM3uOp(groups: QueuedM3uGroup[], useRelativePaths: boolean, overwrite: boolean): QueuedOp {
     const opId = newQueueId();
-    const payload: M3uGeneratePayload = { ...rawPayload, renameOnConflict: app.settings.renameOnConflict };
+    const { payload, outputPaths, sources } = buildQueuedM3uPayload(groups, useRelativePaths, overwrite);
     return {
       id: opId,
       title: t("shell.generatingM3u"),
@@ -510,15 +670,16 @@
       dependsOn: [],
       overwrite: payload.overwrite,
       renameOnConflict: payload.renameOnConflict ?? false,
-      execute: () => executeM3u(payload),
+      execute: (jobId, retryQueuedOp) => executeM3u(payload, jobId, retryQueuedOp),
     };
   }
 
-  async function executeM3u(payload: M3uGeneratePayload): Promise<boolean> {
-    const jobId = newJobId();
+  async function executeM3u(payload: M3uGeneratePayload, providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
+    const jobId = providedJobId ?? newJobId();
     app.startJob(jobId, t("shell.generatingM3u"), {
       statusMessageOnSuccess: t("shell.m3uComplete"),
       statusMessageOnFailure: t("shell.m3uFailed"),
+      retryQueuedOp,
     });
     const done = app.waitForJob(jobId);
     try {
@@ -544,6 +705,48 @@
     };
   }
 
+  function uniquePaths(paths: string[]): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const path of paths) {
+      const key = normalizePath(path);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(path);
+    }
+    return result;
+  }
+
+  function expandGhostSelections(paths: string[]): string[] {
+    const expanded = new Map<string, string>();
+    const selected = paths.map((path) => ({ path, key: normalizePath(path) }));
+
+    for (const { path, key } of selected) {
+      expanded.set(key, path);
+      for (const ghost of app.queueGhosts) {
+        const ghostKey = normalizePath(ghost.path);
+        if (ghostKey === key || ghostKey.startsWith(key + "/")) {
+          expanded.set(ghostKey, ghost.path);
+        }
+      }
+    }
+
+    return [...expanded.values()];
+  }
+
+  function cueSiblingForGhostBin(binPath: string, ghostSet: Map<string, string>): string | null {
+    const dir = dirnameOf(binPath);
+    const sameStemCue = joinPath(dir, `${stemOf(basenameOf(binPath))}.cue`);
+    const sameStemKey = normalizePath(sameStemCue);
+    if (ghostSet.has(sameStemKey)) return ghostSet.get(sameStemKey)!;
+
+    for (const [key, path] of ghostSet) {
+      if (normalizePath(dirnameOf(path)) !== normalizePath(dir)) continue;
+      if (key.endsWith(".cue")) return path;
+    }
+    return null;
+  }
+
   /**
    * Builds a CHD analysis for ghost sources without touching disk. A ghost's
    * companion files (e.g. the .bin next to a .cue) are also ghosts and will
@@ -552,18 +755,45 @@
   function synthesizeGhostChdAnalysis(ghostPaths: string[]): Pick<SelectionAnalysisDto, "chdSources" | "restorableChds"> {
     const chdSources: ChdSourceDto[] = [];
     const restorableChds: string[] = [];
-    for (const p of ghostPaths) {
+    const seenSources = new Set<string>();
+    const seenChds = new Set<string>();
+    const expanded = expandGhostSelections(ghostPaths);
+    const ghostSet = new Map(expanded.map((path) => [normalizePath(path), path]));
+
+    for (const p of expanded) {
       const ext = (basenameOf(p).split(".").pop() ?? "").toLowerCase();
-      if (ext === "chd") { restorableChds.push(p); continue; }
+      if (ext === "chd") {
+        const key = normalizePath(p);
+        if (seenChds.has(key)) continue;
+        seenChds.add(key);
+        restorableChds.push(p);
+        continue;
+      }
       const isDvd = DVD_GHOST_EXTS.has(ext);
       const isCd = CD_GHOST_EXTS.has(ext);
-      if (!isCd && !isDvd) continue; // not a directly convertible disc image
+      if (!isCd && !isDvd && ext !== "bin") continue; // not a directly convertible disc image
+
+      let sourcePath = p;
+      let displayExtensions = [`.${ext}`];
+      let requiredPaths = [p];
+
+      if (ext === "bin") {
+        const cuePath = cueSiblingForGhostBin(p, ghostSet);
+        if (!cuePath) continue;
+        sourcePath = cuePath;
+        displayExtensions = [".bin", ".cue"];
+        requiredPaths = [cuePath, p];
+      }
+
+      const key = normalizePath(sourcePath);
+      if (seenSources.has(key)) continue;
+      seenSources.add(key);
       chdSources.push({
-        sourcePath: p,
-        containerDir: dirnameOf(p),
+        sourcePath,
+        containerDir: dirnameOf(sourcePath),
         command: isDvd ? "createdvd" : "createcd",
-        displayExtensions: [`.${ext}`],
-        requiredPaths: [p],
+        displayExtensions,
+        requiredPaths,
         missingFiles: [],
       });
     }
@@ -598,39 +828,51 @@
     }
   }
 
-  function buildConvertChdOp(paths: string[], rawOpts: ChdConversionOptionsPayload): QueuedOp {
-    const opId = newQueueId();
+  function buildConvertChdOp(chdSources: ChdSourceDto[], rawOpts: ChdConversionOptionsPayload): QueuedOp {
+    const paths = chdSources.map((source) => source.sourcePath);
     const opts: ChdConversionOptionsPayload = { ...rawOpts, renameOnConflict: app.settings.renameOnConflict };
+    const deletePaths = opts.deleteOriginals
+      ? uniquePaths([
+          ...chdSources.flatMap((source) => source.requiredPaths),
+          ...(opts.deleteOriginalSubfolders
+            ? chdSources
+                .map((source) => source.containerDir)
+                .filter((dir) => !dir.startsWith("remote://"))
+            : []),
+        ])
+      : [];
+    const opId = newQueueId();
     return {
       id: opId,
       title: t("shell.convertingToChd"),
       kind: 'chd-convert',
       sources: paths,
       destinations: paths.map(p => parentDir(p)),
-      deletes: opts.deleteOriginals ? paths : [],
+      deletes: deletePaths,
       produces: predictChdConvert(paths, opts, opId),
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: () => executeConvertChd(paths, opts),
+      execute: (jobId, retryQueuedOp) => executeConvertChd(paths, opts, jobId, retryQueuedOp),
     };
   }
 
-  function buildConvertChdOps(paths: string[], rawOpts: ChdConversionOptionsPayload): QueuedOp[] {
-    if (paths.length === 0) return [];
-    if (paths.length <= 1) return [buildConvertChdOp(paths, rawOpts)];
+  function buildConvertChdOps(chdSources: ChdSourceDto[], rawOpts: ChdConversionOptionsPayload): QueuedOp[] {
+    if (chdSources.length === 0) return [];
+    if (chdSources.length <= 1) return [buildConvertChdOp(chdSources, rawOpts)];
     const batchId = newBatchId();
-    const batchTitle = t("queue.batch.chdConvert", { count: paths.length });
-    return paths.map((path, index) =>
-      withBatch(buildConvertChdOp([path], rawOpts), batchId, batchTitle, index + 1, paths.length)
+    const batchTitle = t("queue.batch.chdConvert", { count: chdSources.length });
+    return chdSources.map((source, index) =>
+      withBatch(buildConvertChdOp([source], rawOpts), batchId, batchTitle, index + 1, chdSources.length)
     );
   }
 
-  async function executeConvertChd(paths: string[], opts: ChdConversionOptionsPayload): Promise<boolean> {
-    const jobId = newJobId();
+  async function executeConvertChd(paths: string[], opts: ChdConversionOptionsPayload, providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
+    const jobId = providedJobId ?? newJobId();
     app.startJob(jobId, t("shell.convertingToChd"), {
       statusMessageOnSuccess: t("shell.chdConversionComplete"),
       statusMessageOnFailure: t("shell.chdConversionFailed"),
+      retryQueuedOp,
     });
     const done = app.waitForJob(jobId);
     try {
@@ -659,7 +901,7 @@
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: () => executeRestoreChd(paths, opts),
+      execute: (jobId, retryQueuedOp) => executeRestoreChd(paths, opts, jobId, retryQueuedOp),
     };
   }
 
@@ -673,11 +915,12 @@
     );
   }
 
-  async function executeRestoreChd(paths: string[], opts: ChdRestoreOptionsPayload): Promise<boolean> {
-    const jobId = newJobId();
+  async function executeRestoreChd(paths: string[], opts: ChdRestoreOptionsPayload, providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
+    const jobId = providedJobId ?? newJobId();
     app.startJob(jobId, t("shell.restoringFromChd"), {
       statusMessageOnSuccess: t("shell.chdRestoreComplete"),
       statusMessageOnFailure: t("shell.chdRestoreFailed"),
+      retryQueuedOp,
     });
     const done = app.waitForJob(jobId);
     try {
@@ -765,7 +1008,7 @@
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: () => executeDiscImage(mode, paths, opts),
+      execute: (jobId, retryQueuedOp) => executeDiscImage(mode, paths, opts, jobId, retryQueuedOp),
     };
   }
 
@@ -779,11 +1022,12 @@
     );
   }
 
-  async function executeDiscImage(mode: DiscImageMode, paths: string[], opts: DiscImageOptionsPayload): Promise<boolean> {
-    const jobId = newJobId();
+  async function executeDiscImage(mode: DiscImageMode, paths: string[], opts: DiscImageOptionsPayload, providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
+    const jobId = providedJobId ?? newJobId();
     app.startJob(jobId, discImageTitle(mode), {
       statusMessageOnSuccess: discImageSuccess(mode),
       statusMessageOnFailure: discImageFailure(mode),
+      retryQueuedOp,
     });
     const done = app.waitForJob(jobId);
     try {
@@ -834,15 +1078,16 @@
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: () => executeCompress(sources, opts),
+      execute: (jobId, retryQueuedOp) => executeCompress(sources, opts, jobId, retryQueuedOp),
     };
   }
 
-  async function executeCompress(sources: string[], opts: CompressionOptionsPayload): Promise<boolean> {
-    const jobId = newJobId();
+  async function executeCompress(sources: string[], opts: CompressionOptionsPayload, providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
+    const jobId = providedJobId ?? newJobId();
     app.startJob(jobId, t("shell.compressing"), {
       statusMessageOnSuccess: t("shell.compressionComplete"),
       statusMessageOnFailure: t("shell.compressionFailed"),
+      retryQueuedOp,
     });
     const done = app.waitForJob(jobId);
     try {
@@ -870,6 +1115,7 @@
     onCopy: handleCopy,
     onCut: handleCut,
     onPaste: handlePaste,
+    onDropItems: handleDropItems,
     onExtractHere: handleExtractHere,
     onExtractToFolder: handleExtractToFolder,
     onExtractTo: handleExtractTo,
@@ -973,8 +1219,8 @@
     dirs={m3uDirs}
     currentDir={app.currentPath ?? ""}
     onclose={() => (m3uDirs = null)}
-    onEnqueue={(payload, outputPaths, sources) => {
-      enqueueOrRun(buildM3uOp(payload, outputPaths, sources));
+    onEnqueue={(groups, useRelativePaths, overwrite) => {
+      enqueueOrRun(buildM3uOp(groups, useRelativePaths, overwrite));
       m3uDirs = null;
     }}
   />
@@ -985,9 +1231,9 @@
     analysis={chdState.analysis}
     initialMode={chdState.mode}
     onclose={() => (chdState = null)}
-    onConvert={(paths, opts) => {
-      if (app.queueMode) enqueueOps(buildConvertChdOps(paths, opts));
-      else void buildConvertChdOp(paths, opts).execute();
+    onConvert={(sources, opts) => {
+      if (app.queueMode) enqueueOps(buildConvertChdOps(sources, opts));
+      else void buildConvertChdOp(sources, opts).execute();
       chdState = null;
     }}
     onRestore={(paths, opts) => {

@@ -21,7 +21,6 @@
 
   // Split view always uses two rows; single pane uses one row.
   const twoRow = $derived(app.isSplit);
-  const queuedCount = $derived(app.opQueue.length);
 
   // ── Editable path ─────────────────────────────────────────────
   let editingPath = $state(false);
@@ -222,6 +221,7 @@
         <button
           class="tb-crumb"
           class:tb-crumb--last={i === breadcrumbs.length - 1}
+          data-dogu-drop-path={crumb.path}
           onclick={(e) => { e.stopPropagation(); pane.navigate(crumb.path); }}
           oncontextmenu={(e) => openCrumbMenu(e, crumb)}
         >{crumb.label}</button>
@@ -346,9 +346,6 @@
       <line x1="3" y1="6" x2="15" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="15" y2="18"/>
       <polyline points="18 9 21 12 18 15"/>
     </svg>
-    {#if queuedCount > 0}
-      <span class="tb-badge" aria-hidden="true">{queuedCount}</span>
-    {/if}
     <span class="tb-queue-label">{t("toolbar.queueShort")}</span>
   </button>
   <button
@@ -518,30 +515,6 @@
     letter-spacing: 0.02em;
   }
 
-  .tb-badge {
-    position: absolute;
-    right: -4px;
-    top: -4px;
-    min-width: 14px;
-    height: 14px;
-    padding: 0 4px;
-    border-radius: 999px;
-    background: var(--accent);
-    color: #fff;
-    border: 1px solid var(--surface);
-    font-size: 9px;
-    font-weight: 800;
-    line-height: 12px;
-    font-variant-numeric: tabular-nums;
-    pointer-events: none;
-  }
-
-  /* On the filled ON button, invert the badge so the count stays legible. */
-  .tb-btn--queue.tb-btn--active .tb-badge {
-    background: var(--accent-contrast);
-    color: var(--accent);
-    border-color: var(--accent);
-  }
 
   /* ── Nav ── */
   .tb-nav {
@@ -601,6 +574,13 @@
 
   .tb-crumb:hover { background: var(--surface-hover); color: var(--text); }
   .tb-crumb--last { color: var(--text); font-weight: 500; }
+
+  :global(html.dogu-file-drag-copy) .tb-crumb:hover,
+  :global(html.dogu-file-drag-move) .tb-crumb:hover {
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface-hover));
+    color: var(--text);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
 
   .tb-crumb-placeholder {
     font-size: 12px;

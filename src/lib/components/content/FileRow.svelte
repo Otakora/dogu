@@ -6,12 +6,15 @@
   type Props = {
     entry: EntryDto;
     isSelected: boolean;
+    isDropTarget: boolean;
+    isDragSource: boolean;
+    onClick: (entry: EntryDto) => void;
     onActivate: (entry: EntryDto) => void;
     onContextMenu: (e: MouseEvent, entry: EntryDto) => void;
     onMousedown: (e: MouseEvent, entry: EntryDto) => void;
   };
 
-  let { entry, isSelected, onActivate, onContextMenu, onMousedown }: Props = $props();
+  let { entry, isSelected, isDropTarget, isDragSource, onClick, onActivate, onContextMenu, onMousedown }: Props = $props();
 
   // ── Inline rename ────────────────────────────────────────
   const isRenaming = $derived(app.renaming?.path === entry.path);
@@ -55,18 +58,23 @@
   class:file-row--removed={entry.willBeRemoved}
   class:file-row--replaced={entry.willBeReplaced}
   class:file-row--conflict={entry.willConflict}
+  class:file-row--drop-target={isDropTarget}
+  class:file-row--drag-source={isDragSource}
   data-path={entry.path}
+  data-is-dir={entry.isDir}
   role="row"
   aria-selected={isSelected}
   tabindex="0"
+  draggable={false}
   title={entry.isGhost
     ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending"))
     : entry.willBeRemoved ? t("ghost.willBeRemoved")
     : entry.willBeReplaced ? t("ghost.willBeReplaced")
     : entry.willConflict ? t("ghost.willConflict")
     : undefined}
+  onclick={() => { if (!isRenaming) onClick(entry); }}
   onmousedown={(e) => onMousedown(e, entry)}
-  ondblclick={() => onActivate(entry)}
+  ondblclick={() => { if (!isRenaming) onActivate(entry); }}
   oncontextmenu={(e) => { e.preventDefault(); onContextMenu(e, entry); }}
 >
   <!-- Icon -->
@@ -105,6 +113,8 @@
         onkeydown={handleRenameKey}
         onclick={(e) => e.stopPropagation()}
         onmousedown={(e) => e.stopPropagation()}
+        ondblclick={(e) => e.stopPropagation()}
+        ondragstart={(e) => { e.preventDefault(); e.stopPropagation(); }}
         aria-label={t("fileRow.rename")}
       />
     {:else}
@@ -141,7 +151,6 @@
     height: calc(28px * var(--content-scale, 1));
     padding: 0 8px;
     border-radius: 4px;
-    cursor: pointer;
     user-select: none;
     color: var(--text);
 
@@ -158,6 +167,16 @@
     .file-col--type,
     .file-col--size,
     .file-col--modified { color: color-mix(in srgb, var(--accent) 60%, var(--text-muted)); }
+  }
+
+  .file-row--drop-target {
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface-hover));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent);
+  }
+
+  .file-row--drag-source {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   /* Columns */

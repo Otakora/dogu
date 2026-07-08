@@ -11,6 +11,8 @@
   import { t, tn } from "../../i18n/index.js";
   import { openTerminalAt, openRemoteTerminalAt } from "../../utils/terminal.js";
   import { ghostToEntry, buildGhost, joinPath, normalizePath, uniqueDisplayPath, dirnameOf, basenameOf } from "../../utils/ghosts.js";
+  import type { FileTransferItem, FileTransferOperation } from "../../utils/transfers.js";
+  import { canDropFileItemsToPath, inferFileTransferOperation, isNoOpFileTransfer } from "../../utils/transfers.js";
 
   const pane = getContext<PaneView>("pane");
 
@@ -19,6 +21,7 @@
     onCopy: (paths: string[]) => void;
     onCut: (paths: string[]) => void;
     onPaste: () => void;
+    onDropItems: (items: FileTransferItem[], destination: string, preferredOperation?: FileTransferOperation | null) => void;
     onExtractHere: (paths: string[]) => void;
     onExtractToFolder: (paths: string[]) => void;
     onExtractTo: (paths: string[]) => void;
@@ -31,7 +34,7 @@
     onOpenWith: (path: string) => void;
   };
 
-  let { onDelete, onCopy, onCut, onPaste, onExtractHere, onExtractToFolder, onExtractTo, onCompressQuick, onCompress, onChd, onDiscImage, onM3u, onProperties, onOpenWith }: Props = $props();
+  let { onDelete, onCopy, onCut, onPaste, onDropItems, onExtractHere, onExtractToFolder, onExtractTo, onCompressQuick, onCompress, onChd, onDiscImage, onM3u, onProperties, onOpenWith }: Props = $props();
 
   // ── Panel / body element refs ────────────────────────────
   let panelEl = $state<HTMLElement | undefined>(undefined);
@@ -81,8 +84,23 @@
   let rbSX = 0, rbSY = 0;
   let rbActive = false;
   let consumeNextPanelClick = false;
+  let pendingPrimaryClickPath = $state<string | null>(null);
   let lastMouse = { x: 0, y: 0 };
   let autoScrollRaf = 0;
+  let activeDropPath = $state<string | null>(null);
+  let dropIntoFolder = $state(false);
+  const activeFileDrag = $derived(app.fileDrag);
+  const draggedPaths = $derived.by(() => new Set((activeFileDrag?.items ?? []).map((item) => item.path)));
+  let dragPreview = $state<{ x: number; y: number; label: string; effect: "copy" | "move" | "none" | null } | null>(null);
+  let fileDragGesture: {
+    items: FileTransferItem[];
+    sourcePaneIdx: number;
+    selectPath: string;
+    startX: number;
+    startY: number;
+    wasAlreadySelected: boolean;
+    started: boolean;
+  } | null = null;
 
   function ensureRubberBand() {
     if (!panelEl) return;
@@ -142,6 +160,8 @@
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest("[data-path]")) return;
     if (!contentBodyEl) return;
+    pendingPrimaryClickPath = null;
+    fileDragGesture = null;
     ensureRubberBand();
     const bodyRect = contentBodyEl.getBoundingClientRect();
     rbSX = e.clientX - bodyRect.left + contentBodyEl.scrollLeft;
@@ -187,6 +207,19 @@
     window.removeEventListener("mouseup", onDragEnd);
   }
 
+  function clearDropTarget() {
+    activeDropPath = null;
+    dropIntoFolder = false;
+  }
+
+  function clearDragState() {
+    app.setFileDrag(null);
+    dragPreview = null;
+    fileDragGesture = null;
+    setGlobalDragCursor(null);
+    clearDropTarget();
+  }
+
   onDestroy(() => {
     rbDiv?.remove();
     cancelAnimationFrame(autoScrollRaf);
@@ -195,6 +228,7 @@
     window.removeEventListener("mouseup", onDragEnd);
     window.removeEventListener("mousemove", onColResizeMove);
     window.removeEventListener("mouseup", onColResizeEnd);
+    clearDragState();
   });
 
   // ── Ghost overlay ────────────────────────────────────────
@@ -214,6 +248,7 @@
     if (pane.isSearching || !pane.currentPath) return pane.entries;
     const dirKey = normalizePath(pane.currentPath);
     const taken = new Set(pane.entries.map((e) => normalizePath(e.path)));
+    const existingByKey = new Map(pane.entries.map((e) => [normalizePath(e.path), e]));
     const replaced = new Set<string>();
     const removed = new Set<string>();
     const conflicting = new Set<string>();
@@ -226,6 +261,8 @@
       for (const g of op.produces) {
         if (normalizePath(g.parentDir) !== dirKey) continue;
         const gkey = normalizePath(g.path);
+        const existing = existingByKey.get(gkey);
+        if (existing?.isGhost && existing.ghostOpId === g.producedByOpId) continue;
         const collides = taken.has(gkey);
         if (collides && op.overwrite) { replaced.add(gkey); continue; }
         if (collides && !op.renameOnConflict) { conflicting.add(gkey); continue; }
@@ -251,6 +288,153 @@
   /** Looks up a display entry (real or ghost) by path. */
   function entryOf(path: string): EntryDto | undefined {
     return combinedEntries.find(en => en.path === path);
+  }
+
+  function dragItemsFor(entry: EntryDto): FileTransferItem[] {
+    const selectedEntries = pane.selectedPaths.has(entry.path)
+      ? [...pane.selectedPaths].map((path) => entryOf(path)).filter((candidate): candidate is EntryDto => !!candidate)
+      : [entry];
+    return selectedEntries.map((candidate) => ({ path: candidate.path, isDir: candidate.isDir }));
+  }
+
+  function resolveDropTargetFromPoint(clientX: number, clientY: number, expectedBody?: HTMLElement): { path: string; isFolder: boolean } | null {
+    const hit = document.elementFromPoint(clientX, clientY);
+    if (!expectedBody && hit instanceof HTMLElement) {
+      const pathDrop = hit.closest<HTMLElement>("[data-dogu-drop-path]");
+      const path = pathDrop?.dataset.doguDropPath;
+      if (path) return { path, isFolder: true };
+    }
+
+    const body = hit instanceof HTMLElement ? hit.closest<HTMLElement>("[data-dogu-content-body='true']") : null;
+    if (!body || (expectedBody && body !== expectedBody)) return null;
+
+    const row = hit instanceof HTMLElement ? hit.closest<HTMLElement>("[data-path]") : null;
+    if (row && body.contains(row) && row.dataset.isDir === "true" && row.dataset.path) {
+      return { path: row.dataset.path, isFolder: true };
+    }
+
+    const currentPath = body.dataset.currentPath;
+    return currentPath ? { path: currentPath, isFolder: false } : null;
+  }
+
+  function dragPreviewLabel(items: FileTransferItem[], effect: FileTransferOperation | "none" | null): string {
+    if (effect === "copy") {
+      return tn("contentPanel.dragCopyItemPreview", "contentPanel.dragCopyItemsPreview", items.length);
+    }
+    if (effect === "move") {
+      return tn("contentPanel.dragMoveItemPreview", "contentPanel.dragMoveItemsPreview", items.length);
+    }
+    return tn("contentPanel.dragItemPreview", "contentPanel.dragItemsPreview", items.length);
+  }
+
+  function dragPreviewPosition(clientX: number, clientY: number): { x: number; y: number } {
+    const maxX = Math.max(8, window.innerWidth - 340);
+    const maxY = Math.max(8, window.innerHeight - 48);
+    return {
+      x: Math.max(8, Math.min(clientX + 14, maxX)),
+      y: Math.max(8, Math.min(clientY + 16, maxY)),
+    };
+  }
+
+  function setDragPreview(payload: { items: FileTransferItem[] }, clientX: number, clientY: number, effect: FileTransferOperation | "none" | null) {
+    const label = dragPreviewLabel(payload.items, effect);
+    if (clientX === 0 && clientY === 0 && dragPreview) {
+      dragPreview = { ...dragPreview, label, effect };
+      return;
+    }
+    const pos = dragPreviewPosition(clientX, clientY);
+    dragPreview = { ...pos, label, effect };
+  }
+
+  function setGlobalDragCursor(effect: FileTransferOperation | "none" | null) {
+    const root = document.documentElement;
+    root.classList.toggle("dogu-file-drag-copy", effect === "copy");
+    root.classList.toggle("dogu-file-drag-move", effect === "move");
+  }
+
+  function startFileDragGesture(e: MouseEvent) {
+    if (!fileDragGesture || fileDragGesture.started) return;
+    const payload = { items: fileDragGesture.items, sourcePaneIdx: fileDragGesture.sourcePaneIdx };
+    fileDragGesture = { ...fileDragGesture, started: true };
+    pendingPrimaryClickPath = null;
+    if (!fileDragGesture.wasAlreadySelected) {
+      pane.setSelection([fileDragGesture.selectPath]);
+      lastClickedPath = fileDragGesture.selectPath;
+    }
+    app.setFileDrag(payload);
+    updateFileDragFeedback(e, payload);
+  }
+
+  function updateFileDragFeedback(e: MouseEvent, payload = app.fileDrag) {
+    if (!payload) return;
+    const target = resolveDropTargetFromPoint(e.clientX, e.clientY);
+    if (!target || !canDropFileItemsToPath(payload.items, target.path)) {
+      setDragPreview(payload, e.clientX, e.clientY, "none");
+      setGlobalDragCursor(null);
+      return;
+    }
+    const operation = inferFileTransferOperation(payload.items, target.path, e.ctrlKey ? "copy" : null);
+    if (isNoOpFileTransfer(payload.items, target.path, operation)) {
+      setDragPreview(payload, e.clientX, e.clientY, "none");
+      setGlobalDragCursor(null);
+      return;
+    }
+    setDragPreview(payload, e.clientX, e.clientY, operation);
+    setGlobalDragCursor(operation);
+  }
+
+  function updateLocalDropTargetFromPoint(e: MouseEvent) {
+    const payload = app.fileDrag;
+    if (!payload || !contentBodyEl) {
+      clearDropTarget();
+      return;
+    }
+    const target = resolveDropTargetFromPoint(e.clientX, e.clientY, contentBodyEl);
+    if (!target || !canDropFileItemsToPath(payload.items, target.path)) {
+      clearDropTarget();
+      return;
+    }
+    const operation = inferFileTransferOperation(payload.items, target.path, e.ctrlKey ? "copy" : null);
+    if (isNoOpFileTransfer(payload.items, target.path, operation)) {
+      clearDropTarget();
+      return;
+    }
+    activeDropPath = target.path;
+    dropIntoFolder = target.isFolder;
+  }
+
+  function handleFileDragMouseMove(e: MouseEvent) {
+    if (fileDragGesture && !fileDragGesture.started) {
+      const dx = Math.abs(e.clientX - fileDragGesture.startX);
+      const dy = Math.abs(e.clientY - fileDragGesture.startY);
+      if (dx >= 4 || dy >= 4) startFileDragGesture(e);
+    }
+    if (app.fileDrag?.sourcePaneIdx === pane.paneIdx) {
+      updateFileDragFeedback(e);
+    }
+    if (app.fileDrag) {
+      updateLocalDropTargetFromPoint(e);
+    }
+  }
+
+  function finishFileDragGesture(e: MouseEvent) {
+    const payload = app.fileDrag;
+    const isSourcePanel = payload?.sourcePaneIdx === pane.paneIdx;
+    const hadStarted = !!fileDragGesture?.started || !!payload;
+    fileDragGesture = null;
+
+    if (!payload || !isSourcePanel) {
+      if (!app.fileDrag) clearDropTarget();
+      return;
+    }
+
+    const target = resolveDropTargetFromPoint(e.clientX, e.clientY);
+    const operation = target ? inferFileTransferOperation(payload.items, target.path, e.ctrlKey ? "copy" : null) : null;
+    if (target && operation && canDropFileItemsToPath(payload.items, target.path) && !isNoOpFileTransfer(payload.items, target.path, operation)) {
+      onDropItems(payload.items, target.path, e.ctrlKey ? "copy" : null);
+    }
+    if (hadStarted) consumeNextPanelClick = true;
+    clearDragState();
   }
 
   // ── Sorted entries ───────────────────────────────────────
@@ -306,9 +490,16 @@
 
   // ── Load on path / tab change ────────────────────────────
   let lastLoadKey = "";
+  let contentRequestVersion = 0;
+  let lastGhostSyncKey = "";
   // Path whose scroll is currently reflected in the DOM (the "outgoing" folder).
   let domScrollPath = "";
   let scrollSaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function nextContentRequestVersion() {
+    contentRequestVersion += 1;
+    return contentRequestVersion;
+  }
 
   function saveScrollPosition() {
     clearTimeout(scrollSaveTimer);
@@ -326,6 +517,7 @@
     lastLoadKey = key;
 
     untrack(() => {
+      const requestVersion = nextContentRequestVersion();
       // Capture the scroll of the folder we're leaving so returning to it
       // (up a level, back, breadcrumb…) restores exactly where the user was.
       if (domScrollPath && domScrollPath !== path && contentBodyEl) {
@@ -335,26 +527,54 @@
 
       const loadedPath = pane.activeTab?.loadedPath;
       if (loadedPath === path) {
+        pane.setLoading(false);
         requestAnimationFrame(() => {
           if (contentBodyEl) contentBodyEl.scrollTop = pane.pathScroll(path);
         });
       } else if (pane.isSearching && pane.searchQuery) {
-        doSearch(path, pane.searchQuery);
+        doSearch(path, pane.searchQuery, requestVersion);
       } else {
-        loadPath(path);
+        loadPath(path, requestVersion);
       }
     });
   });
 
-  async function loadPath(path: string) {
+  $effect(() => {
+    const path = pane.currentPath;
+    if (!path || pane.isSearching) return;
+    const queueKey = app.opQueue.map((op) => op.id).join("|");
+    const pathKey = normalizePath(path);
+    const pathIsGhostDir = app.opQueue.some((op) =>
+      op.produces.some((g) => g.isDir && normalizePath(g.path) === pathKey),
+    );
+    const hasGhostEntries = pane.entries.some((entry) => entry.isGhost);
+    if (!pathIsGhostDir && !hasGhostEntries) {
+      lastGhostSyncKey = "";
+      return;
+    }
+    const syncKey = `${pane.activeTabId}::${pathKey}::${queueKey}`;
+    if (syncKey === lastGhostSyncKey) return;
+    lastGhostSyncKey = syncKey;
+    untrack(() => {
+      lastLoadKey = "";
+      loadPath(path, nextContentRequestVersion());
+    });
+  });
+
+  async function loadPath(path: string, requestVersion = nextContentRequestVersion()) {
+    const isCurrentRequest = () =>
+      requestVersion === contentRequestVersion &&
+      pane.currentPath === path;
+
     pane.setLoading(true);
     pane.clearSelection();
     try {
       const entries = await invoke<EntryDto[]>("list_children", { path });
+      if (!isCurrentRequest()) return;
       pane.setEntries(entries);
       pane.setTabLoadedPath(path);
       requestAnimationFrame(() => {
-        if (contentBodyEl) contentBodyEl.scrollTop = pane.pathScroll(path);
+        if (isCurrentRequest() && contentBodyEl) contentBodyEl.scrollTop = pane.pathScroll(path);
       });
     } catch (e) {
       // A ghost directory doesn't exist on disk yet. If it's the output of a
@@ -362,15 +582,22 @@
       // ghosts so the user can drill into the predicted tree (works at any depth,
       // local or remote, without bloating the queue).
       const ghostChildren = await computeGhostDirChildren(path);
+      if (!isCurrentRequest()) return;
       if (ghostChildren !== null) {
         pane.setEntries(ghostChildren);
+        pane.setTabLoadedPath(path);
+        requestAnimationFrame(() => {
+          if (isCurrentRequest() && contentBodyEl) contentBodyEl.scrollTop = pane.pathScroll(path);
+        });
       } else {
         app.notify("error", t("contentPanel.couldNotLoad", { error: String(e) }));
         pane.setEntries([]);
       }
     } finally {
-      pane.setLoading(false);
-      panelEl?.focus();
+      if (isCurrentRequest()) {
+        pane.setLoading(false);
+        panelEl?.focus();
+      }
     }
   }
 
@@ -381,6 +608,9 @@
    * i.e. a real load failure the caller should report.
    */
   async function computeGhostDirChildren(path: string): Promise<EntryDto[] | null> {
+    const materialized = materializeQueuedGhostDir(path);
+    if (materialized !== null) return materialized;
+
     const np = normalizePath(path);
     for (const op of app.opQueue) {
       if (op.kind !== "copy" && op.kind !== "move") continue;
@@ -407,19 +637,61 @@
     return null;
   }
 
-  async function doSearch(path: string, query: string) {
+  /**
+   * Reconstructs the direct children of a queued ghost directory from the
+   * queued outputs themselves. Extraction ops already predict the whole tree,
+   * so nested ghost folders can be opened without hitting the backend.
+   *
+   * Copy/move is intentionally excluded when the queue only knows about the
+   * root folder ghost — those cases fall back to mirroring the source folder.
+   */
+  function materializeQueuedGhostDir(path: string): EntryDto[] | null {
+    const dirKey = normalizePath(path);
+    const childEntries: EntryDto[] = [];
+    const seen = new Set<string>();
+    let hasNonCopyMoveDirProducer = false;
+
+    for (const op of app.opQueue) {
+      for (const g of op.produces) {
+        const gKey = normalizePath(g.path);
+        if (g.isDir && gKey === dirKey && op.kind !== "copy" && op.kind !== "move") {
+          hasNonCopyMoveDirProducer = true;
+        }
+        if (normalizePath(g.parentDir) !== dirKey) continue;
+        const key = normalizePath(g.path);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        childEntries.push(ghostToEntry(g));
+      }
+    }
+
+    if (childEntries.length > 0 || hasNonCopyMoveDirProducer) return childEntries;
+    return null;
+  }
+
+  async function doSearch(path: string, query: string, requestVersion = nextContentRequestVersion()) {
+    const isCurrentRequest = () =>
+      requestVersion === contentRequestVersion &&
+      pane.currentPath === path &&
+      pane.isSearching &&
+      pane.searchQuery === query;
+
     pane.setLoading(true);
     pane.clearSelection();
     pane.setIsSearching(true);
     try {
       const entries = await invoke<EntryDto[]>("search_entries", { path, query, recursive: true });
+      if (!isCurrentRequest()) return;
       pane.setEntries(entries);
     } catch (e) {
+      if (!isCurrentRequest()) return;
       app.notify("error", t("contentPanel.searchFailed", { error: String(e) }));
       pane.setEntries([]);
     } finally {
-      pane.setLoading(false);
-      panelEl?.focus();
+      if (isCurrentRequest()) {
+        pane.setLoading(false);
+        panelEl?.focus();
+      }
     }
   }
 
@@ -496,8 +768,10 @@
 
   function handleMousedown(e: MouseEvent, entry: EntryDto) {
     if (e.button !== 0 && e.button !== 2) return;
+    fileDragGesture = null;
 
     if (e.button === 2) {
+      pendingPrimaryClickPath = null;
       if (!pane.selectedPaths.has(entry.path)) {
         pane.setSelection([entry.path]);
         lastClickedPath = entry.path;
@@ -506,12 +780,41 @@
     }
 
     if (e.shiftKey && lastClickedPath) {
+      pendingPrimaryClickPath = null;
       pane.rangeSelect(lastClickedPath, entry.path);
     } else if (e.ctrlKey || e.metaKey) {
+      pendingPrimaryClickPath = null;
       pane.toggleSelection(entry.path);
       lastClickedPath = entry.path;
     } else {
+      pendingPrimaryClickPath = entry.path;
+      if (pane.renaming?.path !== entry.path) {
+        const wasAlreadySelected = pane.selectedPaths.has(entry.path);
+        const items = wasAlreadySelected
+          ? dragItemsFor(entry)
+          : [{ path: entry.path, isDir: entry.isDir }];
+        if (items.length > 0) {
+          fileDragGesture = {
+            items,
+            sourcePaneIdx: pane.paneIdx,
+            selectPath: entry.path,
+            startX: e.clientX,
+            startY: e.clientY,
+            wasAlreadySelected,
+            started: false,
+          };
+        }
+      }
+    }
+  }
+
+  function handleEntryClick(entry: EntryDto) {
+    if (pendingPrimaryClickPath !== entry.path) return;
+    pendingPrimaryClickPath = null;
+    if (!pane.selectedPaths.has(entry.path) || pane.selectedPaths.size !== 1) {
       pane.setSelection([entry.path]);
+    }
+    if (lastClickedPath !== entry.path) {
       lastClickedPath = entry.path;
     }
   }
@@ -853,6 +1156,7 @@
   function handlePanelClick(e: MouseEvent) {
     if ((e.target as HTMLElement).closest("[data-path]")) return;
     if (consumeNextPanelClick) { consumeNextPanelClick = false; return; }
+    pendingPrimaryClickPath = null;
     pane.clearSelection();
     contextMenu = null;
   }
@@ -892,6 +1196,19 @@
   const favoriteIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
   const terminalIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
 </script>
+
+<svelte:window onmousemove={handleFileDragMouseMove} onmouseup={finishFileDragGesture} />
+
+{#if dragPreview && activeFileDrag?.sourcePaneIdx === pane.paneIdx}
+  <div
+    class="drag-preview-chip"
+    class:drag-preview-chip--copy={dragPreview.effect === "copy"}
+    class:drag-preview-chip--move={dragPreview.effect === "move"}
+    style={`left: ${dragPreview.x}px; top: ${dragPreview.y}px;`}
+  >
+    {dragPreview.label}
+  </div>
+{/if}
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div
@@ -936,6 +1253,9 @@
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
     class="content-body scrollbar-thin"
+    class:content-body--drop-target={activeDropPath === pane.currentPath && !dropIntoFolder}
+    data-dogu-content-body="true"
+    data-current-path={pane.currentPath ?? ""}
     bind:this={contentBodyEl}
     onmousedown={handleBodyMousedown}
     onscroll={saveScrollPosition}
@@ -1002,6 +1322,9 @@
             <FileRow
               {entry}
               isSelected={pane.selectedPaths.has(entry.path)}
+              isDropTarget={activeDropPath === entry.path}
+              isDragSource={draggedPaths.has(entry.path)}
+              onClick={handleEntryClick}
               onActivate={handleActivate}
               onContextMenu={openContextMenu}
               onMousedown={handleMousedown}
@@ -1020,7 +1343,11 @@
               class:grid-item--removed={entry.willBeRemoved}
               class:grid-item--replaced={entry.willBeReplaced}
               class:grid-item--conflict={entry.willConflict}
+              class:grid-item--drop-target={activeDropPath === entry.path}
+              class:grid-item--drag-source={draggedPaths.has(entry.path)}
               data-path={entry.path}
+              data-is-dir={entry.isDir}
+              draggable={false}
               role="gridcell"
               tabindex="0"
               title={entry.isGhost
@@ -1029,6 +1356,7 @@
                 : entry.willBeReplaced ? t("ghost.willBeReplaced")
                 : entry.willConflict ? t("ghost.willConflict")
                 : undefined}
+              onclick={() => { if (pane.renaming?.path !== entry.path) handleEntryClick(entry); }}
               onmousedown={(e) => handleMousedown(e, entry)}
               ondblclick={() => { if (pane.renaming?.path !== entry.path) handleActivate(entry); }}
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, entry); }}
@@ -1069,6 +1397,8 @@
                   }}
                   onclick={(e) => e.stopPropagation()}
                   onmousedown={(e) => e.stopPropagation()}
+                  ondblclick={(e) => e.stopPropagation()}
+                  ondragstart={(e) => { e.preventDefault(); e.stopPropagation(); }}
                   aria-label={t("contentPanel.renameInput")}
                 />
               {:else}
@@ -1204,6 +1534,21 @@
     user-select: none;
   }
 
+  .content-body--drop-target {
+    background: color-mix(in srgb, var(--accent) 4%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+
+  :global(html.dogu-file-drag-copy),
+  :global(html.dogu-file-drag-copy *) {
+    cursor: copy !important;
+  }
+
+  :global(html.dogu-file-drag-move),
+  :global(html.dogu-file-drag-move *) {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2232%22 height=%2232%22 viewBox=%220 0 32 32%22%3E%3Cpath fill=%22white%22 stroke=%22black%22 stroke-width=%221.5%22 d=%22M6 3v21l5.8-5.3 3.6 8.2 3.6-1.6-3.5-8h7.8L6 3z%22/%3E%3Cpath fill=%22none%22 stroke=%22%232f9e44%22 stroke-width=%222.4%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22 d=%22M20 23h7m-3-3 3 3-3 3%22/%3E%3C/svg%3E") 6 3, default !important;
+  }
+
   :global(.rubber-band) {
     position: absolute;
     pointer-events: none;
@@ -1222,6 +1567,33 @@
     height: 200px;
     color: var(--text-subtle);
     font-size: 13px;
+  }
+
+  .drag-preview-chip {
+    position: fixed;
+    z-index: 9999;
+    max-width: 320px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--surface) 94%, white 6%);
+    border: 1px solid color-mix(in srgb, var(--line-strong) 55%, transparent);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+    pointer-events: none;
+  }
+
+  .drag-preview-chip--copy {
+    border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+  }
+
+  .drag-preview-chip--move {
+    border-color: color-mix(in srgb, #2f9e44 38%, transparent);
   }
 
   .loading-spinner {
@@ -1257,7 +1629,6 @@
     gap: 5px;
     padding: 8px 6px;
     border-radius: 6px;
-    cursor: pointer;
     user-select: none;
     border: 1px solid transparent;
     text-align: center;
@@ -1269,6 +1640,17 @@
     background: var(--accent-soft);
     border-color: var(--accent-border);
   }
+
+  .grid-item--drop-target {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  }
+
+  .grid-item--drag-source {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+
 
   .grid-icon { display: flex; align-items: center; justify-content: center; }
   .icon-dir-lg { color: #e0a030; }

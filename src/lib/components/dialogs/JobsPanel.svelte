@@ -31,6 +31,8 @@
   const hasConflicts        = $derived(app.queueConflicts.length > 0);
   const hasBlockingConflicts= $derived(blockingConflicts.length > 0);
   const hasQueueWarnings    = $derived(hasConflicts || app.queueHasDependencies);
+  const retryableFailedJobs = $derived(app.jobs.filter(j => j.done && !j.success && !!j.retryQueuedOp && !j.retried));
+  const canRetryAllFailed   = $derived(retryableFailedJobs.length > 0 && !app.queueRunning && !app.failedQueueRetryRunning);
   const canRunSmart         = $derived(hasQueue && !hasBlockingConflicts && !app.queueRunning);
   // Sequential is safe even with parallel-only conflicts (queue order protects it)
   const canRunSequential    = $derived(hasQueue && !hasBlockingConflicts && !app.queueRunning);
@@ -254,6 +256,13 @@
             </div>
             <div class="jobs-action-sep" aria-hidden="true"></div>
             <button class="header-btn header-btn--danger-ghost" onclick={() => app.clearQueue()}>{t("queue.clearQueue")}</button>
+          {/if}
+          {#if retryableFailedJobs.length > 0}
+            <button
+              class="header-btn header-btn--ghost"
+              onclick={() => void app.retryAllFailedJobs()}
+              disabled={!canRetryAllFailed}
+            >{t("jobsPanel.retryAllFailed", { count: retryableFailedJobs.length })}</button>
           {/if}
           {#if hasJobs}
             <button class="header-btn header-btn--ghost" onclick={() => app.clearDoneJobs()}>{t("jobsPanel.clearDone")}</button>
@@ -566,6 +575,13 @@
                   {/if}
                 </span>
                 {#if job.done}
+                  {#if !job.success && job.retryQueuedOp && !job.retried}
+                    <button
+                      class="job-btn"
+                      onclick={() => app.retryFailedJob(job.id)}
+                      disabled={app.queueRunning || app.failedQueueRetryRunning}
+                    >{t("jobsPanel.retry")}</button>
+                  {/if}
                   <button class="job-btn" onclick={() => app.dismissJob(job.id)}>{t("jobsPanel.dismiss")}</button>
                 {/if}
               </div>

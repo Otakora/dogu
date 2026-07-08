@@ -22,7 +22,7 @@
     analysis: SelectionAnalysisDto;
     initialMode?: Mode;
     onclose: () => void;
-    onConvert: (paths: string[], opts: ChdConversionOptionsPayload) => void;
+    onConvert: (sources: ChdSourceDto[], opts: ChdConversionOptionsPayload) => void;
     onRestore: (paths: string[], opts: ChdRestoreOptionsPayload) => void;
   };
 
@@ -179,7 +179,6 @@
   // ── Submit ─────────────────────────────────────────────────
   function submit() {
     if (mode === "convert") {
-      const paths = validSources.map(s => s.sourcePath);
       const opts: ChdConversionOptionsPayload = {
         nameAsContainer: namingMode === "container",
         depositToParent: convDestMode === "parent",
@@ -194,7 +193,7 @@
         remoteDestination: convRemoteDest,
         remoteTransfer: isConvRemoteDest ? { onError: convOnError } : null,
       };
-      onConvert(paths, opts);
+      onConvert(validSources, opts);
     } else {
       const opts: ChdRestoreOptionsPayload = {
         individualFolders: restIndividual,

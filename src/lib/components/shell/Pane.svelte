@@ -13,6 +13,7 @@
     onCopy: (paths: string[]) => void;
     onCut: (paths: string[]) => void;
     onPaste: () => void;
+    onDropItems: (items: Array<{ path: string; isDir: boolean }>, destination: string, preferredOperation?: "copy" | "move" | null) => void;
     onExtractHere: (paths: string[]) => void;
     onExtractToFolder: (paths: string[]) => void;
     onExtractTo: (paths: string[]) => void;
@@ -28,6 +29,7 @@
   let {
     paneIdx,
     onDelete, onCopy, onCut, onPaste,
+    onDropItems,
     onExtractHere, onExtractToFolder, onExtractTo,
     onCompressQuick, onCompress, onChd, onDiscImage, onM3u,
     onProperties, onOpenWith,
@@ -79,6 +81,7 @@
       {onCopy}
       {onCut}
       {onPaste}
+      {onDropItems}
       {onExtractHere}
       {onExtractToFolder}
       {onExtractTo}

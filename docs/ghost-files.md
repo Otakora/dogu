@@ -38,10 +38,10 @@ navigable and you can queue operations on nested files. Remote and ghost
 archives are not previewed, so they produce no ghosts (the extraction still runs
 normally).
 
-**Known limitation:** copying or moving a *folder* predicts a ghost for the
-folder itself but not its contents, so you can't yet drill into a moved/copied
-ghost folder to act on its children. Extraction is the fully-supported deep case.
-Relocating a ghost subtree on copy/move is a planned follow-up.
+Copying or moving a *folder* predicts the folder immediately and mirrors the
+source tree lazily when you open that ghost folder, so queued work can continue
+inside copied/moved folder ghosts. Extraction remains the richest prediction:
+it previews the whole archive tree up front, including nested folders and files.
 
 ## Execution & dependencies
 

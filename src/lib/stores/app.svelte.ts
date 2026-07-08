@@ -30,6 +30,11 @@ import { normalizePath, uniqueDisplayPath, basenameOf } from "../utils/ghosts.js
 // outside reactive state (a plain Map) so frequent scroll writes cause no churn.
 // Lets Dogu restore the scroll position when navigating back into a folder.
 const scrollMemory = new Map<string, number>();
+let _retryQueueSeq = 0;
+
+function newRetryQueueOpId(): string {
+  return `qretry-${Date.now()}-${++_retryQueueSeq}`;
+}
 
 // ─── Local types ───────────────────────────────────────────
 type ConfirmDialogState = {
@@ -77,6 +82,11 @@ export type CrossPaneDragState = {
   fromTabIdx: number;
   toPaneIdx: number;
   toInsertIdx: number;
+} | null;
+
+export type FileDragState = {
+  items: Array<{ path: string; isDir: boolean }>;
+  sourcePaneIdx: number;
 } | null;
 
 // PaneView: pane-scoped interface used by Toolbar, TabBar, ContentPanel via Svelte context
@@ -161,12 +171,15 @@ type JobEntry = {
   pauseError: string | null;
   pauseFileName: string | null;
   pauseIsRecoverable: boolean;
+  retryQueuedOp: QueuedOp | null;
+  retried: boolean;
 };
 
 type StartJobOpts = {
   showDialog?: boolean;
   statusMessageOnSuccess?: string;
   statusMessageOnFailure?: string;
+  retryQueuedOp?: QueuedOp | null;
 };
 
 type QueueRunStats = {
@@ -415,6 +428,16 @@ function pathsOverlap(a: string, b: string): boolean {
   return pathContainsOther(a, b) || pathContainsOther(b, a);
 }
 
+function deleteVsSourceSeverity(deletePath: string, sourcePath: string): ConflictSeverity | null {
+  // Deleting the source itself (or one of its ancestors) makes a later consumer
+  // impossible even in sequential order.
+  if (pathContainsOther(deletePath, sourcePath)) return "blocking";
+  // Deleting something *inside* a source directory just changes that tree's
+  // contents; queue order still makes sequential execution safe.
+  if (pathContainsOther(sourcePath, deletePath)) return "parallel-only";
+  return null;
+}
+
 /**
  * Resolves the final output paths of every queued op against the outputs of
  * earlier ops (in queue order), applying the rename-on-conflict policy. This is
@@ -473,12 +496,17 @@ function detectConflicts(ops: QueuedOp[]): QueueConflict[] {
 
       // `a` deletes something `b` needs as input, or is going to create.
       for (const d of a.deletes) {
-        for (const s of b.sources) { if (pathsOverlap(d, s)) push(a.id, b.id, "source-deleted", "blocking", d, s); }
+        for (const s of b.sources) {
+          const severity = deleteVsSourceSeverity(d, s);
+          if (severity) push(a.id, b.id, "source-deleted", severity, d, s);
+        }
         for (const p of outB)      { if (pathsOverlap(d, p)) push(a.id, b.id, "dest-deleted",   "blocking", d, p); }
       }
 
       for (const d of b.deletes) {
-        for (const s of a.sources) { if (pathsOverlap(d, s)) push(b.id, a.id, "source-deleted", "parallel-only", d, s); }
+        for (const s of a.sources) {
+          if (deleteVsSourceSeverity(d, s)) push(b.id, a.id, "source-deleted", "parallel-only", d, s);
+        }
         for (const p of outA)      { if (pathsOverlap(d, p)) push(b.id, a.id, "dest-deleted",   "parallel-only", d, p); }
       }
     }
@@ -501,10 +529,30 @@ function ghostProducerOf(path: string, ops: QueuedOp[]): string | null {
   return null;
 }
 
+function ghostProducersTouchingPath(path: string, ops: QueuedOp[], includeDescendantGhosts: boolean): string[] {
+  const np = normalizePath(path);
+  const producers = new Set<string>();
+  const resolvedOutputs = resolveQueueOutputs(ops);
+  for (const op of ops) {
+    for (const g of resolvedOutputs.get(op.id) ?? op.produces) {
+      const gp = normalizePath(g.path);
+      const pathConsumesGhost = np === gp || np.startsWith(gp + "/");
+      const pathContainsGhost = includeDescendantGhosts && gp.startsWith(np + "/");
+      if (pathConsumesGhost || pathContainsGhost) producers.add(op.id);
+    }
+  }
+  return [...producers];
+}
+
 /** Computes which already-queued ops an op depends on (consumes their outputs). */
 function linkDependencies(op: QueuedOp, existing: QueuedOp[]): string[] {
   const deps = new Set<string>();
   for (const input of [...op.sources, ...op.deletes]) {
+    for (const producer of ghostProducersTouchingPath(input, existing, true)) {
+      if (producer !== op.id) deps.add(producer);
+    }
+  }
+  for (const input of op.destinations) {
     const producer = ghostProducerOf(input, existing);
     if (producer && producer !== op.id) deps.add(producer);
   }
@@ -526,6 +574,16 @@ function collectDependents(ids: string[], ops: QueuedOp[]): Set<string> {
     }
   }
   return result;
+}
+
+function cloneQueuedOpForRetry(op: QueuedOp): QueuedOp {
+  const retryId = newRetryQueueOpId();
+  return {
+    ...op,
+    id: retryId,
+    dependsOn: [],
+    produces: op.produces.map((ghost) => ({ ...ghost, producedByOpId: retryId })),
+  };
 }
 
 /** True when every op appears after all the ops it depends on. */
@@ -659,6 +717,7 @@ function createAppState() {
   // Jobs
   let jobs = $state<JobEntry[]>([]);
   let jobsPanelOpen = $state(false);
+  let failedQueueRetryRunning = $state(false);
   const jobWaiters = new Map<string, Array<(success: boolean) => void>>();
 
   // Operation queue — starts in the user's configured default mode.
@@ -676,6 +735,7 @@ function createAppState() {
 
   // Cross-pane tab drag
   let crossPaneDrag = $state<CrossPaneDragState>(null);
+  let fileDrag = $state<FileDragState>(null);
 
   // Notifications
   let notifications = $state<NotificationEntry[]>([]);
@@ -1040,6 +1100,8 @@ function createAppState() {
     // ── Cross-pane tab drag ───────────────────────────────────
     get crossPaneDrag() { return crossPaneDrag; },
     setCrossPaneDrag(s: CrossPaneDragState) { crossPaneDrag = s; },
+    get fileDrag() { return fileDrag; },
+    setFileDrag(s: FileDragState) { fileDrag = s; },
 
     moveTabToPane(fromPaneIdx: number, fromTabIdx: number, toPaneIdx: number, toInsertIdx: number) {
       const fromPane = panes[fromPaneIdx];
@@ -1215,6 +1277,7 @@ function createAppState() {
     // ── Jobs / operation queue ────────────────────────────────
     get jobs() { return jobs; },
     get jobsPanelOpen() { return jobsPanelOpen; },
+    get failedQueueRetryRunning() { return failedQueueRetryRunning; },
     openJobsPanel()   { jobsPanelOpen = true; },
     closeJobsPanel()  { jobsPanelOpen = false; },
     toggleJobsPanel() { jobsPanelOpen = !jobsPanelOpen; },
@@ -1236,6 +1299,8 @@ function createAppState() {
         pauseError: null,
         pauseFileName: null,
         pauseIsRecoverable: false,
+        retryQueuedOp: opts?.retryQueuedOp ?? null,
+        retried: false,
       };
       jobs = [job, ...jobs];
       jobsPanelOpen = true;
@@ -1284,6 +1349,45 @@ function createAppState() {
       const idx = jobs.findIndex(j => j.id === jobId);
       if (idx === -1) return;
       jobs[idx] = { ...jobs[idx], paused: false, pauseError: null, pauseFileName: null, pauseIsRecoverable: false };
+    },
+
+    retryFailedJob(jobId: string) {
+      if (queueRunning || failedQueueRetryRunning) return false;
+      const idx = jobs.findIndex(j => j.id === jobId);
+      if (idx === -1) return false;
+      const job = jobs[idx];
+      if (!job.done || job.success || job.retried || !job.retryQueuedOp) return false;
+      jobs[idx] = { ...job, retried: true };
+      const retryOp = cloneQueuedOpForRetry(job.retryQueuedOp);
+      void retryOp.execute(undefined, retryOp);
+      jobsPanelOpen = true;
+      return true;
+    },
+
+    async retryAllFailedJobs() {
+      if (queueRunning || failedQueueRetryRunning) return 0;
+      const retryable = jobs
+        .map((job, index) => ({ job, index }))
+        .filter(({ job }) => job.done && !job.success && !job.retried && !!job.retryQueuedOp);
+      if (retryable.length === 0) return 0;
+
+      failedQueueRetryRunning = true;
+      jobs = jobs.map((job, index) => {
+        const shouldMark = retryable.some((entry) => entry.index === index);
+        return shouldMark ? { ...job, retried: true } : job;
+      });
+      jobsPanelOpen = true;
+
+      try {
+        for (const { job } of retryable) {
+          const retryOp = cloneQueuedOpForRetry(job.retryQueuedOp!);
+          await retryOp.execute(undefined, retryOp);
+        }
+      } finally {
+        failedQueueRetryRunning = false;
+      }
+
+      return retryable.length;
     },
 
     dismissJob(jobId: string) { jobs = jobs.filter(j => j.id !== jobId); },
@@ -1468,7 +1572,7 @@ function createAppState() {
         updateStats({ running: queueRunStats!.running + 1 });
         let ok = false;
         try {
-          ok = await op.execute();
+          ok = await op.execute(undefined, op);
         } catch {
           ok = false;
         }

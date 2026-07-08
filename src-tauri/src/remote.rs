@@ -986,10 +986,17 @@ impl RemoteManager {
         let (is_dir, child_virtual_paths) = {
             let mut session = self.get_session_mut(&session_id)?;
             let provider_path = session.resolve_provider_path(&logical_path);
-            let item = session
-                .fs
-                .stat(Path::new(&provider_path))
-                .map_err(|error| anyhow!(error.to_string()))?;
+            let item = match session.fs.stat(Path::new(&provider_path)) {
+                Ok(item) => item,
+                Err(error) => {
+                    let message = error.to_string();
+                    if is_remote_not_found_error(&message) {
+                        ops::emit_log(app, job_id, format!("{indent}  omitido: ya no existe"))?;
+                        return Ok(());
+                    }
+                    return Err(anyhow!(message));
+                }
+            };
             if item.is_dir() {
                 let children = session
                     .fs
@@ -2813,6 +2820,14 @@ fn remove_remote_target(fs: &mut dyn RemoteFs, path: &Path) -> Result<()> {
         fs.remove_file(path)
             .map_err(|error| anyhow!(error.to_string()))
     }
+}
+
+fn is_remote_not_found_error(message: &str) -> bool {
+    let msg = message.to_lowercase();
+    msg.contains("no such file")
+        || msg.contains("not found")
+        || msg.contains("does not exist")
+        || msg.contains("not exist")
 }
 
 fn remove_local_target(path: &Path) -> Result<()> {

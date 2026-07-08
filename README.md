@@ -25,6 +25,14 @@ file explorer, an SFTP client, 7-Zip, a terminal and a couple of home-made `chdm
 all open at once. Dogu folds every one of those steps into a single tool so you stop
 alt-tabbing between half a dozen programs to prepare one folder of games.
 
+### Development status and safety
+
+Dogu is in active development. It already performs real file operations, remote transfers and
+optional destructive cleanup steps, so treat it as a power tool: test new workflows on copied
+data first, keep backups of anything important and review queued delete / move / "delete
+originals" operations before running them. The app tries to predict conflicts and protect the
+queue, but it should not be your only safety net yet.
+
 ### What Dogu is *not*
 
 It is **not** a launcher or a frontend. If you want to browse box art and press play — that is
@@ -42,7 +50,8 @@ place where you *curate, transfer and convert* the files before they ever reach 
 **📁 Dual-pane file explorer** — Two independent panes side by side, each with its own tabs,
 history and view mode. Drag tabs between panes, edit paths directly, search with `Ctrl+F`, and
 switch between list and grid views. The classic copy / cut / paste / rename / delete you'd
-expect, plus a properties panel.
+expect, plus a properties panel. Files and folders can also be dragged between panes, into
+folders or onto breadcrumb segments for quick copy/move operations.
 
 **🌐 Persistent remote connections** — Connect over **SSH/SFTP**, **SCP**, **FTP**, **FTPS**
 and **SMB**. Save connection profiles, keep several sessions open at once and switch between
@@ -69,6 +78,11 @@ operation's sources, destinations and deletions and warns you when they collide:
 Then you choose: run everything **in parallel** for speed, or **sequentially** for safety, with
 live stats (completed / succeeded / failed) as it goes. It's the difference between babysitting a
 pile of scripts and queueing a night's worth of work in one confident click.
+
+The queue also shows **ghost files and folders** for outputs that do not exist yet, so you can
+chain extraction, conversion, playlist generation and transfers before the first operation has
+run. Failed operations can be retried individually, or all failed queue items can be retried in
+one pass after you fix the cause.
 
 **📦 Archive extraction** — Unpack `.zip`, `.7z`, `.rar` and more, one at a time or in bulk,
 with destination options and a preview. **7-Zip is bundled** — nothing to install.
@@ -164,6 +178,14 @@ con un explorador de archivos, un cliente SFTP, 7-Zip, una terminal y un par de 
 de `chdman`, todos abiertos a la vez. Dogu reúne cada uno de esos pasos en una única herramienta
 para que dejes de saltar entre media docena de programas solo para preparar una carpeta de juegos.
 
+### Estado de desarrollo y seguridad
+
+Dogu está en desarrollo activo. Ya ejecuta operaciones reales sobre archivos, transferencias
+remotas y limpiezas destructivas opcionales, así que úsalo como una herramienta potente: prueba
+flujos nuevos sobre copias de datos, mantén copias de seguridad de lo importante y revisa las
+operaciones en cola de borrar / mover / "eliminar originales" antes de ejecutarlas. La app intenta
+predecir conflictos y proteger la cola, pero todavía no debería ser tu única red de seguridad.
+
 ### Lo que Dogu *no* es
 
 **No** es un launcher ni un frontend. Si lo que quieres es ver carátulas y darle a jugar, de eso
@@ -181,7 +203,9 @@ donde *organizas, transfieres y conviertes* los archivos antes de que lleguen a 
 **📁 Explorador de doble panel** — Dos paneles independientes lado a lado, cada uno con sus
 propias pestañas, historial y modo de vista. Arrastra pestañas entre paneles, edita rutas
 directamente, busca con `Ctrl+F` y alterna entre vista de lista y cuadrícula. El clásico
-copiar / cortar / pegar / renombrar / eliminar de siempre, más un panel de propiedades.
+copiar / cortar / pegar / renombrar / eliminar de siempre, más un panel de propiedades. También
+puedes arrastrar archivos y carpetas entre paneles, dentro de carpetas o sobre secciones de la
+barra de ruta para copiar/mover rápidamente.
 
 **🌐 Conexiones remotas persistentes** — Conecta por **SSH/SFTP**, **SCP**, **FTP**, **FTPS** y
 **SMB**. Guarda perfiles de conexión, mantén varias sesiones abiertas a la vez y cambia entre
@@ -210,6 +234,11 @@ cuando chocan:
 Después eliges: ejecutar todo **en paralelo** por velocidad, o **en secuencia** por seguridad, con
 estadísticas en vivo (completadas / correctas / fallidas) sobre la marcha. Es la diferencia entre
 vigilar un montón de scripts y encolar el trabajo de toda una noche en un único clic con confianza.
+
+La cola también muestra **archivos y carpetas fantasma** para salidas que todavía no existen, de
+forma que puedes encadenar extracciones, conversiones, listas M3U y transferencias antes de que
+arranque la primera operación. Las operaciones fallidas se pueden reintentar de forma individual
+o reintentar todas las fallidas en una sola pasada cuando corrijas la causa.
 
 **📦 Extracción de comprimidos** — Descomprime `.zip`, `.7z`, `.rar` y más, de uno en uno o en
 masa, con opciones de destino y previsualización. **7-Zip viene integrado** — nada que instalar.

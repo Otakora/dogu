@@ -543,7 +543,7 @@ export type QueuedOp = {
   /** Effective conflict policy — drives the overlay's replace/rename/conflict rendering. */
   overwrite: boolean;
   renameOnConflict: boolean;
-  execute: () => Promise<boolean>;
+  execute: (jobId?: string, retryQueuedOp?: QueuedOp | null) => Promise<boolean>;
 };
 
 export type ConflictKind = 'source-deleted' | 'dest-deleted' | 'dest-collision';

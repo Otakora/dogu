@@ -27,6 +27,8 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "Otakora",
+    "homepage": "https://github.com/Otakora/dogu",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -114,14 +114,17 @@
       <!-- Source -->
       <div class="section section--source">
         <span class="source-label">{t("about.sourceCode")}</span>
-        <button class="link-btn" onclick={() => openUrl("https://github.com/Otakora/dogu")}>
-          github.com/Otakora/dogu
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-            <polyline points="15 3 21 3 21 9"/>
-            <line x1="10" y1="14" x2="21" y2="3"/>
-          </svg>
-        </button>
+        <div class="source-meta">
+          <button class="link-btn" onclick={() => openUrl("https://github.com/Otakora/dogu")}>
+            github.com/Otakora/dogu
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+              <polyline points="15 3 21 3 21 9"/>
+              <line x1="10" y1="14" x2="21" y2="3"/>
+            </svg>
+          </button>
+          <span class="source-note">{t("about.officialNote")}</span>
+        </div>
       </div>
 
     </div>
@@ -305,7 +308,7 @@
   /* ── Source row ── */
   .section--source {
     flex-direction: row;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     padding: 10px 12px;
     background: var(--surface-alt);
@@ -317,5 +320,20 @@
   .source-label {
     font-size: 12px;
     color: var(--text-muted);
+  }
+
+  .source-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    text-align: right;
+  }
+
+  .source-note {
+    max-width: 260px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-subtle);
   }
 </style>

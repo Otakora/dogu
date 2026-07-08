@@ -1,9 +1,12 @@
 [package]
 name = "dogu"
 version = "0.2.3"
-description = "ROM manager desktop app"
-authors = ["wind"]
+description = "A practical desktop file workbench for local files, remotes and queued operations."
+authors = ["Otakora"]
 edition = "2021"
+license = "GPL-2.0-or-later"
+homepage = "https://github.com/Otakora/dogu"
+repository = "https://github.com/Otakora/dogu"
 
 [lib]
 name = "dogu_lib"

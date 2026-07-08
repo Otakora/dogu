@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement for Dogu
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For support questions, setup help, or broad brainstorming, please use GitHub Discussions.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Explain the user need behind the request.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Dogu to do?
+      description: Describe the desired behavior or workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround or alternatives
+      description: Tell us how you handle this today, if at all.

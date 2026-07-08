@@ -15,6 +15,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v4
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -27,24 +35,28 @@ jobs:
         run: npm ci
       - name: Run frontend checks
         run: npm run check
+      - name: Build frontend
+        run: npm run build
 
   rust-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Run Rust checks
         working-directory: src-tauri
-        run: cargo check
+        run: cargo check --locked
       - name: Run focused Rust tests
         working-directory: src-tauri
-        run: cargo test --lib remote::tests -- --nocapture
+        run: cargo test --locked --lib remote::tests -- --nocapture
 
   rust-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -61,7 +73,7 @@ jobs:
             patchelf
       - name: Run Rust checks
         working-directory: src-tauri
-        run: cargo check
+        run: cargo check --locked
       - name: Run focused Rust tests
         working-directory: src-tauri
-        run: cargo test --lib remote::tests -- --nocapture
+        run: cargo test --locked --lib remote::tests -- --nocapture

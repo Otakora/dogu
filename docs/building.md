@@ -16,7 +16,7 @@ Para las releases oficiales automatizadas en GitHub estamos fijando, por ahora, 
 
 ## Requisitos generales
 
-- Node.js 20+
+- Node.js 20.19+ o 22.12+
 - Rust toolchain estable (`rustup toolchain install stable`)
 - Python 3.12+ (solo para los scripts de release)
 - `npm`
@@ -168,19 +168,25 @@ Ahora se ejecuta:
 - manualmente desde GitHub Actions (`workflow_dispatch`)
 - automaticamente al subir un tag `v*` como `v0.2.3`
 
-En ese flujo se generan los instaladores y paquetes de distribucion:
+En ese flujo se generan los paquetes oficiales de distribucion:
 
 | Job | Artefacto |
 |-----|-----------|
 | `windows` | `dogu-windows-x64-<version>-setup.exe` |
-| `linux-native` | `dogu-linux-x86_64-<version>.AppImage` + `dogu-linux-x86_64-<version>.deb` |
+| `linux-deb` | `dogu-linux-x86_64-<version>.deb` |
 | `linux-flatpak` | `dogu-linux-x86_64-<version>.flatpak` |
+| `publish-release` | Adjunta a GitHub Release los artefactos validados |
 
 Cuando el trigger es un tag `v*`, los artefactos generados se adjuntan automaticamente a la GitHub Release correspondiente.
 
+Ese flujo tambien publica `SHA256SUMS.txt` para verificar los artefactos oficiales descargados desde GitHub Releases.
+
 La `<version>` se toma automaticamente del `version` del proyecto, priorizando `src-tauri/Cargo.toml` y usando `package.json` como respaldo.
 
-Por ahora los jobs Linux estan marcados como no bloqueantes en el flujo de release para no impedir publicar una version oficial mientras se estabiliza el empaquetado Linux.
+Antes de compilar, el workflow valida dos cosas:
+
+- que `package.json` y `src-tauri/Cargo.toml` tengan la misma version
+- que un tag `v*` coincida exactamente con esa version
 
 ---
 

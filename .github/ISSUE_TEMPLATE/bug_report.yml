@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a defect or regression in Dogu
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem.
+        For support questions or workflow discussion, please use GitHub Discussions.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the steps as clearly as you can.
+      placeholder: |
+        1. Open...
+        2. Select...
+        3. Run...
+        4. Observe...
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - Linux
+        - Other / mixed environment
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Dogu version
+      placeholder: 0.2.3
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Path scope
+      options:
+        - Local paths only
+        - Remote paths only
+        - Both local and remote
+        - Not sure
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots, or extra context
+      description: Paste anything that would help understand the failure.

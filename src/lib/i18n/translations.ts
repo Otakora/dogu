@@ -360,7 +360,8 @@ const en = {
   "about.tagline": "Desktop application for managing ROM collections.",
   "about.thirdParty": "Third-party tools",
   "about.licensesNote": "License files are included in the application installation directory under third_party/.",
-  "about.sourceCode": "Source code",
+  "about.sourceCode": "Official source",
+  "about.officialNote": "GitHub Releases are the official distribution channel for Dogu.",
   "about.close": "Close",
 
   // ── SettingsDialog ──────────────────────────────────────
@@ -1044,7 +1045,8 @@ const es: Record<TranslationKey, string> = {
   "about.tagline": "Aplicación de escritorio para gestionar colecciones de ROMs.",
   "about.thirdParty": "Herramientas de terceros",
   "about.licensesNote": "Los archivos de licencia se incluyen en el directorio de instalación de la aplicación, dentro de third_party/.",
-  "about.sourceCode": "Código fuente",
+  "about.sourceCode": "Fuente oficial",
+  "about.officialNote": "GitHub Releases es el canal oficial de distribución de Dogu.",
   "about.close": "Cerrar",
 
   // ── SettingsDialog ──────────────────────────────────────

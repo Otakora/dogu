@@ -13,6 +13,18 @@
 
 ---
 
+> Official source / Fuente oficial: [github.com/Otakora/dogu](https://github.com/Otakora/dogu)
+>
+> Official releases / Releases oficiales: [GitHub Releases](https://github.com/Otakora/dogu/releases)
+>
+> Release verification / Verificación de releases: official releases publish `SHA256SUMS.txt`
+>
+> Questions and support / Preguntas y soporte: GitHub Discussions
+>
+> Bugs and feature requests / Bugs y propuestas: GitHub Issues
+>
+> License / Licencia: `GPL-2.0-or-later`
+
 <a id="english"></a>
 
 ## English
@@ -413,6 +425,7 @@ Los detalles legales y de redistribución están documentados en [THIRD_PARTY_NO
 Requisitos:
 
 - Node.js 20 o superior.
+- Node.js 20.19 o superior, o 22.12 o superior.
 - Toolchain estable de Rust.
 - Requisitos de plataforma necesarios para Tauri.
 

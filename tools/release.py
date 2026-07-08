@@ -71,15 +71,15 @@ def host_os() -> str:
 
 
 def node_executable() -> Path:
+    resolved = shutil.which("node") or shutil.which("nodejs")
+    if resolved:
+        return Path(resolved)
     if host_os() == "windows":
         program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
         preferred = program_files / "nodejs" / "node.exe"
         if preferred.exists():
             return preferred
-    resolved = shutil.which("node") or shutil.which("nodejs")
-    if not resolved:
-        raise RuntimeError("No se encontro Node.js. Instala Node 20+ antes de compilar.")
-    return Path(resolved)
+    raise RuntimeError("No se encontro Node.js. Instala Node 20.19+ o 22.12+ antes de compilar.")
 
 
 def npm_command() -> Path:

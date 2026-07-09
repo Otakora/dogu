@@ -24,6 +24,18 @@ FLATPAK_RUNTIME = "org.freedesktop.Platform//24.08"
 FLATPAK_SDK = "org.freedesktop.Sdk//24.08"
 FLATPAK_NODE_EXT = "org.freedesktop.Sdk.Extension.node20//24.08"
 FLATPAK_RUST_EXT = "org.freedesktop.Sdk.Extension.rust-stable//24.08"
+GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+BUNDLED_SIDECARS = (
+    PROJECT_ROOT / "third_party" / "7zip" / "linux" / "7zz",
+    PROJECT_ROOT / "third_party" / "7zip" / "windows" / "7z.dll",
+    PROJECT_ROOT / "third_party" / "7zip" / "windows" / "7z.exe",
+    PROJECT_ROOT / "third_party" / "7zip" / "windows" / "7za.dll",
+    PROJECT_ROOT / "third_party" / "7zip" / "windows" / "7za.exe",
+    PROJECT_ROOT / "third_party" / "chdman" / "linux" / "chdman",
+    PROJECT_ROOT / "third_party" / "chdman" / "windows" / "chdman.exe",
+    PROJECT_ROOT / "third_party" / "dolphin-tool" / "linux" / "DolphinTool",
+    PROJECT_ROOT / "third_party" / "dolphin-tool" / "windows" / "DolphinTool.exe",
+)
 
 
 def run(command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
@@ -109,6 +121,27 @@ def ensure_node_modules() -> None:
     run(command, env=env)
 
 
+def ensure_bundled_sidecars_materialized() -> None:
+    missing = [path for path in BUNDLED_SIDECARS if not path.exists()]
+    if missing:
+        names = ", ".join(str(path.relative_to(PROJECT_ROOT)) for path in missing)
+        raise RuntimeError(f"Faltan sidecars integrados necesarios para la release: {names}")
+
+    pointers = []
+    for path in BUNDLED_SIDECARS:
+        with path.open("rb") as handle:
+            head = handle.read(len(GIT_LFS_POINTER_PREFIX))
+        if head == GIT_LFS_POINTER_PREFIX:
+            pointers.append(path)
+
+    if pointers:
+        names = ", ".join(str(path.relative_to(PROJECT_ROOT)) for path in pointers)
+        raise RuntimeError(
+            "Hay sidecars que son punteros de Git LFS en vez de binarios reales: "
+            f"{names}. Ejecuta `git lfs pull` o usa `actions/checkout` con `lfs: true`."
+        )
+
+
 def ensure_linux_sidecars_permissions() -> None:
     if host_os() != "linux":
         return
@@ -140,6 +173,7 @@ def ensure_windows_rar_extraction_sidecars() -> None:
 
 def run_tauri(args: list[str]) -> None:
     env = build_env()
+    ensure_bundled_sidecars_materialized()
     ensure_node_modules()
     run([str(node_executable()), str(TAURI_CLI), *args], env=env)
 

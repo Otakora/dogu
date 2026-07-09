@@ -204,6 +204,11 @@ El mapeo de recursos de Tauri conserva la carpeta como `third_party/...` dentro
 del bundle instalado. Dogu tambien acepta la ruta legacy `_up_/third_party/...`
 generada por builds anteriores.
 
+Los binarios de `third_party/` estan gestionados por Git LFS. Antes de generar
+artefactos locales, verifica que el checkout ha materializado los binarios reales
+(`git lfs pull`). El script de release falla explicitamente si detecta punteros
+LFS empaquetables como `.exe`, `.dll`, `chdman`, `7zz` o `DolphinTool`.
+
 En Linux el script de release aplica `chmod +x` a estos binarios antes de compilar. En Windows no es necesario.
 
 La extraccion `.rar` debe funcionar sin depender de una instalacion externa de

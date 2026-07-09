@@ -77,7 +77,7 @@ Salida esperada:
 - `dist/dogu-linux-x86_64-<version>.AppImage`
 - `dist/dogu-linux-x86_64-<version>.deb`
 
-El script aplica permisos de ejecucion a los sidecars (`chdman`, `7zz`) antes de compilar.
+El script aplica permisos de ejecucion a los binarios Linux integrados (`chdman`, `7zz`, `DolphinTool`) antes de compilar.
 
 Si solo necesitas el paquete DEB, puedes usar:
 
@@ -131,7 +131,7 @@ Notas importantes:
 - El script compila primero el binario release de Tauri sin bundles y despues construye el bundle Flatpak sobre ese resultado.
 - Requiere `flatpak` y `flatpak-builder` instalados.
 - Usa el runtime `org.freedesktop.Platform//24.08` y las extensiones `node20` y `rust-stable`.
-- El wrapper Flatpak fija `DOGU_RESOURCES_DIR` para que la app localice `chdman` y `7-Zip` integrados.
+- El wrapper Flatpak fija `DOGU_RESOURCES_DIR` para que la app localice `chdman`, `7-Zip` y `DolphinTool` integrados.
 
 Dependencias adicionales para Flatpak:
 
@@ -166,7 +166,7 @@ El job de Linux instala solo las dependencias necesarias para validar el backend
 Ahora se ejecuta:
 
 - manualmente desde GitHub Actions (`workflow_dispatch`)
-- automaticamente al subir un tag `v*` como `v0.2.3`
+- automaticamente al subir un tag `v*` como `v0.2.4`
 
 En ese flujo se generan los paquetes oficiales de distribucion:
 
@@ -192,12 +192,17 @@ Antes de compilar, el workflow valida dos cosas:
 
 ## Sidecars
 
-Los binarios de terceros se incluyen en `third_party/` y Tauri los empaqueta como sidecars:
+Los binarios de terceros se incluyen en `third_party/` y Tauri los empaqueta como recursos de la app:
 
 | Binario | Windows | Linux |
 |---------|---------|-------|
-| chdman | `third_party/chdman/chdman.exe` | `third_party/chdman/linux/chdman` |
+| chdman | `third_party/chdman/windows/chdman.exe` | `third_party/chdman/linux/chdman` |
 | 7-Zip | `third_party/7zip/windows/7z.exe` + `7z.dll` para RAR; `7za.exe` + `7za.dll` legado | `third_party/7zip/linux/7zz` |
+| DolphinTool | `third_party/dolphin-tool/windows/DolphinTool.exe` | `third_party/dolphin-tool/linux/DolphinTool` |
+
+El mapeo de recursos de Tauri conserva la carpeta como `third_party/...` dentro
+del bundle instalado. Dogu tambien acepta la ruta legacy `_up_/third_party/...`
+generada por builds anteriores.
 
 En Linux el script de release aplica `chmod +x` a estos binarios antes de compilar. En Windows no es necesario.
 

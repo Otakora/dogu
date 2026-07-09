@@ -23,21 +23,39 @@ fn exe_name(base: &str) -> String {
 
 pub fn runtime_root(app: &AppHandle) -> PathBuf {
     if let Some(env_root) = std::env::var_os("DOGU_RESOURCES_DIR") {
-        return PathBuf::from(env_root);
+        return normalize_resource_root(PathBuf::from(env_root));
     }
 
     if cfg!(debug_assertions) {
-        return PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        return normalize_resource_root(project_root);
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
-        return resource_dir;
+        return normalize_resource_root(resource_dir);
     }
 
-    PathBuf::from(".")
+    normalize_resource_root(PathBuf::from("."))
+}
+
+fn normalize_resource_root(root: PathBuf) -> PathBuf {
+    if has_bundled_resources(&root) {
+        return root;
+    }
+
+    let tauri_parent_escape_root = root.join("_up_");
+    if has_bundled_resources(&tauri_parent_escape_root) {
+        return tauri_parent_escape_root;
+    }
+
+    root
+}
+
+fn has_bundled_resources(root: &Path) -> bool {
+    root.join("third_party").exists() || root.join("THIRD_PARTY_NOTICES").exists()
 }
 
 pub fn chdman_path(app: &AppHandle) -> Option<PathBuf> {

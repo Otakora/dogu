@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Dogu",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "identifier": "io.github.otakora.dogu",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -37,11 +37,11 @@
       "icons/icon.ico"
     ],
     "targets": "all",
-    "resources": [
-      "../third_party/**/*",
-      "../THIRD_PARTY_NOTICES",
-      "../packaging/assets/io.github.otakora.dogu.svg"
-    ],
+    "resources": {
+      "../third_party": "third_party",
+      "../THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES",
+      "../packaging/assets/io.github.otakora.dogu.svg": "packaging/assets/io.github.otakora.dogu.svg"
+    },
     "linux": {
       "appimage": {
         "bundleMediaFramework": false

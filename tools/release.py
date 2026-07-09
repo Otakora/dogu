@@ -115,6 +115,7 @@ def ensure_linux_sidecars_permissions() -> None:
     for binary in (
         PROJECT_ROOT / "third_party" / "chdman" / "linux" / "chdman",
         PROJECT_ROOT / "third_party" / "7zip" / "linux" / "7zz",
+        PROJECT_ROOT / "third_party" / "dolphin-tool" / "linux" / "DolphinTool",
     ):
         if binary.exists():
             current = binary.stat().st_mode

@@ -1,7 +1,7 @@
 {
   "name": "dogu",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "A practical desktop file workbench for local files, remotes and queued operations.",
   "license": "GPL-2.0-or-later",
   "homepage": "https://github.com/Otakora/dogu",

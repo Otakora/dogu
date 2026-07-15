@@ -39,7 +39,7 @@ walkdir = "2"
 zip = { version = "2", default-features = false, features = ["aes-crypto", "bzip2", "deflate", "deflate64", "time", "zstd"] }
 sysinfo = { version = "0.32", default-features = false, features = ["disk"] }
 dirs = "5"
-portable-pty = "0.8"
+portable-pty = "0.9"
 regex = "1"
 flate2 = "1"
 xdvdfs = { version = "0.8.3", features = ["sync"] }

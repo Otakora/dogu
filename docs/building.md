@@ -157,6 +157,7 @@ sudo apt install -y \
   libfuse2t64 \
   libsmbclient \
   libsmbclient-dev \
+  libsdl2-2.0-0 \
   pkg-config \
   libgtk-3-dev \
   libgdk-pixbuf2.0-bin \
@@ -180,6 +181,10 @@ The GitHub runner also creates a compatibility symlink from
 `/usr/lib/gdk-pixbuf-2.0/2.10.0` to Ubuntu's multiarch GDK PixBuf module
 directory. This keeps `linuxdeploy-plugin-gtk` from failing when it expects the
 non-multiarch path.
+
+`libsdl2-2.0-0` is required because the bundled Linux `chdman` binary links
+against `libSDL2-2.0.so.0`; AppImage packaging has to resolve sidecar ELF
+dependencies too.
 
 ### Linux Flatpak build
 

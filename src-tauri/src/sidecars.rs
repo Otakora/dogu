@@ -3,6 +3,7 @@ use std::{
     process::Command,
 };
 
+use crate::process::hide_console_window;
 use tauri::{AppHandle, Manager};
 
 fn platform_name() -> &'static str {
@@ -187,7 +188,8 @@ fn tool_stem(path: &Path) -> Option<String> {
 }
 
 fn probe_seven_zip_for_rar_support(path: &Path) -> bool {
-    let Ok(output) = Command::new(path).arg("i").output() else {
+    let mut command = Command::new(path);
+    let Ok(output) = hide_console_window(&mut command).arg("i").output() else {
         return false;
     };
     if !output.status.success() {

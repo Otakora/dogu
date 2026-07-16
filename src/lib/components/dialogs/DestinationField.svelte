@@ -62,6 +62,7 @@
 
 {#if showPicker}
   <DestinationPickerModal
+    initialPath={path}
     onselect={(result) => { onchange(result.path, result.label); showPicker = false; }}
     onclose={() => (showPicker = false)}
   />

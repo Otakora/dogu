@@ -214,9 +214,10 @@ export function predictChdConvert(
 }
 
 /**
- * CHD restore: each `.chd` yields either a `.cue`+`.bin` pair (CD) or an `.iso`
- * (DVD) — Dogu only knows which by trying at runtime. Predictions are therefore
- * always approximate. We surface the most common CD case (`.cue` + `.bin`).
+ * CHD restore: each `.chd` yields a `.cue`+`.bin` pair (CD), a `.gdi`+tracks set
+ * (Dreamcast GD-ROM) or an `.iso` (DVD) — the backend picks the right one from
+ * the CHD's recorded geometry at runtime. Predictions are therefore always
+ * approximate; we surface the most common CD case (`.cue` + `.bin`).
  */
 export function predictChdRestore(
   chdPaths: string[],

@@ -18,6 +18,22 @@ pub struct EntryDto {
     pub root_label: Option<String>,
 }
 
+/// One file to rename to an ASCII-safe (de-accented) name. The frontend computes
+/// `new_name` (NFD + strip diacritics) so preview and action always match.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeaccentRenameRequest {
+    pub path: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeaccentRenameResult {
+    pub old_path: String,
+    pub new_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionProfileDto {
@@ -31,11 +47,17 @@ pub struct ConnectionProfileDto {
     pub share: String,
     pub workgroup: String,
     pub start_path: String,
+    #[serde(default)]
     pub ssh_mode: String,
+    #[serde(default)]
     pub ftp_mode: String,
+    #[serde(default)]
     pub ftp_secure_implicit: bool,
+    #[serde(default)]
     pub ftp_accept_invalid_certificates: bool,
+    #[serde(default)]
     pub ftp_accept_invalid_hostnames: bool,
+    #[serde(default)]
     pub trusted_fingerprints: Vec<String>,
 }
 

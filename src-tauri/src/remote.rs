@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -58,6 +58,8 @@ const DISK_USAGE_CACHE_TTL_SECS: u64 = 30;
 const FTP_CONNECT_TIMEOUT_SECS: u64 = 15;
 const FTP_COMMAND_TIMEOUT_SECS: u64 = 20;
 const SSH_AUX_TIMEOUT_SECS: u64 = 15;
+const TRANSFER_PROGRESS_MIN_BYTES: u64 = 256 * 1024;
+const TRANSFER_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(120);
 
 pub struct SshTerminalParams {
     pub host: String,
@@ -101,6 +103,109 @@ struct SessionAccess<'a> {
 struct CachedDiskUsage {
     expires_at: SystemTime,
     value: RemoteDiskUsageDto,
+}
+
+#[derive(Clone)]
+struct ByteTransferProgress {
+    app: AppHandle,
+    job_id: String,
+    total_bytes: u64,
+    state: Arc<Mutex<ByteTransferProgressState>>,
+}
+
+struct ByteTransferProgressState {
+    completed_bytes: u64,
+    last_emit_bytes: u64,
+    last_emit_at: Option<Instant>,
+}
+
+impl ByteTransferProgress {
+    fn new(app: &AppHandle, job_id: &str, total_bytes: u64) -> Self {
+        Self {
+            app: app.clone(),
+            job_id: job_id.to_string(),
+            total_bytes,
+            state: Arc::new(Mutex::new(ByteTransferProgressState {
+                completed_bytes: 0,
+                last_emit_bytes: 0,
+                last_emit_at: None,
+            })),
+        }
+    }
+
+    fn add(&self, bytes: u64, message: &str) {
+        if bytes == 0 || self.total_bytes == 0 {
+            return;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.completed_bytes = state
+            .completed_bytes
+            .saturating_add(bytes)
+            .min(self.total_bytes);
+        let now = Instant::now();
+        let byte_delta = state.completed_bytes.saturating_sub(state.last_emit_bytes);
+        let elapsed = state
+            .last_emit_at
+            .map(|instant| instant.elapsed() >= TRANSFER_PROGRESS_MIN_INTERVAL)
+            .unwrap_or(true);
+        if byte_delta >= TRANSFER_PROGRESS_MIN_BYTES
+            || elapsed
+            || state.completed_bytes >= self.total_bytes
+        {
+            self.emit_locked(&mut state, message, now);
+        }
+    }
+
+    fn complete_to(&self, completed_bytes: u64, message: &str) {
+        if self.total_bytes == 0 {
+            return;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.completed_bytes = completed_bytes
+            .min(self.total_bytes)
+            .max(state.completed_bytes);
+        self.emit_locked(&mut state, message, Instant::now());
+    }
+
+    fn emit_locked(&self, state: &mut ByteTransferProgressState, message: &str, now: Instant) {
+        let progress =
+            (state.completed_bytes as f64 / self.total_bytes.max(1) as f64).clamp(0.0, 1.0);
+        let _ = ops::emit_progress(&self.app, &self.job_id, progress, message.to_string());
+        state.last_emit_bytes = state.completed_bytes;
+        state.last_emit_at = Some(now);
+    }
+}
+
+struct ProgressReader<R> {
+    inner: R,
+    progress: Option<ByteTransferProgress>,
+    message: String,
+}
+
+impl<R> ProgressReader<R> {
+    fn new(inner: R, progress: Option<ByteTransferProgress>, message: String) -> Self {
+        Self {
+            inner,
+            progress,
+            message,
+        }
+    }
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        if read > 0 {
+            if let Some(progress) = &self.progress {
+                progress.add(read as u64, &self.message);
+            }
+        }
+        Ok(read)
+    }
 }
 
 impl<'a> Deref for SessionAccess<'a> {
@@ -675,6 +780,17 @@ impl RemoteManager {
         Ok(build_remote_virtual_path(&session_id, &logical_path))
     }
 
+    /// Synchronously deletes a single remote file or directory (recursive).
+    /// Direct counterpart to `create_folder` for the destination picker; the
+    /// job-based `delete_entry(app, job_id, …)` remains for logged bulk deletes.
+    pub fn remove_entry(&self, virtual_path: &str) -> Result<()> {
+        let (session_id, logical) = parse_remote_virtual_path(virtual_path)
+            .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
+        let mut session = self.get_session_mut(&session_id)?;
+        let provider_path = session.resolve_provider_path(&logical);
+        remove_remote_target(&mut *session.fs, Path::new(&provider_path))
+    }
+
     pub fn create_file(&self, parent: &str, name: &str) -> Result<String> {
         let (session_id, parent_logical) = parse_remote_virtual_path(parent)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {parent}"))?;
@@ -753,6 +869,7 @@ impl RemoteManager {
             &session_id,
             &entry_logical,
             true,
+            None,
         )?;
         Ok(build_remote_virtual_path(&session_id, &entry_logical))
     }
@@ -838,6 +955,15 @@ impl RemoteManager {
         overwrite: bool,
     ) -> Result<()> {
         let total = paths.len().max(1) as f64;
+        let source_estimates = paths
+            .iter()
+            .map(|source| self.estimate_transfer_bytes(source, &destination))
+            .collect::<Result<Vec<_>>>()?;
+        let total_bytes: u64 = source_estimates.iter().sum();
+        let byte_progress =
+            (total_bytes > 0).then(|| ByteTransferProgress::new(app, job_id, total_bytes));
+        let mut completed_estimated_bytes = 0_u64;
+
         for (index, source) in paths.iter().enumerate() {
             ops::emit_log(
                 app,
@@ -861,12 +987,14 @@ impl RemoteManager {
                     &destination,
                     operation == "cut",
                     overwrite,
+                    byte_progress.as_ref(),
                 )?,
                 (true, false) => self.transfer_remote_to_local(
                     source,
                     &destination,
                     operation == "cut",
                     overwrite,
+                    byte_progress.as_ref(),
                 )?,
                 (false, true) => self.transfer_local_to_remote(
                     app,
@@ -875,27 +1003,58 @@ impl RemoteManager {
                     &destination,
                     operation == "cut",
                     overwrite,
+                    byte_progress.as_ref(),
                 )?,
                 (false, false) => {
                     return Err(anyhow!("La operacion no requiere el gestor remoto."))
                 }
             }
-            ops::emit_progress(
-                app,
-                job_id,
-                (index + 1) as f64 / total,
-                format!(
-                    "{} {}",
-                    if operation == "cut" {
-                        "Moviendo"
-                    } else {
-                        "Copiando"
-                    },
-                    source
-                ),
-            )?;
+            let message = format!(
+                "{} {}",
+                if operation == "cut" {
+                    "Moviendo"
+                } else {
+                    "Copiando"
+                },
+                source
+            );
+            completed_estimated_bytes =
+                completed_estimated_bytes.saturating_add(source_estimates[index]);
+            if let Some(progress) = &byte_progress {
+                progress.complete_to(completed_estimated_bytes, &message);
+            } else {
+                ops::emit_progress(app, job_id, (index + 1) as f64 / total, message)?;
+            }
         }
         Ok(())
+    }
+
+    fn estimate_transfer_bytes(&self, source: &str, destination: &str) -> Result<u64> {
+        let source_is_remote = Self::is_remote_path(source);
+        let destination_is_remote = Self::is_remote_path(destination);
+
+        if source_is_remote && destination_is_remote {
+            let (source_session_id, _) = parse_remote_virtual_path(source)
+                .ok_or_else(|| anyhow!("Ruta remota invalida: {source}"))?;
+            let (destination_session_id, _) = parse_remote_virtual_path(destination)
+                .ok_or_else(|| anyhow!("Ruta remota invalida: {destination}"))?;
+            if source_session_id == destination_session_id {
+                return Ok(0);
+            }
+        }
+
+        if source_is_remote {
+            self.remote_entry_transfer_size(source)
+        } else {
+            local_entry_transfer_size(Path::new(source))
+        }
+    }
+
+    fn remote_entry_transfer_size(&self, virtual_path: &str) -> Result<u64> {
+        let (session_id, logical_path) = parse_remote_virtual_path(virtual_path)
+            .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
+        let mut session = self.get_session_mut(&session_id)?;
+        remote_logical_transfer_size(&mut session, &logical_path)
     }
 
     fn transfer_remote_to_local(
@@ -904,6 +1063,7 @@ impl RemoteManager {
         destination: &str,
         move_after: bool,
         overwrite: bool,
+        progress: Option<&ByteTransferProgress>,
     ) -> Result<()> {
         let (session_id, source_logical) = parse_remote_virtual_path(source)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {source}"))?;
@@ -915,6 +1075,7 @@ impl RemoteManager {
             &source_logical,
             &target_path,
             overwrite,
+            progress,
         )?;
         if move_after {
             let mut session = self.get_session_mut(&session_id)?;
@@ -932,6 +1093,7 @@ impl RemoteManager {
         destination: &str,
         move_after: bool,
         overwrite: bool,
+        progress: Option<&ByteTransferProgress>,
     ) -> Result<()> {
         let source_path = PathBuf::from(source);
         if !source_path.exists() {
@@ -954,6 +1116,7 @@ impl RemoteManager {
             &session_id,
             &target_logical,
             overwrite,
+            progress,
         )?;
         if move_after {
             remove_local_target(&source_path)?;
@@ -1045,6 +1208,7 @@ impl RemoteManager {
         destination: &str,
         move_after: bool,
         overwrite: bool,
+        progress: Option<&ByteTransferProgress>,
     ) -> Result<()> {
         let (source_session_id, source_logical) = parse_remote_virtual_path(source)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {source}"))?;
@@ -1095,6 +1259,7 @@ impl RemoteManager {
                 &destination_session_id,
                 &target_logical,
                 overwrite,
+                progress,
             )?;
         } else {
             self.copy_remote_file_between_sessions(
@@ -1103,6 +1268,7 @@ impl RemoteManager {
                 &destination_session_id,
                 &target_logical,
                 overwrite,
+                progress,
             )?;
         }
         if move_after {
@@ -1120,6 +1286,7 @@ impl RemoteManager {
         destination_session_id: &str,
         destination_logical: &str,
         overwrite: bool,
+        progress: Option<&ByteTransferProgress>,
     ) -> Result<()> {
         {
             let mut session = self.get_session_mut(destination_session_id)?;
@@ -1151,6 +1318,7 @@ impl RemoteManager {
                     destination_session_id,
                     &target_child,
                     overwrite,
+                    progress,
                 )?;
             } else {
                 self.copy_remote_file_between_sessions(
@@ -1159,6 +1327,7 @@ impl RemoteManager {
                     destination_session_id,
                     &target_child,
                     overwrite,
+                    progress,
                 )?;
             }
         }
@@ -1172,31 +1341,68 @@ impl RemoteManager {
         destination_session_id: &str,
         destination_logical: &str,
         overwrite: bool,
+        progress: Option<&ByteTransferProgress>,
     ) -> Result<()> {
-        let source_bytes = {
-            let mut session = self.get_session_mut(source_session_id)?;
-            let source_provider = session.resolve_provider_path(source_logical);
-            read_remote_bytes(&mut *session.fs, Path::new(&source_provider))?
-        };
-        let mut session = self.get_session_mut(destination_session_id)?;
-        let destination_provider = session.resolve_provider_path(destination_logical);
-        if overwrite
-            && session
+        let mut sessions = self.lock_sessions()?;
+        let mut destination_session = sessions
+            .remove(destination_session_id)
+            .ok_or_else(|| anyhow!("La sesion remota de destino ya no esta activa."))?;
+
+        let result = (|| -> Result<()> {
+            let source_session = sessions
+                .get_mut(source_session_id)
+                .ok_or_else(|| anyhow!("La sesion remota de origen ya no esta activa."))?;
+            let source_provider = source_session.resolve_provider_path(source_logical);
+            let destination_provider =
+                destination_session.resolve_provider_path(destination_logical);
+            let source_meta = source_session
                 .fs
-                .exists(Path::new(&destination_provider))
-                .unwrap_or(false)
-        {
-            remove_remote_target(&mut *session.fs, Path::new(&destination_provider))?;
-        }
-        session
-            .fs
-            .create_file(
-                Path::new(&destination_provider),
-                &file_metadata(source_bytes.len() as u64),
-                Box::new(Cursor::new(source_bytes)),
-            )
-            .map_err(|error| anyhow!(error.to_string()))?;
-        Ok(())
+                .stat(Path::new(&source_provider))
+                .map_err(|error| anyhow!(error.to_string()))?;
+            let file_size = source_meta.metadata().size;
+
+            if overwrite
+                && destination_session
+                    .fs
+                    .exists(Path::new(&destination_provider))
+                    .unwrap_or(false)
+            {
+                remove_remote_target(
+                    &mut *destination_session.fs,
+                    Path::new(&destination_provider),
+                )?;
+            }
+
+            let mut read_stream = source_session
+                .fs
+                .open(Path::new(&source_provider))
+                .map_err(|error| anyhow!(error.to_string()))?;
+            let mut write_stream = destination_session
+                .fs
+                .create(Path::new(&destination_provider), &file_metadata(file_size))
+                .map_err(|error| anyhow!(error.to_string()))?;
+            {
+                let mut reader = ProgressReader::new(
+                    &mut read_stream,
+                    progress.cloned(),
+                    format!("Transfiriendo {}", logical_leaf_name(source_logical)),
+                );
+                std::io::copy(&mut reader, &mut write_stream)
+                    .map_err(|error| anyhow!(error.to_string()))?;
+            }
+            source_session
+                .fs
+                .on_read(read_stream)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            destination_session
+                .fs
+                .on_written(write_stream)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            Ok(())
+        })();
+
+        sessions.insert(destination_session_id.to_string(), destination_session);
+        result
     }
 
     fn copy_remote_entry_to_local_path(
@@ -1205,6 +1411,7 @@ impl RemoteManager {
         source_logical: &str,
         local_target: &Path,
         overwrite: bool,
+        progress: Option<&ByteTransferProgress>,
     ) -> Result<()> {
         let source_name = logical_leaf_name(source_logical);
         let (is_directory, source_provider) = {
@@ -1241,19 +1448,39 @@ impl RemoteManager {
                     &child_logical,
                     &local_target.join(child.name),
                     overwrite,
+                    progress,
                 )?;
             }
             return Ok(());
         }
 
-        let bytes = {
-            let mut session = self.get_session_mut(session_id)?;
-            read_remote_bytes(&mut *session.fs, Path::new(&source_provider))?
-        };
         if let Some(parent) = local_target.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(local_target, bytes)?;
+        let mut session = self.get_session_mut(session_id)?;
+        let mut stream = session
+            .fs
+            .open(Path::new(&source_provider))
+            .map_err(|error| anyhow!(error.to_string()))?;
+        let mut file = fs::File::create(local_target).map_err(|error| {
+            anyhow!(
+                "No se pudo crear el archivo local '{}': {}",
+                local_target.display(),
+                error
+            )
+        })?;
+        {
+            let mut reader = ProgressReader::new(
+                &mut stream,
+                progress.cloned(),
+                format!("Descargando {}", source_name),
+            );
+            std::io::copy(&mut reader, &mut file).map_err(|error| anyhow!(error.to_string()))?;
+        }
+        session
+            .fs
+            .on_read(stream)
+            .map_err(|error| anyhow!(error.to_string()))?;
         let _ = source_name;
         Ok(())
     }
@@ -1266,6 +1493,7 @@ impl RemoteManager {
         session_id: &str,
         destination_logical: &str,
         overwrite: bool,
+        progress: Option<&ByteTransferProgress>,
     ) -> Result<()> {
         let mut session = self.get_session_mut(session_id)?;
         let destination_provider = session.resolve_provider_path(destination_logical);
@@ -1319,6 +1547,7 @@ impl RemoteManager {
                     session_id,
                     &child_target,
                     overwrite,
+                    progress,
                 )?;
             }
             return Ok(());
@@ -1341,7 +1570,11 @@ impl RemoteManager {
             .create_file(
                 Path::new(&destination_provider),
                 &file_metadata(file_size),
-                Box::new(file),
+                Box::new(ProgressReader::new(
+                    file,
+                    progress.cloned(),
+                    format!("Subiendo {}", file_name),
+                )),
             )
             .map_err(|error| {
                 sftp_permission_error(
@@ -2108,10 +2341,24 @@ fn build_profile_from_payload(
     profile_id: String,
     trusted_fingerprints: Vec<String>,
 ) -> Result<ConnectionProfileDto> {
+    let mut protocol = required_trimmed("protocolo", &payload.protocol)?.to_ascii_lowercase();
+    let mut ssh_mode = if payload.ssh_mode.trim().eq_ignore_ascii_case("scp") {
+        "scp".to_string()
+    } else {
+        "sftp".to_string()
+    };
+    if protocol == "sftp" {
+        protocol = "ssh".to_string();
+        ssh_mode = "sftp".to_string();
+    } else if protocol == "scp" {
+        protocol = "ssh".to_string();
+        ssh_mode = "scp".to_string();
+    }
+
     Ok(ConnectionProfileDto {
         id: profile_id,
         label: required_trimmed("etiqueta", &payload.label)?,
-        protocol: required_trimmed("protocolo", &payload.protocol)?,
+        protocol,
         host: payload.host.trim().to_string(),
         port: payload
             .port
@@ -2121,11 +2368,7 @@ fn build_profile_from_payload(
         share: payload.share.trim().to_string(),
         workgroup: payload.workgroup.trim().to_string(),
         start_path: normalize_logical_path(&payload.start_path),
-        ssh_mode: if payload.ssh_mode.trim().eq_ignore_ascii_case("scp") {
-            "scp".to_string()
-        } else {
-            "sftp".to_string()
-        },
+        ssh_mode,
         ftp_mode: if payload.ftp_mode.trim().eq_ignore_ascii_case("active") {
             "active".to_string()
         } else {
@@ -2146,7 +2389,12 @@ fn load_profiles(path: &Path) -> Result<Vec<ConnectionProfileDto>> {
     let parsed: ProfileFile = serde_json::from_str(&content).unwrap_or(ProfileFile {
         profiles: Vec::new(),
     });
-    Ok(parsed.profiles)
+    let mut profiles = parsed.profiles;
+    let migrated = profiles.iter_mut().any(normalize_loaded_connection_profile);
+    if migrated {
+        save_profiles(path, &profiles)?;
+    }
+    Ok(profiles)
 }
 
 fn save_profiles(path: &Path, profiles: &[ConnectionProfileDto]) -> Result<()> {
@@ -2158,8 +2406,8 @@ fn save_profiles(path: &Path, profiles: &[ConnectionProfileDto]) -> Result<()> {
 }
 
 fn default_port_for_protocol(protocol: &str) -> u16 {
-    match protocol {
-        "ssh" => 22,
+    match protocol.trim().to_ascii_lowercase().as_str() {
+        "ssh" | "sftp" | "scp" => 22,
         "smb" => 445,
         "ftps" => 21,
         _ => 21,
@@ -2182,7 +2430,7 @@ fn validate_connection_profile_payload(payload: &ConnectionProfilePayload) -> Re
                 return Err(anyhow!("Debes indicar el recurso compartido SMB."));
             }
         }
-        "ssh" => {
+        "ssh" | "sftp" | "scp" => {
             if payload.host.trim().is_empty() {
                 return Err(anyhow!(
                     "Debes indicar el servidor o IP para la conexion SSH."
@@ -2202,6 +2450,46 @@ fn validate_connection_profile_payload(payload: &ConnectionProfilePayload) -> Re
         _ => return Err(anyhow!("El protocolo remoto indicado no es valido.")),
     }
     Ok(())
+}
+
+fn normalize_loaded_connection_profile(profile: &mut ConnectionProfileDto) -> bool {
+    let mut changed = false;
+    let protocol = profile.protocol.trim().to_ascii_lowercase();
+    match protocol.as_str() {
+        "sftp" => {
+            profile.protocol = "ssh".to_string();
+            profile.ssh_mode = "sftp".to_string();
+            changed = true;
+        }
+        "scp" => {
+            profile.protocol = "ssh".to_string();
+            profile.ssh_mode = "scp".to_string();
+            changed = true;
+        }
+        "ssh" => {
+            if profile.protocol != "ssh" {
+                profile.protocol = "ssh".to_string();
+                changed = true;
+            }
+            let normalized_mode = if profile.ssh_mode.trim().eq_ignore_ascii_case("scp") {
+                "scp"
+            } else {
+                "sftp"
+            };
+            if profile.ssh_mode != normalized_mode {
+                profile.ssh_mode = normalized_mode.to_string();
+                changed = true;
+            }
+        }
+        "smb" | "ftp" | "ftps" => {
+            if profile.protocol != protocol {
+                profile.protocol = protocol;
+                changed = true;
+            }
+        }
+        _ => {}
+    }
+    changed
 }
 
 fn normalize_logical_path(path: &str) -> String {
@@ -2839,6 +3127,40 @@ fn remove_local_target(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn local_entry_transfer_size(path: &Path) -> Result<u64> {
+    if path.is_dir() {
+        let mut total = 0_u64;
+        for entry in fs::read_dir(path)? {
+            total = total.saturating_add(local_entry_transfer_size(&entry?.path())?);
+        }
+        Ok(total)
+    } else {
+        Ok(path.metadata().map(|metadata| metadata.len()).unwrap_or(0))
+    }
+}
+
+fn remote_logical_transfer_size(session: &mut RemoteSession, logical_path: &str) -> Result<u64> {
+    let provider_path = session.resolve_provider_path(logical_path);
+    let item = session
+        .fs
+        .stat(Path::new(&provider_path))
+        .map_err(|error| anyhow!(error.to_string()))?;
+    if !item.is_dir() {
+        return Ok(item.metadata().size);
+    }
+
+    let mut total = 0_u64;
+    let children = session
+        .fs
+        .list_dir(Path::new(&provider_path))
+        .map_err(|error| anyhow!(error.to_string()))?;
+    for child in children {
+        let child_logical = session.provider_child_to_logical(child.path())?;
+        total = total.saturating_add(remote_logical_transfer_size(session, &child_logical)?);
+    }
+    Ok(total)
+}
+
 /// Recursively collect all file virtual paths under `logical_path`.
 fn collect_remote_files(
     session: &mut RemoteSession,
@@ -2955,7 +3277,10 @@ fn summarize_remote_dir(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_disk_usage_bytes, parse_df_pk_output, statvfs_fragment_size};
+    use super::{
+        build_disk_usage_bytes, normalize_loaded_connection_profile, parse_df_pk_output,
+        statvfs_fragment_size, ConnectionProfileDto,
+    };
 
     #[test]
     fn parse_df_pk_output_reads_posix_layout() {
@@ -2985,5 +3310,31 @@ tmpfs 4096 1024 3072 25% /tmp
         let fragment_size = statvfs_fragment_size(4096, 1024);
         let (total, free, used) = build_disk_usage_bytes(10, 4, fragment_size);
         assert_eq!((total, free, used), (40960, 16384, 24576));
+    }
+
+    #[test]
+    fn legacy_sftp_profile_normalizes_to_ssh_sftp() {
+        let mut profile = ConnectionProfileDto {
+            id: "p1".to_string(),
+            label: "Legacy".to_string(),
+            protocol: "sftp".to_string(),
+            host: "example.test".to_string(),
+            port: 22,
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            share: String::new(),
+            workgroup: String::new(),
+            start_path: "/".to_string(),
+            ssh_mode: String::new(),
+            ftp_mode: String::new(),
+            ftp_secure_implicit: false,
+            ftp_accept_invalid_certificates: false,
+            ftp_accept_invalid_hostnames: false,
+            trusted_fingerprints: Vec::new(),
+        };
+
+        assert!(normalize_loaded_connection_profile(&mut profile));
+        assert_eq!(profile.protocol, "ssh");
+        assert_eq!(profile.ssh_mode, "sftp");
     }
 }

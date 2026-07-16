@@ -10,7 +10,7 @@
   import type { MenuItem } from "../ui/ContextMenu.svelte";
   import { t, tn } from "../../i18n/index.js";
   import { openTerminalAt, openRemoteTerminalAt } from "../../utils/terminal.js";
-  import { ghostToEntry, buildGhost, joinPath, normalizePath, uniqueDisplayPath, dirnameOf, basenameOf } from "../../utils/ghosts.js";
+  import { ghostToEntry, buildGhost, joinPath, normalizePath, uniqueDisplayPath, basenameOf } from "../../utils/ghosts.js";
   import type { FileTransferItem, FileTransferOperation } from "../../utils/transfers.js";
   import { canDropFileItemsToPath, inferFileTransferOperation, isNoOpFileTransfer } from "../../utils/transfers.js";
 
@@ -241,48 +241,58 @@
   //  - overwrite ON   → the real entry is marked "will be replaced" (no ghost row)
   //  - renameOnConflict → the ghost is shown with a " (2)" suffix
   //  - neither         → the real entry is marked "conflict" (op will fail)
-  // Also marks real entries a queued op will delete ("will be removed").
+  // Also marks entries a queued op will remove from this location ("will be removed"),
+  // including ghost outputs consumed by later queued operations.
   // Reads the reactive app.opQueue getter directly so the derived re-runs when
   // the queue changes (going through a store method would not track it).
+  function pathContainsOrEquals(parent: string, child: string): boolean {
+    const p = normalizePath(parent);
+    const c = normalizePath(child);
+    return c === p || (p.length > 0 && c.startsWith(`${p}/`));
+  }
+
+  function deletionCoversPath(deletes: string[], path: string): boolean {
+    return deletes.some((deletePath) => pathContainsOrEquals(deletePath, path));
+  }
+
   const combinedEntries = $derived.by<EntryDto[]>(() => {
-    if (pane.isSearching || !pane.currentPath) return pane.entries;
+    if (!pane.currentPath) return pane.entries;
     const dirKey = normalizePath(pane.currentPath);
     const taken = new Set(pane.entries.map((e) => normalizePath(e.path)));
     const existingByKey = new Map(pane.entries.map((e) => [normalizePath(e.path), e]));
+    const deleteRoots = app.opQueue.flatMap((op) => op.deletes);
     const replaced = new Set<string>();
-    const removed = new Set<string>();
     const conflicting = new Set<string>();
     const ghosts: EntryDto[] = [];
 
-    for (const op of app.opQueue) {
-      for (const d of op.deletes) {
-        if (normalizePath(dirnameOf(d)) === dirKey) removed.add(normalizePath(d));
-      }
-      for (const g of op.produces) {
-        if (normalizePath(g.parentDir) !== dirKey) continue;
-        const gkey = normalizePath(g.path);
-        const existing = existingByKey.get(gkey);
-        if (existing?.isGhost && existing.ghostOpId === g.producedByOpId) continue;
-        const collides = taken.has(gkey);
-        if (collides && op.overwrite) { replaced.add(gkey); continue; }
-        if (collides && !op.renameOnConflict) { conflicting.add(gkey); continue; }
-        // Free slot, or renamed around the collision.
-        const path = collides ? uniqueDisplayPath(g.path, taken) : g.path;
-        const key = normalizePath(path);
-        if (taken.has(key)) continue; // safety: never emit a duplicate key
-        taken.add(key);
-        ghosts.push(ghostToEntry({ ...g, path, name: basenameOf(path) }));
+    if (!pane.isSearching) {
+      for (const op of app.opQueue) {
+        for (const g of op.produces) {
+          if (normalizePath(g.parentDir) !== dirKey) continue;
+          const gkey = normalizePath(g.path);
+          const existing = existingByKey.get(gkey);
+          if (existing?.isGhost && existing.ghostOpId === g.producedByOpId) continue;
+          const collides = taken.has(gkey);
+          if (collides && op.overwrite) { replaced.add(gkey); continue; }
+          if (collides && !op.renameOnConflict) { conflicting.add(gkey); continue; }
+          // Free slot, or renamed around the collision.
+          const path = collides ? uniqueDisplayPath(g.path, taken) : g.path;
+          const key = normalizePath(path);
+          if (taken.has(key)) continue; // safety: never emit a duplicate key
+          taken.add(key);
+          ghosts.push(ghostToEntry({ ...g, path, name: basenameOf(path) }));
+        }
       }
     }
 
-    const reals = pane.entries.map((e) => {
+    const decorate = (e: EntryDto) => {
       const k = normalizePath(e.path);
       const rep = replaced.has(k);
-      const rem = removed.has(k);
+      const rem = deletionCoversPath(deleteRoots, e.path);
       const con = conflicting.has(k);
       return rep || rem || con ? { ...e, willBeReplaced: rep, willBeRemoved: rem, willConflict: con } : e;
-    });
-    return [...reals, ...ghosts];
+    };
+    return [...pane.entries.map(decorate), ...ghosts.map(decorate)];
   });
 
   /** Looks up a display entry (real or ghost) by path. */
@@ -1350,11 +1360,10 @@
               draggable={false}
               role="gridcell"
               tabindex="0"
-              title={entry.isGhost
-                ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending"))
-                : entry.willBeRemoved ? t("ghost.willBeRemoved")
+              title={entry.willBeRemoved ? t("ghost.willBeRemoved")
                 : entry.willBeReplaced ? t("ghost.willBeReplaced")
                 : entry.willConflict ? t("ghost.willConflict")
+                : entry.isGhost ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending"))
                 : undefined}
               onclick={() => { if (pane.renaming?.path !== entry.path) handleEntryClick(entry); }}
               onmousedown={(e) => handleMousedown(e, entry)}
@@ -1667,7 +1676,7 @@
 
   .grid-item--removed .grid-name { text-decoration: line-through; color: var(--text-subtle); }
   .grid-item--removed { opacity: 0.6; }
-  .grid-item--replaced .grid-name { color: #d9820b; }
+  .grid-item--replaced .grid-name { color: #d9820b; text-decoration: line-through; }
   .grid-item--conflict { background: color-mix(in srgb, var(--danger, #e5484d) 8%, transparent); }
 
   .grid-name {

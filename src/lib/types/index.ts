@@ -17,9 +17,9 @@ export type EntryDto = {
   ghostOpId?: string;
   /** True when the prediction is only approximate (e.g. CHD restore output). */
   ghostApproximate?: boolean;
-  /** Set on a real entry that a queued op will overwrite. */
+  /** Set on an entry that a queued op will overwrite. */
   willBeReplaced?: boolean;
-  /** Set on a real entry that a queued op will delete. */
+  /** Set on an entry that a queued op will remove from its current location. */
   willBeRemoved?: boolean;
   /** Set on a real entry that a queued op wants to write over but can neither
    *  overwrite nor rename around — the op will fail at run time. */
@@ -487,6 +487,11 @@ export type M3uGenerateResultDto = {
 
 // ── Operation queue ─────────────────────────────────────────────
 
+export type DeaccentRenameResult = {
+  oldPath: string;
+  newPath: string;
+};
+
 export type QueuedOpKind =
   | 'copy'
   | 'move'
@@ -544,6 +549,9 @@ export type QueuedOp = {
   overwrite: boolean;
   renameOnConflict: boolean;
   execute: (jobId?: string, retryQueuedOp?: QueuedOp | null) => Promise<boolean>;
+  /** For accent-unsafe ops: rebuilds a fresh op with source paths remapped after a
+   *  de-accent rename (oldPath → newPath). Absent for ops that never need it. */
+  rebuildWithRenames?: (renamed: Map<string, string>) => QueuedOp;
 };
 
 export type ConflictKind = 'source-deleted' | 'dest-deleted' | 'dest-collision';

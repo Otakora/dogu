@@ -529,7 +529,7 @@
               spellcheck="false"
               tabindex={restOutputNaming === "custom" ? 0 : -1}
             />
-            <span class="name-ext">.cue / .bin / .iso</span>
+            <span class="name-ext">.gdi / .cue / .bin / .iso</span>
           </div>
         </fieldset>
 
@@ -565,7 +565,7 @@
                   <span class="preview-folder">{folderName}/</span>
                   <span class="preview-sep">·</span>
                 {/if}
-                <span class="preview-name">{outStem}.cue + .bin</span>
+                <span class="preview-name">{outStem} · .gdi / .cue+.bin / .iso</span>
               </div>
             </div>
           {/each}

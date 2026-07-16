@@ -22,7 +22,9 @@
     ChdSourceDto,
     ExtractionPreviewRow,
     M3uGeneratePayload,
+    DeaccentRenameResult,
   } from "../../types/index.js";
+  import { collectAccentIssues, type AccentIssue } from "../../utils/ascii.js";
   import {
     predictCompress,
     predictChdConvert,
@@ -53,6 +55,7 @@
   import ExtractionDialog from "../dialogs/ExtractionDialog.svelte";
   import CompressionDialog from "../dialogs/CompressionDialog.svelte";
   import ChdDialog from "../dialogs/ChdDialog.svelte";
+  import AccentWarningModal from "../dialogs/AccentWarningModal.svelte";
   import DiscImageDialog from "../dialogs/DiscImageDialog.svelte";
   import type { DiscImageMode } from "../dialogs/DiscImageDialog.svelte";
   import ToolStatusScreen from "../dialogs/ToolStatusScreen.svelte";
@@ -132,6 +135,7 @@
   let discImageState = $state<{ mode: DiscImageMode; sources: string[] } | null>(null);
   let toolScreenOpen = $state(false);
   let m3uDirs = $state<string[] | null>(null);
+  let startupReady = $state(false);
 
   // ── Job / queue ID counters ───────────────────────────────
   let _jobSeq = 0;
@@ -197,6 +201,8 @@
       if (app.toolProblems.some(p => !p.optional)) toolScreenOpen = true;
     } catch {
       // System info unavailable
+    } finally {
+      startupReady = true;
     }
 
     unlisten.push(await listen<JobProgressDto>("job-progress", ({ payload }) => {
@@ -214,12 +220,21 @@
     }));
 
     document.addEventListener("dogu:rename-commit", handleRenameCommitRaw);
+    document.addEventListener("dogu:fs-changed", handleFsChangedRaw);
   });
 
   onDestroy(() => {
     unlisten.forEach(fn => fn());
     document.removeEventListener("dogu:rename-commit", handleRenameCommitRaw);
+    document.removeEventListener("dogu:fs-changed", handleFsChangedRaw);
   });
+
+  // Refresh any pane showing a directory that changed out-of-band (e.g. the
+  // destination picker created or deleted a folder inside it).
+  function handleFsChangedRaw(e: Event) {
+    const { paths } = (e as CustomEvent<{ paths: string[] }>).detail;
+    if (Array.isArray(paths) && paths.length > 0) refreshVisibleLocations(paths);
+  }
 
   // ── Refresh helper ────────────────────────────────────────
   function refreshContent() {
@@ -828,6 +843,80 @@
     }
   }
 
+  // ── Accent (non-ASCII path) guard for chd operations ──────
+  // chdman can't process non-ASCII *file names* (accented folders are handled by
+  // the backend cwd workaround). Outside the queue we prompt to de-accent-rename
+  // the offending files first; in the queue such ops are blocked until de-accented.
+  type AccentPrompt = { issues: AccentIssue[]; onRename: () => void | Promise<void>; onCancel: () => void };
+  let accentPrompt = $state<AccentPrompt | null>(null);
+  let accentBusy = $state(false);
+
+  async function deaccentFixable(issues: AccentIssue[]): Promise<Map<string, string>> {
+    const fixable = issues.filter((i) => i.fixable);
+    const results = await invoke<DeaccentRenameResult[]>("deaccent_rename", {
+      renames: fixable.map((i) => ({ path: i.path, newName: i.newName })),
+    });
+    if (results.length) app.notify("info", t("accents.renamedNotice", { count: results.length }));
+    return new Map(results.map((r) => [r.oldPath, r.newPath]));
+  }
+
+  /** Runs an accent-unsafe (chd) op outside the queue, prompting to de-accent first. */
+  function guardChdRun(sourcePaths: string[], proceed: (renamed: Map<string, string>) => void) {
+    const issues = collectAccentIssues(sourcePaths);
+    if (issues.length === 0) { proceed(new Map()); return; }
+    accentPrompt = {
+      issues,
+      onCancel: () => { accentPrompt = null; },
+      onRename: async () => {
+        accentBusy = true;
+        try {
+          const map = await deaccentFixable(issues);
+          accentPrompt = null;
+          proceed(map);
+        } catch (e) {
+          app.notify("error", t("accents.renameFailed", { error: String(e) }));
+        } finally {
+          accentBusy = false;
+        }
+      },
+    };
+  }
+
+  function remapChdSource(s: ChdSourceDto, map: Map<string, string>): ChdSourceDto {
+    if (map.size === 0) return s;
+    return {
+      ...s,
+      sourcePath: map.get(s.sourcePath) ?? s.sourcePath,
+      requiredPaths: s.requiredPaths.map((p) => map.get(p) ?? p),
+    };
+  }
+
+  /** Queue-side de-accent: prompt, rename the files, then replace the blocked op
+   *  with a fresh one pointing at the renamed paths. */
+  function handleQueueDeaccent(op: QueuedOp) {
+    if (!op.rebuildWithRenames) return;
+    const issues = collectAccentIssues(op.sources);
+    if (issues.length === 0) return;
+    accentPrompt = {
+      issues,
+      onCancel: () => { accentPrompt = null; },
+      onRename: async () => {
+        accentBusy = true;
+        try {
+          const map = await deaccentFixable(issues);
+          const newOp = op.rebuildWithRenames!(map);
+          app.removeFromQueue(op.id);
+          app.addToQueue(newOp);
+          accentPrompt = null;
+        } catch (e) {
+          app.notify("error", t("accents.renameFailed", { error: String(e) }));
+        } finally {
+          accentBusy = false;
+        }
+      },
+    };
+  }
+
   function buildConvertChdOp(chdSources: ChdSourceDto[], rawOpts: ChdConversionOptionsPayload): QueuedOp {
     const paths = chdSources.map((source) => source.sourcePath);
     const opts: ChdConversionOptionsPayload = { ...rawOpts, renameOnConflict: app.settings.renameOnConflict };
@@ -854,6 +943,8 @@
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
       execute: (jobId, retryQueuedOp) => executeConvertChd(paths, opts, jobId, retryQueuedOp),
+      rebuildWithRenames: (map) =>
+        buildConvertChdOp(chdSources.map((s) => remapChdSource(s, map)), rawOpts),
     };
   }
 
@@ -902,6 +993,8 @@
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
       execute: (jobId, retryQueuedOp) => executeRestoreChd(paths, opts, jobId, retryQueuedOp),
+      rebuildWithRenames: (map) =>
+        buildRestoreChdOp(paths.map((p) => map.get(p) ?? p), rawOpts),
     };
   }
 
@@ -1132,7 +1225,7 @@
 <svelte:window onkeydown={handleAppKey} />
 <svelte:document oncontextmenu={(e) => e.preventDefault()} />
 
-<div class="shell" style="--sidebar-width: {sidebarWidth}px">
+<div class="shell" class:startup-loading={!startupReady} style="--sidebar-width: {sidebarWidth}px">
   <!-- ── Sidebar ── -->
   <Sidebar />
 
@@ -1179,13 +1272,28 @@
     </div>
 
     <TerminalPanel />
-    <JobsPanel />
+    <JobsPanel onDeaccentOp={handleQueueDeaccent} />
   </div>
 </div>
+
+{#if !startupReady}
+  <div class="startup-overlay" role="status" aria-live="polite" aria-label={t("contentPanel.loading")}>
+    <span class="startup-spinner"></span>
+  </div>
+{/if}
 
 <!-- ── Dialogs ── -->
 <ConfirmDialog />
 <SettingsDialog />
+
+{#if accentPrompt}
+  <AccentWarningModal
+    issues={accentPrompt.issues}
+    busy={accentBusy}
+    onRename={accentPrompt.onRename}
+    onCancel={accentPrompt.onCancel}
+  />
+{/if}
 
 {#if propertiesState}
   <PropertiesDialog paths={propertiesState.paths} onclose={() => (propertiesState = null)} />
@@ -1233,12 +1341,16 @@
     onclose={() => (chdState = null)}
     onConvert={(sources, opts) => {
       if (app.queueMode) enqueueOps(buildConvertChdOps(sources, opts));
-      else void buildConvertChdOp(sources, opts).execute();
+      else guardChdRun(sources.map((s) => s.sourcePath), (map) => {
+        void buildConvertChdOp(sources.map((s) => remapChdSource(s, map)), opts).execute();
+      });
       chdState = null;
     }}
     onRestore={(paths, opts) => {
       if (app.queueMode) enqueueOps(buildRestoreChdOps(paths, opts));
-      else void buildRestoreChdOp(paths, opts).execute();
+      else guardChdRun(paths, (map) => {
+        void buildRestoreChdOp(paths.map((p) => map.get(p) ?? p), opts).execute();
+      });
       chdState = null;
     }}
   />
@@ -1268,6 +1380,39 @@
     overflow: hidden;
     background: var(--bg);
     zoom: var(--app-font-scale, 1);
+  }
+
+  .shell.startup-loading {
+    filter: blur(4px);
+    pointer-events: none;
+    user-select: none;
+  }
+
+  .startup-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 900;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--bg) 42%, transparent);
+    backdrop-filter: blur(2px);
+  }
+
+  .startup-spinner {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    border: 4px solid color-mix(in srgb, var(--line-strong) 45%, transparent);
+    border-top-color: var(--accent);
+    border-right-color: color-mix(in srgb, var(--accent) 62%, var(--line));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--surface) 50%, transparent);
+    animation: spin 0.75s linear infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .startup-spinner {
+      animation: none;
+    }
   }
 
   .sidebar-resizer {

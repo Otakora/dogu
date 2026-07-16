@@ -25,6 +25,7 @@ import type {
   ToolStatusDto,
 } from "../types/index.js";
 import { normalizePath, uniqueDisplayPath, basenameOf } from "../utils/ghosts.js";
+import { collectAccentIssues, isAccentUnsafeKind } from "../utils/ascii.js";
 
 // Per-tab vertical scroll memory, keyed by `${tabId}::${normalizedPath}`. Kept
 // outside reactive state (a plain Map) so frequent scroll writes cause no churn.
@@ -732,6 +733,15 @@ function createAppState() {
   const resolvedOutputs = $derived(resolveQueueOutputs(opQueue));
   // Any op consuming another op's ghost output forces ordered (sequential) execution.
   const queueHasDependencies = $derived(opQueue.some((o) => o.dependsOn.length > 0));
+  // Ids of chd ops whose source *file names* carry accents chdman can't process.
+  // These block the whole queue from running until they are de-accented.
+  const queueAccentBlocked = $derived(
+    new Set(
+      opQueue
+        .filter((o) => isAccentUnsafeKind(o.kind) && collectAccentIssues(o.sources).length > 0)
+        .map((o) => o.id),
+    ),
+  );
 
   // Cross-pane tab drag
   let crossPaneDrag = $state<CrossPaneDragState>(null);
@@ -1427,6 +1437,7 @@ function createAppState() {
     get queueRunning()   { return queueRunning; },
     get queueRunStats()  { return queueRunStats; },
     get queueHasDependencies() { return queueHasDependencies; },
+    get queueAccentBlocked() { return queueAccentBlocked; },
 
     /**
      * All ghost outputs pending across the whole queue. Consumers that need
@@ -1524,6 +1535,8 @@ function createAppState() {
       const maxConcurrent = clampQueueMaxConcurrent(settings.queueMaxConcurrent);
       const plan = buildQueuePlan(ops, detectConflicts(ops), maxConcurrent);
       if (plan.blockingConflicts.length > 0) return;
+      // Refuse to run while any op is blocked by accented file names (integrity guard).
+      if (ops.some((o) => isAccentUnsafeKind(o.kind) && collectAccentIssues(o.sources).length > 0)) return;
 
       opQueue = [];
       queueRunning = true;

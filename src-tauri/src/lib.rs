@@ -3,6 +3,7 @@ mod m3u;
 mod models;
 mod ops;
 mod pause;
+mod process;
 mod remote;
 mod sidecars;
 mod terminal;
@@ -36,6 +37,8 @@ pub fn run() {
             commands::create_folder,
             commands::create_file,
             commands::rename_path,
+            commands::delete_entry,
+            commands::deaccent_rename,
             commands::start_delete_paths,
             commands::start_copy_or_move_paths,
             commands::open_path,

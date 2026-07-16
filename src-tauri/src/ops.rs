@@ -41,7 +41,9 @@ use crate::{
         PropertiesSummaryDto, RemoteTransferPolicy, SelectionAnalysisDto, SummaryOptionsPayload,
         VolumeDto,
     },
-    pause, remote,
+    pause,
+    process::hide_console_window,
+    remote,
     sidecars::{
         chdman_path, dolphin_tool_path, rar_capable_seven_zip_path, runtime_root, seven_zip_path,
     },
@@ -300,6 +302,19 @@ pub fn rename_path(path: &Path, new_name: &str) -> Result<String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Permanently deletes a single file or (recursively) a directory. Used by the
+/// destination picker's inline delete — a direct, synchronous counterpart to
+/// `create_folder`/`rename_path` (the job-based `delete_paths` is for bulk ops).
+pub fn delete_entry(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+            .with_context(|| format!("No se pudo eliminar la carpeta {}", path.display()))?;
+    } else if path.exists() {
+        fs::remove_file(path).with_context(|| format!("No se pudo eliminar {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Returns `desired` if it doesn't exist, otherwise the first non-existing
 /// "stem (N)" variant (N starting at 2), preserving any extension. Works for
 /// both files and directories. Used to standardize conflict handling: when an
@@ -340,7 +355,8 @@ pub fn unique_path(desired: &Path) -> PathBuf {
 /// the .cue/.bin pair named consistently so the cue keeps referencing its bin.
 fn unique_restore_stem(dir: &Path, stem: &str) -> String {
     let collides = |s: &str| {
-        dir.join(format!("{s}.cue")).exists()
+        dir.join(format!("{s}.gdi")).exists()
+            || dir.join(format!("{s}.cue")).exists()
             || dir.join(format!("{s}.bin")).exists()
             || dir.join(format!("{s}.iso")).exists()
     };
@@ -459,7 +475,8 @@ pub fn copy_or_move_paths(
 
 pub fn open_path(path: &Path) -> Result<()> {
     if cfg!(target_os = "windows") {
-        Command::new("cmd")
+        let mut command = Command::new("cmd");
+        hide_console_window(&mut command)
             .args(["/C", "start", "", &path.to_string_lossy()])
             .spawn()?;
         return Ok(());
@@ -478,9 +495,11 @@ pub fn open_with_dialog(path: &Path) -> Result<()> {
             .join("System32")
             .join("OpenWith.exe");
         if open_with.exists() {
-            Command::new(&open_with).arg(path).spawn()?;
+            let mut command = Command::new(&open_with);
+            hide_console_window(&mut command).arg(path).spawn()?;
         } else {
-            Command::new("rundll32.exe")
+            let mut command = Command::new("rundll32.exe");
+            hide_console_window(&mut command)
                 .args(["shell32.dll,OpenAs_RunDLL", &path.to_string_lossy()])
                 .spawn()?;
         }
@@ -563,9 +582,14 @@ fn list_top_level_zip_entries(archive_path: &Path) -> Result<Vec<(String, bool)>
 }
 
 fn list_top_level_7z_entries(tool: &Path, archive_path: &Path) -> Result<Vec<(String, bool)>> {
-    let output = Command::new(tool)
+    let mut command = Command::new(tool);
+    let output = hide_console_window(&mut command)
         .arg("l")
         .arg("-slt")
+        // Force UTF-8 console output; otherwise 7-Zip emits non-ASCII names (accents)
+        // in the OEM code page, which `from_utf8_lossy` turns into replacement chars —
+        // corrupting ghost paths so they no longer match the real extracted files.
+        .arg("-sccUTF-8")
         .arg(archive_path)
         .output()?;
     if !output.status.success() {
@@ -643,9 +667,12 @@ fn list_all_zip_entries(archive_path: &Path) -> Result<Vec<(String, bool)>> {
 }
 
 fn list_all_7z_entries(tool: &Path, archive_path: &Path) -> Result<Vec<(String, bool)>> {
-    let output = Command::new(tool)
+    let mut command = Command::new(tool);
+    let output = hide_console_window(&mut command)
         .arg("l")
         .arg("-slt")
+        // See list_top_level_7z_entries: UTF-8 output so accented names survive.
+        .arg("-sccUTF-8")
         .arg(archive_path)
         .output()?;
     if !output.status.success() {
@@ -1428,13 +1455,14 @@ pub fn convert_to_chd(
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| source_path.clone());
         let mut staging_guard: Option<TempGuard> = None;
-        let (run_source_path, run_source_command) = if !source_is_remote && should_stage_local_chd_source(source) {
-            let (staged_source_path, guard) = stage_local_chd_source(app, job_id, source)?;
-            staging_guard = Some(guard);
-            (staged_source_path, source.command.clone())
-        } else {
-            (effective_source_path.clone(), local_source.command.clone())
-        };
+        let (run_source_path, run_source_command) =
+            if !source_is_remote && should_stage_local_chd_source(source) {
+                let (staged_source_path, guard) = stage_local_chd_source(app, job_id, source)?;
+                staging_guard = Some(guard);
+                (staged_source_path, source.command.clone())
+            } else {
+                (effective_source_path.clone(), local_source.command.clone())
+            };
 
         let source_name = source_path
             .file_name()
@@ -1622,8 +1650,7 @@ pub fn convert_to_chd(
 }
 
 fn should_stage_local_chd_source(source: &ChdSourceDto) -> bool {
-    source.command == "createcd"
-        && source.required_paths.iter().any(|path| path.len() >= 240)
+    source.command == "createcd" && source.required_paths.iter().any(|path| path.len() >= 240)
 }
 
 fn stage_local_chd_source(
@@ -1655,11 +1682,15 @@ fn recover_missing_chd_scan_inputs(paths: &[PathBuf]) -> Vec<PathBuf> {
         let recovered = if path.exists() || path.to_string_lossy().starts_with("remote://") {
             path.clone()
         } else {
-            path.ancestors()
-                .skip(1)
-                .find(|ancestor| ancestor.exists() && ancestor.is_dir())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| path.clone())
+            // The predicted path is gone. Fall back ONLY to its immediate parent —
+            // never a distant shared ancestor — so a single-disc conversion can't
+            // reach a common parent folder and over-scan sibling discs (which caused
+            // cross-disc collisions and deletions). If the parent is gone too, keep
+            // the missing path; scanning will simply skip it instead of over-reaching.
+            match path.parent() {
+                Some(parent) if parent.exists() && parent.is_dir() => parent.to_path_buf(),
+                _ => path.clone(),
+            }
         };
 
         let key = recovered.to_string_lossy().to_lowercase();
@@ -1682,22 +1713,80 @@ fn run_chdman_convert(
     output: &Path,
     overwrite: bool,
 ) -> Result<()> {
+    // chdman (MAME) on Windows narrows its argv to the system code page, so any
+    // non-ASCII character in a path passed as an argument (é, í, ñ, …) makes it
+    // fail with "No such file or directory" even though the file exists. Work
+    // around it by setting the working directory to the source's folder — Rust
+    // sets the cwd as proper Unicode, which chdman inherits correctly — and passing
+    // chdman only RELATIVE, ASCII-safe names: the input by its file name and the
+    // output to a temp name in that same folder. The finished CHD is then moved to
+    // its real destination with std::fs, which handles the Unicode path chdman can't.
+    let source_dir = source
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let source_name = source
+        .file_name()
+        .ok_or_else(|| anyhow!("Ruta de origen invalida: {}", source.display()))?;
+
+    let tmp_out_name = format!("__dogu_chd_{}.chd", sanitize_ascii_token(job_id));
+    let tmp_out_path = source_dir.join(&tmp_out_name);
+    // Clear any leftover from a previously aborted run in the same folder.
+    let _ = fs::remove_file(&tmp_out_path);
+
     let mut cmd = Command::new(chdman);
-    cmd.arg(command).arg("-i").arg(source).arg("-o").arg(output);
-    if let Some(source_dir) = source.parent() {
-        cmd.current_dir(source_dir);
-    }
-    if overwrite {
-        cmd.arg("-f");
-    }
+    // -f is always safe here: the temp name is ours; real-output collisions are
+    // resolved on the move below, preserving chdman's non-overwrite semantics.
+    cmd.arg(command)
+        .arg("-i")
+        .arg(source_name)
+        .arg("-o")
+        .arg(&tmp_out_name)
+        .arg("-f")
+        .current_dir(&source_dir);
+
     // chdman prints "Compressing, NN.N% complete..." to stderr, updated with \r.
-    run_command_streaming(app, job_id, base, span, cmd).map_err(|e| {
+    let run = run_command_streaming(app, job_id, base, span, cmd).map_err(|e| {
         anyhow!(if e.to_string().is_empty() {
             "chdman devolvio un error".to_string()
         } else {
             e.to_string()
         })
-    })
+    });
+    if let Err(e) = run {
+        let _ = fs::remove_file(&tmp_out_path);
+        return Err(e);
+    }
+
+    // Relocate the finished CHD to where the caller wants it.
+    if output.exists() {
+        if overwrite {
+            remove_single_path(output)?;
+        } else {
+            let _ = fs::remove_file(&tmp_out_path);
+            return Err(anyhow!("El destino ya existe: {}", output.display()));
+        }
+    }
+    move_path(&tmp_out_path, output).map_err(|e| {
+        let _ = fs::remove_file(&tmp_out_path);
+        anyhow!("No se pudo mover el CHD generado a su destino: {e}")
+    })?;
+    Ok(())
+}
+
+/// Reduces an identifier to ASCII alphanumerics/`-`/`_` for use inside a temp
+/// filename. Falls back to a constant if nothing usable remains.
+fn sanitize_ascii_token(token: &str) -> String {
+    let cleaned: String = token
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if cleaned.is_empty() {
+        "job".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Returns just the filename (not the full path) for a CHD output file.
@@ -1749,7 +1838,8 @@ pub fn probe_chdman_runtime(app: &AppHandle) -> crate::models::ToolRuntimeDto {
     };
 
     let path_str = path.to_string_lossy().to_string();
-    match Command::new(&path).output() {
+    let mut command = Command::new(&path);
+    match hide_console_window(&mut command).output() {
         Ok(output) => {
             // The binary ran (even if exit code != 0 — chdman exits 1 with no args).
             // Grab the first non-empty line from stdout or stderr as the version hint.
@@ -1792,7 +1882,8 @@ fn probe_tool_runtime(path: Option<PathBuf>, missing_error: &str) -> crate::mode
         };
     };
     let path_str = path.to_string_lossy().to_string();
-    match Command::new(&path).output() {
+    let mut command = Command::new(&path);
+    match hide_console_window(&mut command).output() {
         Ok(output) => {
             let version = [&output.stdout, &output.stderr].iter().find_map(|b| {
                 let s = String::from_utf8_lossy(b);
@@ -2006,50 +2097,18 @@ pub fn restore_from_chd(
                     } else {
                         temp_dir.to_path_buf()
                     };
-                    let cue_path = write_dir.join(format!("{stem_c}.cue"));
-                    let bin_path = write_dir.join(format!("{stem_c}.bin"));
-                    let iso_path = write_dir.join(format!("{stem_c}.iso"));
-
-                    match run_extractcd(
+                    restore_chd_content(
                         app,
                         job_id,
                         prog_base,
                         prog_span,
                         &chdman_c,
                         &effective_chd_c,
-                        &cue_path,
-                        &bin_path,
+                        &write_dir,
+                        &stem_c,
                         overwrite,
                         split_bin,
-                    ) {
-                        Ok(_) => {}
-                        Err(first_err) => {
-                            cleanup_restore_outputs(
-                                &cue_path,
-                                &bin_path,
-                                &write_dir,
-                                &stem_c,
-                                &effective_chd_c,
-                            )?;
-                            run_extractdvd(
-                                app,
-                                job_id,
-                                prog_base,
-                                prog_span,
-                                &chdman_c,
-                                &effective_chd_c,
-                                &iso_path,
-                                overwrite,
-                            )
-                            .map_err(|dvd_err| {
-                                anyhow!(
-                                    "No se pudo recuperar como CD ni DVD.\nCD: {}\nDVD: {}",
-                                    first_err,
-                                    dvd_err
-                                )
-                            })?;
-                        }
-                    }
+                    )?;
 
                     if folder_name_c.is_some() {
                         Ok(vec![write_dir])
@@ -2084,63 +2143,27 @@ pub fn restore_from_chd(
                 ),
             )?;
 
-            let cue_path = destination.join(format!("{effective_stem}.cue"));
-            let bin_path = destination.join(format!("{effective_stem}.bin"));
-            let iso_path = destination.join(format!("{effective_stem}.iso"));
-
-            match run_extractcd(
+            let restored = restore_chd_content(
                 app,
                 job_id,
                 prog_base,
                 prog_span,
                 &chdman,
                 &effective_chd_path,
-                &cue_path,
-                &bin_path,
+                &destination,
+                &effective_stem,
                 options.overwrite,
                 options.split_bin,
-            ) {
-                Ok(_) => {
-                    emit_log(
-                        app,
-                        job_id,
-                        format!("Extraido como CD: {}", cue_path.display()),
-                    )?;
-                }
-                Err(error) => {
-                    let first_error = error.to_string();
-                    cleanup_restore_outputs(
-                        &cue_path,
-                        &bin_path,
-                        &destination,
-                        &effective_stem,
-                        &effective_chd_path,
-                    )?;
-                    run_extractdvd(
-                        app,
-                        job_id,
-                        prog_base,
-                        prog_span,
-                        &chdman,
-                        &effective_chd_path,
-                        &iso_path,
-                        options.overwrite,
-                    )
-                    .map_err(|dvd_error| {
-                        anyhow!(
-                            "No se pudo recuperar {} como CD ni como DVD.\nCD: {}\nDVD: {}",
-                            effective_chd_path.display(),
-                            first_error,
-                            dvd_error
-                        )
-                    })?;
-                    emit_log(
-                        app,
-                        job_id,
-                        format!("Extraido como DVD: {}", iso_path.display()),
-                    )?;
-                }
-            }
+            )?;
+            emit_log(
+                app,
+                job_id,
+                format!(
+                    "Extraido como {}: {}",
+                    restored.label(),
+                    destination.display()
+                ),
+            )?;
         }
 
         if options.delete_chd {
@@ -2992,7 +3015,7 @@ fn rvz_run_dolphin(
         (base + span * 0.05).clamp(0.0, 0.99),
         "DolphinTool procesando...".to_string(),
     )?;
-    let result = command
+    let result = hide_console_window(&mut command)
         .output()
         .map_err(|e| anyhow!("No se pudo ejecutar DolphinTool: {e}"))?;
     if !result.status.success() {
@@ -3884,69 +3907,219 @@ fn build_chd_output_path(
     output_dir.join(format!("{raw_stem}.chd"))
 }
 
-fn run_extractcd(
-    app: &AppHandle,
-    job_id: &str,
-    base: f64,
-    span: f64,
-    chdman: &Path,
-    input: &Path,
-    cue_path: &Path,
-    bin_path: &Path,
-    overwrite: bool,
-    split_bin: bool,
-) -> Result<()> {
-    let mut command = Command::new(chdman);
-    command
-        .arg("extractcd")
-        .arg("-i")
-        .arg(input)
-        .arg("-o")
-        .arg(cue_path);
-    if !split_bin {
-        command.arg("-ob").arg(bin_path);
-    } else {
-        command.arg("-sb");
-    }
-    if overwrite {
-        command.arg("-f");
-    }
-    run_command_streaming(app, job_id, base, span, command).map_err(|e| {
-        anyhow!(if e.to_string().is_empty() {
-            "extractcd devolvio un error".to_string()
-        } else {
-            e.to_string()
-        })
-    })
+/// Which disc geometry chdman recorded inside a CHD. Determines the correct
+/// native output format when restoring, so the user never has to pick one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChdDiscKind {
+    /// Dreamcast GD-ROM — metadata tag `CHGD` (or legacy `CHGT`). Restores to `.gdi`.
+    GdRom,
+    /// Standard CD — metadata tag `CHT2` (or legacy `CHTR`). Restores to `.cue`/`.bin`.
+    Cd,
+    /// No CD-track metadata (DVD and similar). Restores to `.iso`.
+    Other,
 }
 
-fn run_extractdvd(
+/// Reads the metadata tags chdman stored in a CHD header to decide the source
+/// disc format. `chdman info` only parses the header (no hunk decompression),
+/// so this is fast and safe to run before every restore. chdman writes a
+/// distinct tag per geometry, and it does NOT enforce the output format on
+/// extraction (it will happily emit a semantically-wrong `.gdi` for a plain CD),
+/// so probing the tag is the only reliable way to choose the right format.
+fn probe_chd_disc_kind(chdman: &Path, chd: &Path) -> ChdDiscKind {
+    let mut command = Command::new(chdman);
+    let text = match hide_console_window(&mut command)
+        .arg("info")
+        .arg("-i")
+        .arg(chd)
+        .output()
+    {
+        Ok(out) => {
+            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&out.stderr));
+            s
+        }
+        // If the probe can't run, fall back to the historical CD-first behaviour.
+        Err(_) => return ChdDiscKind::Cd,
+    };
+    if text.contains("Tag='CHGD'") || text.contains("Tag='CHGT'") {
+        ChdDiscKind::GdRom
+    } else if text.contains("Tag='CHT2'") || text.contains("Tag='CHTR'") {
+        ChdDiscKind::Cd
+    } else {
+        ChdDiscKind::Other
+    }
+}
+
+/// The disc-image format a restore actually produced.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestoreFormat {
+    Gdi,
+    Cd,
+    Dvd,
+}
+
+impl RestoreFormat {
+    fn label(self) -> &'static str {
+        match self {
+            RestoreFormat::Gdi => "GDI",
+            RestoreFormat::Cd => "CD",
+            RestoreFormat::Dvd => "DVD",
+        }
+    }
+}
+
+/// Restores a CHD into `dir` under `stem`, choosing the output format from the
+/// disc geometry chdman recorded (GD-ROM → `.gdi`, CD → `.cue`/`.bin`, otherwise
+/// `.iso`) so the user doesn't have to know or decide in advance. The remaining
+/// formats stay as ordered fallbacks in case an unusual CHD fails its preferred
+/// path; partial output is cleaned between attempts. Returns the format that won.
+#[allow(clippy::too_many_arguments)]
+fn restore_chd_content(
     app: &AppHandle,
     job_id: &str,
     base: f64,
     span: f64,
     chdman: &Path,
-    input: &Path,
-    iso_path: &Path,
+    chd: &Path,
+    dir: &Path,
+    stem: &str,
     overwrite: bool,
-) -> Result<()> {
-    let mut command = Command::new(chdman);
-    command
-        .arg("extractdvd")
-        .arg("-i")
-        .arg(input)
-        .arg("-o")
-        .arg(iso_path);
-    if overwrite {
-        command.arg("-f");
+    split_bin: bool,
+) -> Result<RestoreFormat> {
+    // chdman can't take non-ASCII paths as arguments (see run_chdman_convert). Run
+    // it in the CHD's own folder with a relative `-i` and relative, ASCII output
+    // names, so an accented *folder* is handled by the (Unicode-correct) cwd. The
+    // output lands next to the CHD and is moved to `dir` when that differs. chdman
+    // writes track references relatively, so moving the set together keeps them
+    // valid — no rewriting. Accented *file names* are handled by the de-accent guard.
+    let work_dir = chd
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| dir.to_path_buf());
+    let chd_name = chd
+        .file_name()
+        .ok_or_else(|| anyhow!("Ruta CHD invalida: {}", chd.display()))?
+        .to_owned();
+    let same_target = same_path(&work_dir, dir);
+
+    let order: &[RestoreFormat] = match probe_chd_disc_kind(chdman, chd) {
+        ChdDiscKind::GdRom => &[RestoreFormat::Gdi, RestoreFormat::Cd, RestoreFormat::Dvd],
+        ChdDiscKind::Cd => &[RestoreFormat::Cd, RestoreFormat::Dvd],
+        ChdDiscKind::Other => &[RestoreFormat::Dvd, RestoreFormat::Cd],
+    };
+
+    let mut errors: Vec<String> = Vec::new();
+    for (attempt, fmt) in order.iter().enumerate() {
+        if attempt > 0 {
+            // Clear any partial output the previous format may have written.
+            let cue = work_dir.join(format!("{stem}.cue"));
+            let bin = work_dir.join(format!("{stem}.bin"));
+            cleanup_restore_outputs(&cue, &bin, &work_dir, stem, chd)?;
+        }
+
+        let mut command = Command::new(chdman);
+        match fmt {
+            RestoreFormat::Gdi => {
+                command
+                    .arg("extractcd")
+                    .arg("-i")
+                    .arg(&chd_name)
+                    .arg("-o")
+                    .arg(format!("{stem}.gdi"));
+            }
+            RestoreFormat::Cd => {
+                command
+                    .arg("extractcd")
+                    .arg("-i")
+                    .arg(&chd_name)
+                    .arg("-o")
+                    .arg(format!("{stem}.cue"));
+                if split_bin {
+                    command.arg("-sb");
+                } else {
+                    command.arg("-ob").arg(format!("{stem}.bin"));
+                }
+            }
+            RestoreFormat::Dvd => {
+                command
+                    .arg("extractdvd")
+                    .arg("-i")
+                    .arg(&chd_name)
+                    .arg("-o")
+                    .arg(format!("{stem}.iso"));
+            }
+        }
+        if overwrite {
+            command.arg("-f");
+        }
+        command.current_dir(&work_dir);
+
+        let run = run_command_streaming(app, job_id, base, span, command).map_err(|e| {
+            anyhow!(if e.to_string().is_empty() {
+                format!("chdman ({}) devolvio un error", fmt.label())
+            } else {
+                e.to_string()
+            })
+        });
+
+        match run {
+            Ok(()) => {
+                // Relocate the produced set to the requested destination if needed.
+                if !same_target {
+                    fs::create_dir_all(dir)?;
+                    for produced in collect_restore_outputs(&work_dir, stem, chd) {
+                        let leaf = produced
+                            .file_name()
+                            .map(|n| n.to_owned())
+                            .unwrap_or_default();
+                        let target = dir.join(&leaf);
+                        if target.exists() && overwrite {
+                            remove_single_path(&target)?;
+                        }
+                        move_path(&produced, &target)?;
+                    }
+                }
+                return Ok(*fmt);
+            }
+            Err(e) => errors.push(format!("{}: {e}", fmt.label())),
+        }
     }
-    run_command_streaming(app, job_id, base, span, command).map_err(|e| {
-        anyhow!(if e.to_string().is_empty() {
-            "extractdvd devolvio un error".to_string()
-        } else {
-            e.to_string()
-        })
-    })
+    Err(anyhow!(
+        "No se pudo recuperar {} en ningun formato.\n{}",
+        chd.display(),
+        errors.join("\n")
+    ))
+}
+
+/// Lists the files a chdman restore produced under `stem` in `dir` (the `.gdi`/
+/// `.cue`/`.iso` index plus its track binaries), excluding the source CHD. Used to
+/// move the set to a different destination folder.
+fn collect_restore_outputs(dir: &Path, stem: &str, chd: &Path) -> Vec<PathBuf> {
+    const OUTPUT_EXTS: &[&str] = &["gdi", "cue", "bin", "raw", "iso", "toc"];
+    let stem_lower = stem.to_lowercase();
+    let mut produced = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || same_path(&path, chd) {
+                continue;
+            }
+            let ext_ok = path
+                .extension()
+                .and_then(OsStr::to_str)
+                .map(|e| OUTPUT_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+                .unwrap_or(false);
+            let name_lower = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
+            if ext_ok && name_lower.starts_with(&stem_lower) {
+                produced.push(path);
+            }
+        }
+    }
+    produced
 }
 
 fn cleanup_restore_outputs(
@@ -4091,7 +4264,7 @@ fn run_command_streaming(
     use std::process::Stdio;
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
+    let mut child = hide_console_window(&mut command).spawn()?;
 
     // Read stderr on a worker thread (needs owned clones), stdout on this thread.
     let stderr_handle = child.stderr.take().map(|pipe| {
@@ -4442,7 +4615,8 @@ pub fn preflight_remote_transfer(
 /// Detects the `rar` binary: first checks PATH, then known WinRAR install dirs on Windows.
 pub fn find_rar_binary() -> Option<PathBuf> {
     // `rar` with no args exits non-zero but that's fine — Ok means the binary was found.
-    if Command::new("rar").output().is_ok() {
+    let mut command = Command::new("rar");
+    if hide_console_window(&mut command).output().is_ok() {
         return Some(PathBuf::from("rar"));
     }
     #[cfg(target_os = "windows")]
@@ -4842,7 +5016,8 @@ fn compress_via_rar(
         7..=8 => 4,
         _ => 5,
     };
-    let status = Command::new(rar_binary)
+    let mut command = Command::new(rar_binary);
+    let status = hide_console_window(&mut command)
         .arg("a")
         .arg(format!("-m{rar_level}"))
         .arg("-y")

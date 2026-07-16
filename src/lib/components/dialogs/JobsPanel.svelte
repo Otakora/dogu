@@ -4,9 +4,18 @@
   import { app } from "../../stores/app.svelte.js";
   import { t, tn } from "../../i18n/index.js";
   import type { QueueConflict, QueuedOp, QueuedOpKind } from "../../types/index.js";
+  import { collectAccentIssues, isAccentUnsafeKind } from "../../utils/ascii.js";
+  import { normalizePath } from "../../utils/ghosts.js";
+
+  let { onDeaccentOp }: { onDeaccentOp?: (op: QueuedOp) => void } = $props();
 
   const MAX_VISIBLE_WAVES = 4;
   const MAX_VISIBLE_WAVE_STEPS = 6;
+
+  /** True when this op is blocked by accented file names its tool can't process. */
+  function opAccentBlocked(op: QueuedOp): boolean {
+    return isAccentUnsafeKind(op.kind) && collectAccentIssues(op.sources).length > 0;
+  }
 
   async function resumeJob(jobId: string, decision: "retry" | "skip" | "abort") {
     app.clearJobPause(jobId);
@@ -33,9 +42,10 @@
   const hasQueueWarnings    = $derived(hasConflicts || app.queueHasDependencies);
   const retryableFailedJobs = $derived(app.jobs.filter(j => j.done && !j.success && !!j.retryQueuedOp && !j.retried));
   const canRetryAllFailed   = $derived(retryableFailedJobs.length > 0 && !app.queueRunning && !app.failedQueueRetryRunning);
-  const canRunSmart         = $derived(hasQueue && !hasBlockingConflicts && !app.queueRunning);
+  const hasAccentBlocks     = $derived(app.queueAccentBlocked.size > 0);
+  const canRunSmart         = $derived(hasQueue && !hasBlockingConflicts && !hasAccentBlocks && !app.queueRunning);
   // Sequential is safe even with parallel-only conflicts (queue order protects it)
-  const canRunSequential    = $derived(hasQueue && !hasBlockingConflicts && !app.queueRunning);
+  const canRunSequential    = $derived(hasQueue && !hasBlockingConflicts && !hasAccentBlocks && !app.queueRunning);
 
   // ── Kind metadata ─────────────────────────────────────────
   const KIND_COLOR: Record<QueuedOpKind, string> = {
@@ -118,9 +128,55 @@
     return p.split(/[/\\]/).filter(Boolean).pop() ?? p;
   }
 
-  /** Final output file names for an op after the queue's rename resolution. */
-  function outputNames(op: QueuedOp): string[] {
-    return app.resolvedOutputsFor(op.id).map(g => g.name);
+  function pathContainsOrEquals(parent: string, child: string): boolean {
+    const p = normalizePath(parent);
+    const c = normalizePath(child);
+    return c === p || (p.length > 0 && c.startsWith(`${p}/`));
+  }
+
+  function opRemovesPath(op: QueuedOp, path: string): boolean {
+    return op.deletes.some((deletePath) => pathContainsOrEquals(deletePath, path));
+  }
+
+  type OperationFlow = {
+    source: string | null;
+    target: string | null;
+    extraTargets: number;
+  };
+
+  function opFlowRows(op: QueuedOp): OperationFlow[] {
+    const sources = opDisplaySources(op);
+    const targets = app.resolvedOutputsFor(op.id).map((g) => g.path);
+    if (sources.length === 0 && targets.length === 0) return [];
+    if (sources.length === 0) {
+      return targets.slice(0, 2).map((target) => ({ source: null, target, extraTargets: 0 }));
+    }
+    if (targets.length === 0) {
+      return sources.slice(0, 2).map((source) => ({ source, target: null, extraTargets: 0 }));
+    }
+    if (sources.length === 1) {
+      return [{
+        source: sources[0],
+        target: targets[0],
+        extraTargets: Math.max(0, targets.length - 1),
+      }];
+    }
+    return sources.slice(0, 2).map((source, index) => ({
+      source,
+      target: targets[index] ?? null,
+      extraTargets: 0,
+    }));
+  }
+
+  function opHiddenSourceCount(op: QueuedOp): number {
+    return Math.max(0, opDisplaySources(op).length - 2);
+  }
+
+  function flowTitle(flow: OperationFlow): string {
+    const source = flow.source ?? "";
+    const target = flow.target ?? "";
+    if (source && target) return flow.extraTargets > 0 ? `${source} -> ${target} +${flow.extraTargets}` : `${source} -> ${target}`;
+    return source || target;
   }
 
   // ── Conflict descriptions ─────────────────────────────────
@@ -356,6 +412,8 @@
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
                   <div
                     class="queue-card"
+                    class:queue-card--chained={op.dependsOn.length > 0}
+                    class:queue-card--blocked={opAccentBlocked(op)}
                     class:queue-card--dragging={draggedIdx === i}
                     class:drop-before={draggedIdx !== null && dropInsertIdx === i}
                     class:drop-after={draggedIdx !== null && dropInsertIdx === i + 1}
@@ -388,38 +446,67 @@
 
                     <!-- Content -->
                     <div class="op-content">
-                      <div class="op-title">{op.title}</div>
-                      {#if batchLabel(op)}
-                        <div class="op-batch" title={op.batchTitle}>
-                          <span class="op-batch-mark" aria-hidden="true"></span>
-                          <span>{batchLabel(op)}</span>
+                      <div class="op-header">
+                        <div class="op-title" title={op.title}>{op.title}</div>
+                        <div class="op-meta">
+                          {#if batchLabel(op)}
+                            <div class="op-batch" title={op.batchTitle}>
+                              <span class="op-batch-mark" aria-hidden="true"></span>
+                              <span>{batchLabel(op)}</span>
+                            </div>
+                          {/if}
+                          {#if dependencyLabel(op)}
+                            <div class="op-chain" title={t("queue.parallelDisabledDeps")} aria-label={t("queue.parallelDisabledDeps")}>
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                              </svg>
+                              <span>{t("queue.chainedAfter", { n: dependencyLabel(op) ?? "" })}</span>
+                            </div>
+                          {/if}
                         </div>
-                      {/if}
-                      {#if dependencyLabel(op)}
-                        <div class="op-chain" title={t("queue.parallelDisabledDeps")}>
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-                          </svg>
-                          <span>{t("queue.chainedAfter", { n: dependencyLabel(op) ?? "" })}</span>
-                        </div>
-                      {/if}
-                      {#if opDisplaySources(op).length > 0}
-                        <div class="op-paths">
-                          {#each opDisplaySources(op).slice(0, 2) as src}
-                            <span class="op-path" title={src}>{basename(src)}</span>
+                      </div>
+                      {#if opFlowRows(op).length > 0}
+                        <div class="op-flows">
+                          {#each opFlowRows(op) as flow}
+                            <div class="op-flow" title={flowTitle(flow)}>
+                              {#if flow.source}
+                                <span
+                                  class="op-flow-name op-flow-source"
+                                  class:op-flow-name--removed={opRemovesPath(op, flow.source)}
+                                >{basename(flow.source)}</span>
+                              {/if}
+                              {#if flow.target}
+                                {#if flow.source}
+                                  <span class="op-flow-arrow" aria-hidden="true">-&gt;</span>
+                                {/if}
+                                <span class="op-flow-name op-flow-target">{basename(flow.target)}</span>
+                                {#if flow.extraTargets > 0}
+                                  <span class="op-flow-more">+{flow.extraTargets}</span>
+                                {/if}
+                              {/if}
+                            </div>
                           {/each}
-                          {#if opDisplaySources(op).length > 2}
-                            <span class="op-path op-path--more">+{opDisplaySources(op).length - 2} more</span>
+                          {#if opHiddenSourceCount(op) > 0}
+                            <span class="op-flow-more">+{opHiddenSourceCount(op)}</span>
                           {/if}
                         </div>
                       {/if}
-                      {#if outputNames(op).length > 0}
-                        <div class="op-dest" title={app.resolvedOutputsFor(op.id).map(g => g.path).join('\n')}>
-                          → {outputNames(op).slice(0, 2).join(', ')}{outputNames(op).length > 2 ? ` +${outputNames(op).length - 2}` : ''}
+                      {#if opFlowRows(op).length === 0 && op.destinations.length > 0 && op.kind !== "delete"}
+                        <div class="op-flows">
+                          <div class="op-flow" title={op.destinations[0]}>
+                            <span class="op-flow-arrow" aria-hidden="true">-&gt;</span>
+                            <span class="op-flow-name op-flow-target">{basename(op.destinations[0])}</span>
+                          </div>
                         </div>
-                      {:else if op.destinations.length > 0 && op.kind !== "delete"}
-                        <div class="op-dest" title={op.destinations[0]}>→ {basename(op.destinations[0])}</div>
+                      {/if}
+                      {#if opAccentBlocked(op)}
+                        <div class="op-accent-block">
+                          <span class="op-accent-msg">⚠ {t("accents.queueBlocked")}</span>
+                          <button class="op-deaccent-btn" onclick={() => onDeaccentOp?.(op)}>
+                            {t("accents.deaccentAction")}
+                          </button>
+                        </div>
                       {/if}
                     </div>
 
@@ -963,14 +1050,14 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    padding: 7px 8px 7px 0;
+    padding: 8px 8px 8px 0;
     background: var(--surface-alt);
     border: 1px solid var(--line);
     border-left: 3px solid var(--kind-color, var(--accent));
     border-radius: 6px;
     min-width: 0;
     position: relative;
-    transition: opacity 0.15s, box-shadow 0.15s;
+    transition: opacity 0.15s, box-shadow 0.15s, border-color 0.15s, background 0.15s;
 
     &:hover { box-shadow: 0 1px 4px color-mix(in srgb, var(--kind-color) 15%, transparent); }
     &.queue-card--dragging { opacity: 0.35; }
@@ -989,6 +1076,18 @@
     }
     &.drop-before::before { top:    -3px; }
     &.drop-after::after   { bottom: -3px; }
+  }
+
+  .queue-card--chained {
+    border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+    border-left-color: color-mix(in srgb, var(--accent) 88%, var(--kind-color));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 6%, transparent);
+
+    &:hover {
+      box-shadow:
+        inset 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent),
+        0 1px 5px color-mix(in srgb, var(--accent) 12%, transparent);
+    }
   }
 
   .drag-handle {
@@ -1040,21 +1139,9 @@
     white-space: nowrap;
   }
 
-  /* Chained cards get a link glyph on their step block */
   .op-step--chained {
-    position: relative;
-
-    &::before {
-      content: '';
-      position: absolute;
-      top: -7px;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 2px;
-      height: 7px;
-      background: var(--accent);
-      border-radius: 1px;
-    }
+    border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+    box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 44%, transparent);
   }
 
   .op-step--batched {
@@ -1066,16 +1153,36 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
+  }
+
+  .op-header {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    flex-wrap: wrap;
   }
 
   .op-title {
-    font-size: 12px;
-    font-weight: 500;
+    flex: 0 1 auto;
+    min-width: 130px;
+    max-width: 100%;
+    font-size: 12.5px;
+    font-weight: 650;
     color: var(--text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .op-meta {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    flex: 999 1 260px;
+    flex-wrap: wrap;
   }
 
   .op-batch {
@@ -1090,10 +1197,7 @@
     font-weight: 700;
     letter-spacing: 0.01em;
     color: color-mix(in srgb, var(--kind-color) 72%, var(--text));
-    background:
-      linear-gradient(90deg,
-        color-mix(in srgb, var(--kind-color) 14%, transparent),
-        color-mix(in srgb, var(--kind-color) 6%, transparent));
+    background: color-mix(in srgb, var(--kind-color) 11%, transparent);
     border: 1px solid color-mix(in srgb, var(--kind-color) 24%, transparent);
     white-space: nowrap;
     overflow: hidden;
@@ -1113,52 +1217,118 @@
   .op-chain {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     align-self: flex-start;
     padding: 2px 8px;
-    border-radius: 10px;
+    border-radius: 999px;
     font-size: 10.5px;
-    font-weight: 600;
-    color: var(--accent);
-    background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    font-weight: 750;
+    color: color-mix(in srgb, var(--accent) 82%, var(--text));
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
     white-space: nowrap;
+    max-width: 100%;
+    min-width: 0;
 
-    svg { flex-shrink: 0; }
+    svg {
+      flex-shrink: 0;
+      width: 12px;
+      height: 12px;
+    }
+
+    span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
   }
 
-  .op-paths {
+  .op-flows {
     display: flex;
-    gap: 5px;
+    align-items: center;
+    gap: 6px;
     overflow: hidden;
-    flex-wrap: nowrap;
-    /* Takes full width of .op-content, paths fill as much as they need */
+    flex-wrap: wrap;
+    min-width: 0;
   }
 
-  .op-path {
+  .op-flow {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    max-width: 100%;
+    flex: 0 1 auto;
     font-size: 10.5px;
     color: var(--text-muted);
-    /* Shrinks when space is tight, but never grows beyond content width */
+  }
+
+  .op-flow-name {
     flex: 0 1 auto;
     min-width: 30px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-
-    &.op-path--more {
-      /* "+N more" badge: fixed size, never shrinks */
-      flex: 0 0 auto;
-      opacity: 0.7;
-    }
   }
 
-  .op-dest {
-    font-size: 10.5px;
+  .op-flow-source {
     color: var(--text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
+  }
+
+  .op-flow-target {
+    color: color-mix(in srgb, var(--text-muted) 82%, var(--text));
+  }
+
+  .op-flow-arrow {
+    flex: 0 0 auto;
+    color: color-mix(in srgb, var(--kind-color) 70%, var(--text-muted));
+    font-weight: 700;
+  }
+
+  .op-flow-more {
+    flex: 0 0 auto;
+    color: var(--text-subtle);
+    opacity: 0.78;
+    font-size: 10.5px;
     white-space: nowrap;
-    opacity: 0.8;
+  }
+
+  .op-flow-name--removed {
+    color: color-mix(in srgb, var(--danger, #e5484d) 72%, var(--text-muted));
+    text-decoration: line-through;
+    text-decoration-thickness: 1.5px;
+  }
+
+  .queue-card--blocked {
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--line-strong));
+    background: color-mix(in srgb, var(--danger) 7%, transparent);
+  }
+
+  .op-accent-block {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+  }
+
+  .op-accent-msg {
+    font-size: 10.5px;
+    color: var(--danger);
+    font-weight: 600;
+  }
+
+  .op-deaccent-btn {
+    padding: 2px 8px;
+    background: var(--danger);
+    border: none;
+    border-radius: 4px;
+    color: #fff;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+
+    &:hover { filter: brightness(1.08); }
   }
 
   /* Up/Down/Remove controls */

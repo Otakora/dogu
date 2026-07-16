@@ -171,6 +171,58 @@ pub fn rename_path(
     ops::rename_path(&PathBuf::from(path), &new_name).map_err(|error| error.to_string())
 }
 
+/// Synchronous single-entry delete for the destination picker (file or folder,
+/// recursive). Dual local/remote, mirroring `create_folder`/`rename_path`.
+#[tauri::command]
+pub fn delete_entry(
+    remote_state: State<'_, remote::RemoteState>,
+    path: String,
+) -> Result<(), String> {
+    if remote::RemoteManager::is_remote_path(&path) {
+        return remote_state
+            .inner
+            .remove_entry(&path)
+            .map_err(|error| error.to_string());
+    }
+    ops::delete_entry(&PathBuf::from(path)).map_err(|error| error.to_string())
+}
+
+/// Renames files to ASCII-safe (de-accented) names so tools that can't handle
+/// non-ASCII paths (chdman) can process them. `new_name` is computed by the
+/// frontend; the backend only validates it is pure ASCII and applies it. Renames
+/// deepest paths first so a parent rename can't invalidate a still-pending child.
+#[tauri::command]
+pub fn deaccent_rename(
+    remote_state: State<'_, remote::RemoteState>,
+    renames: Vec<crate::models::DeaccentRenameRequest>,
+) -> Result<Vec<crate::models::DeaccentRenameResult>, String> {
+    for r in &renames {
+        if !r.new_name.is_ascii() || r.new_name.trim().is_empty() {
+            return Err(format!("Nombre de destino no valido: '{}'", r.new_name));
+        }
+    }
+    let mut ordered = renames;
+    ordered.sort_by_key(|r| std::cmp::Reverse(r.path.matches(['/', '\\']).count()));
+
+    let mut results = Vec::with_capacity(ordered.len());
+    for r in &ordered {
+        let new_path = if remote::RemoteManager::is_remote_path(&r.path) {
+            remote_state
+                .inner
+                .rename_path(&r.path, &r.new_name)
+                .map_err(|error| error.to_string())?
+        } else {
+            ops::rename_path(&PathBuf::from(&r.path), &r.new_name)
+                .map_err(|error| error.to_string())?
+        };
+        results.push(crate::models::DeaccentRenameResult {
+            old_path: r.path.clone(),
+            new_path,
+        });
+    }
+    Ok(results)
+}
+
 #[tauri::command]
 pub fn open_path(
     app: AppHandle,

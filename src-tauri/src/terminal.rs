@@ -10,7 +10,10 @@ use anyhow::{anyhow, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{AppHandle, Emitter};
 
-use crate::models::{AvailableShell, TerminalCwdPayload, TerminalDataPayload, TerminalExitPayload};
+use crate::{
+    models::{AvailableShell, TerminalCwdPayload, TerminalDataPayload, TerminalExitPayload},
+    process::hide_console_window,
+};
 
 const SSH_TERMINAL_CONNECT_TIMEOUT_SECS: u64 = 15;
 
@@ -706,7 +709,11 @@ pub fn get_available_shells() -> Vec<AvailableShell> {
 fn available_shells_windows() -> Vec<AvailableShell> {
     let mut shells = vec![];
 
-    if let Ok(out) = std::process::Command::new("where").arg("pwsh.exe").output() {
+    let mut pwsh_probe = std::process::Command::new("where");
+    if let Ok(out) = hide_console_window(&mut pwsh_probe)
+        .arg("pwsh.exe")
+        .output()
+    {
         if out.status.success() {
             if let Some(path) = String::from_utf8_lossy(&out.stdout)
                 .lines()
@@ -722,7 +729,8 @@ fn available_shells_windows() -> Vec<AvailableShell> {
         }
     }
 
-    if let Ok(out) = std::process::Command::new("where")
+    let mut powershell_probe = std::process::Command::new("where");
+    if let Ok(out) = hide_console_window(&mut powershell_probe)
         .arg("powershell.exe")
         .output()
     {

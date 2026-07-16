@@ -66,11 +66,10 @@
   aria-selected={isSelected}
   tabindex="0"
   draggable={false}
-  title={entry.isGhost
-    ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending"))
-    : entry.willBeRemoved ? t("ghost.willBeRemoved")
+  title={entry.willBeRemoved ? t("ghost.willBeRemoved")
     : entry.willBeReplaced ? t("ghost.willBeReplaced")
     : entry.willConflict ? t("ghost.willConflict")
+    : entry.isGhost ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending"))
     : undefined}
   onclick={() => { if (!isRenaming) onClick(entry); }}
   onmousedown={(e) => onMousedown(e, entry)}
@@ -119,14 +118,14 @@
       />
     {:else}
       <span class="file-name">{entry.name}</span>
-      {#if entry.isGhost}
-        <span class="ghost-badge">{entry.ghostApproximate ? t("ghost.badgeApprox") : t("ghost.badge")}</span>
-      {:else if entry.willBeRemoved}
+      {#if entry.willBeRemoved}
         <span class="status-badge status-badge--removed">{t("ghost.badgeRemoved")}</span>
       {:else if entry.willBeReplaced}
         <span class="status-badge status-badge--replaced">{t("ghost.badgeReplaced")}</span>
       {:else if entry.willConflict}
         <span class="status-badge status-badge--conflict">{t("ghost.badgeConflict")}</span>
+      {:else if entry.isGhost}
+        <span class="ghost-badge">{entry.ghostApproximate ? t("ghost.badgeApprox") : t("ghost.badge")}</span>
       {/if}
     {/if}
   </div>
@@ -262,9 +261,11 @@
 
   .file-row--removed {
     .file-name { text-decoration: line-through; color: var(--text-subtle); }
-    .icon-dir, .icon-file { opacity: 0.5; }
+    .icon-dir, .icon-file, .icon-ghost-dir, .icon-ghost-file { opacity: 0.5; }
   }
-  .file-row--replaced .file-name { color: #d9820b; }
+  .file-row--replaced {
+    .file-name { color: #d9820b; text-decoration: line-through; }
+  }
   .file-row--conflict {
     background: color-mix(in srgb, var(--danger, #e5484d) 7%, transparent);
   }

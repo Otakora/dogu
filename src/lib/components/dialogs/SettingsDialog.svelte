@@ -169,6 +169,24 @@
               aria-label={t("settingsDialog.defaultQueueMode")}
             />
           </div>
+          <div class="setting-row">
+            <div class="setting-name-block">
+              <span class="setting-name">{t("settingsDialog.queueRelationMap")}</span>
+              <span class="setting-hint">{t("settingsDialog.queueRelationMapHint")}</span>
+            </div>
+            <label class="setting-switch">
+              <input
+                class="setting-switch-input"
+                type="checkbox"
+                checked={app.settings.showQueueRelationMap}
+                onchange={(e) => app.updateSettings({ showQueueRelationMap: (e.target as HTMLInputElement).checked })}
+                aria-label={t("settingsDialog.queueRelationMap")}
+              />
+              <span class="setting-switch-track" aria-hidden="true">
+                <span class="setting-switch-thumb"></span>
+              </span>
+            </label>
+          </div>
           <div class="queue-card">
             <div class="setting-row setting-row--top">
               <div class="setting-name-block">
@@ -428,6 +446,57 @@
     height: 16px;
     accent-color: var(--accent);
     cursor: pointer;
+  }
+
+  .setting-switch {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+
+  .setting-switch-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .setting-switch-track {
+    position: relative;
+    width: 34px;
+    height: 19px;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+
+  .setting-switch-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 13px;
+    height: 13px;
+    border-radius: 999px;
+    background: var(--text-subtle);
+    transition: transform 120ms ease, background 120ms ease;
+  }
+
+  .setting-switch-input:checked + .setting-switch-track {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 52%, var(--line-strong));
+  }
+
+  .setting-switch-input:checked + .setting-switch-track .setting-switch-thumb {
+    transform: translateX(15px);
+    background: var(--accent);
+  }
+
+  .setting-switch:has(.setting-switch-input:focus-visible) .setting-switch-track {
+    outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    outline-offset: 2px;
   }
 
   .select-input {

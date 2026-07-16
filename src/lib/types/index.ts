@@ -376,6 +376,8 @@ export type AppSettings = {
   queueMaxConcurrent: number;
   /** Whether queue mode starts enabled when Dogu launches. */
   defaultQueueMode: boolean;
+  /** Show dependency/conflict relation lines in the queue panel. */
+  showQueueRelationMap: boolean;
   /** Default "replace existing" behavior for operations without a dialog (copy/move)
    *  and the default state of the replace checkbox in operation dialogs. */
   defaultOverwriteOnConflict: boolean;

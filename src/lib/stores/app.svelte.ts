@@ -242,6 +242,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   chdScanDepth: 3,
   queueMaxConcurrent: DEFAULT_QUEUE_MAX_CONCURRENT,
   defaultQueueMode: false,
+  showQueueRelationMap: true,
   defaultOverwriteOnConflict: false,
   renameOnConflict: true,
   rvzPrimaryEngine: "nod",
@@ -268,6 +269,7 @@ function loadSettings(): AppSettings {
       ...DEFAULT_SETTINGS,
       ...parsed,
       queueMaxConcurrent: clampQueueMaxConcurrent(parsed.queueMaxConcurrent),
+      showQueueRelationMap: parsed.showQueueRelationMap !== false,
     } as AppSettings;
   } catch {
     return { ...DEFAULT_SETTINGS };

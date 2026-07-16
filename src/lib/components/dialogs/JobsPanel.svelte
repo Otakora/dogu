@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { app } from "../../stores/app.svelte.js";
   import { t, tn } from "../../i18n/index.js";
@@ -11,6 +11,26 @@
 
   const MAX_VISIBLE_WAVES = 4;
   const MAX_VISIBLE_WAVE_STEPS = 6;
+  const QUEUE_RELATION_MIN_RAIL = 30;
+  const QUEUE_RELATION_LANE_GAP = 9;
+  const QUEUE_RELATION_MAX_RAIL = 220;
+
+  type QueueRelationKind = "dependency" | "ordering" | "blocking" | "parallel";
+
+  type QueueRelationLink = {
+    key: string;
+    fromId: string;
+    toId: string;
+    kind: QueueRelationKind;
+    title: string;
+  };
+
+  type RenderedQueueRelationLink = QueueRelationLink & {
+    d: string;
+    x: number;
+    y1: number;
+    y2: number;
+  };
 
   /** True when this op is blocked by accented file names its tool can't process. */
   function opAccentBlocked(op: QueuedOp): boolean {
@@ -179,6 +199,69 @@
     return source || target;
   }
 
+  function relationOpLabel(id: string): string {
+    const index = app.opQueue.findIndex((op) => op.id === id);
+    const op = index >= 0 ? app.opQueue[index] : null;
+    return op && index >= 0 ? `${index + 1}. ${op.title}` : id;
+  }
+
+  function relationTitle(kind: QueueRelationKind, fromId: string, toId: string, path?: string): string {
+    const from = relationOpLabel(fromId);
+    const to = relationOpLabel(toId);
+    const item = path ? basename(path) : "";
+    if (kind === "dependency") return t("queue.map.title.dependency", { from, to });
+    if (kind === "ordering") return t("queue.map.title.ordering", { from, to });
+    if (kind === "blocking") return t("queue.map.title.blocking", { from, to, item });
+    return t("queue.map.title.parallel", { from, to, item });
+  }
+
+  function relationKindPresent(kind: QueueRelationKind): boolean {
+    return queueRelationLinks.some((link) => link.kind === kind);
+  }
+
+  function buildQueueRelationLinks(): QueueRelationLink[] {
+    const ids = new Set(app.opQueue.map((op) => op.id));
+    const dependencyKeys = new Set<string>();
+    const seen = new Set<string>();
+    const links: QueueRelationLink[] = [];
+
+    function add(kind: QueueRelationKind, fromId: string, toId: string, detail = "") {
+      if (fromId === toId || !ids.has(fromId) || !ids.has(toId)) return;
+      const key = `${kind}:${fromId}:${toId}:${detail}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      links.push({ key, fromId, toId, kind, title: relationTitle(kind, fromId, toId, detail) });
+    }
+
+    for (const op of app.opQueue) {
+      for (const dependencyId of op.dependsOn) {
+        dependencyKeys.add(`${dependencyId}:${op.id}`);
+        add("dependency", dependencyId, op.id);
+      }
+    }
+
+    for (const [toId, predecessors] of app.queuePlan.orderPredecessors) {
+      for (const fromId of predecessors) {
+        if (dependencyKeys.has(`${fromId}:${toId}`)) continue;
+        add("ordering", fromId, toId);
+      }
+    }
+
+    for (const conflict of app.queueConflicts) {
+      add(
+        conflict.severity === "blocking" ? "blocking" : "parallel",
+        conflict.opAId,
+        conflict.opBId,
+        conflict.pathA,
+      );
+    }
+
+    return links.slice(0, 40);
+  }
+
+  const queueRelationLinks = $derived.by(buildQueueRelationLinks);
+  const queueRelationMapVisible = $derived(app.settings.showQueueRelationMap && queueRelationLinks.length > 0);
+
   // ── Conflict descriptions ─────────────────────────────────
   type ConflictParts = {
     pre: string; labelA: string; colorA: string;
@@ -217,11 +300,114 @@
   let drag: DragState | null = null;
   let draggedIdx    = $state<number | null>(null);
   let dropInsertIdx = $state<number | null>(null);
+  let dragOffsetY   = $state(0);
   let queueListEl   = $state<HTMLElement | undefined>();
+  let queueRelationRailWidth = $state(QUEUE_RELATION_MIN_RAIL);
+  let queueRelationSize = $state({ width: 0, height: 0 });
+  let queueRelationPaths = $state<RenderedQueueRelationLink[]>([]);
+  let queueRelationRaf = 0;
+
+  function scheduleQueueRelationMeasure() {
+    if (queueRelationRaf) return;
+    queueRelationRaf = requestAnimationFrame(() => {
+      queueRelationRaf = 0;
+      void measureQueueRelations();
+    });
+  }
+
+  async function measureQueueRelations() {
+    await tick();
+    const list = queueListEl;
+    if (!list || !queueRelationMapVisible) {
+      queueRelationPaths = [];
+      return;
+    }
+
+    let listRect = list.getBoundingClientRect();
+
+    const relationCount = queueRelationLinks.length;
+    const maxRail = listRect.width > 960
+      ? QUEUE_RELATION_MAX_RAIL
+      : listRect.width > 620
+        ? 164
+        : 104;
+    const railWidth = Math.min(
+      maxRail,
+      Math.max(QUEUE_RELATION_MIN_RAIL, 20 + relationCount * QUEUE_RELATION_LANE_GAP),
+    );
+    if (queueRelationRailWidth !== railWidth) {
+      queueRelationRailWidth = railWidth;
+      await tick();
+      listRect = list.getBoundingClientRect();
+    }
+
+    const cardById = new Map<string, HTMLElement>();
+    list.querySelectorAll<HTMLElement>(".queue-card[data-op-id]").forEach((card) => {
+      const id = card.dataset.opId;
+      if (id) cardById.set(id, card);
+    });
+
+    const cardIndexById = new Map(app.opQueue.map((op, index) => [op.id, index]));
+    const laneOrder = queueRelationLinks
+      .map((link, index) => ({
+        link,
+        index,
+        span: Math.abs((cardIndexById.get(link.toId) ?? index) - (cardIndexById.get(link.fromId) ?? index)),
+      }))
+      .sort((a, b) => b.span - a.span || a.index - b.index);
+    const laneByKey = new Map<string, number>();
+    laneOrder.forEach(({ link }, lane) => laneByKey.set(link.key, lane));
+
+    const attachmentTotals = new Map<string, number>();
+    for (const link of queueRelationLinks) {
+      attachmentTotals.set(link.fromId, (attachmentTotals.get(link.fromId) ?? 0) + 1);
+      attachmentTotals.set(link.toId, (attachmentTotals.get(link.toId) ?? 0) + 1);
+    }
+    const attachmentSeen = new Map<string, number>();
+    function attachY(id: string, rect: DOMRect): number {
+      const total = attachmentTotals.get(id) ?? 1;
+      const seen = attachmentSeen.get(id) ?? 0;
+      attachmentSeen.set(id, seen + 1);
+      if (total <= 1) return rect.top - listRect.top + rect.height / 2;
+
+      const step = Math.min(7, Math.max(3, (rect.height - 14) / Math.max(1, total - 1)));
+      const offset = (seen - (total - 1) / 2) * step;
+      const maxOffset = Math.max(0, rect.height / 2 - 9);
+      const clampedOffset = Math.max(-maxOffset, Math.min(maxOffset, offset));
+      return rect.top - listRect.top + rect.height / 2 + clampedOffset;
+    }
+
+    const rendered: RenderedQueueRelationLink[] = [];
+    for (let index = 0; index < queueRelationLinks.length; index++) {
+      const link = queueRelationLinks[index];
+      const from = cardById.get(link.fromId);
+      const to = cardById.get(link.toId);
+      if (!from || !to) continue;
+
+      const fromRect = from.getBoundingClientRect();
+      const toRect = to.getBoundingClientRect();
+      const cardX = Math.min(fromRect.left, toRect.left) - listRect.left - 2;
+      const lane = laneByKey.get(link.key) ?? index;
+      const usableRail = Math.max(1, cardX - 18);
+      const laneGap = relationCount <= 1 ? 0 : usableRail / Math.max(1, relationCount - 1);
+      const railX = 8 + lane * laneGap;
+      const y1 = attachY(link.fromId, fromRect);
+      const y2 = attachY(link.toId, toRect);
+      const d = `M ${cardX} ${y1} H ${railX} V ${y2} H ${cardX}`;
+      rendered.push({ ...link, d, x: cardX, y1, y2 });
+    }
+
+    queueRelationSize = {
+      width: Math.max(1, list.scrollWidth),
+      height: Math.max(1, list.scrollHeight),
+    };
+    queueRelationPaths = rendered;
+  }
 
   function onEntryMouseDown(e: MouseEvent, idx: number) {
     if (e.button !== 0) return;
     drag = { fromIdx: idx, startY: e.clientY, active: false };
+    dragOffsetY = 0;
     window.addEventListener("mousemove", onWindowMouseMove);
     window.addEventListener("mouseup",  onWindowMouseUp);
   }
@@ -234,14 +420,17 @@
       draggedIdx = drag.fromIdx;
       document.body.style.cursor = "grabbing";
     }
+    dragOffsetY = e.clientY - drag.startY;
     const els = queueListEl?.querySelectorAll<HTMLElement>(".queue-card");
     if (!els) return;
     let insert = els.length;
     for (let i = 0; i < els.length; i++) {
+      if (i === drag.fromIdx) continue;
       const r = els[i].getBoundingClientRect();
       if (e.clientY < r.top + r.height / 2) { insert = i; break; }
     }
     dropInsertIdx = insert;
+    scheduleQueueRelationMeasure();
   }
 
   function onWindowMouseUp() {
@@ -251,14 +440,44 @@
     drag = null;
     draggedIdx = null;
     dropInsertIdx = null;
+    dragOffsetY = 0;
     document.body.style.cursor = "";
     window.removeEventListener("mousemove", onWindowMouseMove);
     window.removeEventListener("mouseup",  onWindowMouseUp);
+    scheduleQueueRelationMeasure();
   }
+
+  $effect(() => {
+    const list = queueListEl;
+    queueRelationMapVisible;
+    if (!list) return;
+    if (!queueRelationMapVisible) {
+      queueRelationPaths = [];
+      return;
+    }
+    scheduleQueueRelationMeasure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => scheduleQueueRelationMeasure());
+    observer.observe(list);
+    list.querySelectorAll<HTMLElement>(".queue-card").forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  });
+
+  $effect(() => {
+    draggedIdx;
+    dropInsertIdx;
+    dragOffsetY;
+    if (!app.jobsPanelOpen || !queueRelationMapVisible) {
+      queueRelationPaths = [];
+      return;
+    }
+    scheduleQueueRelationMeasure();
+  });
 
   onDestroy(() => {
     window.removeEventListener("mousemove", onWindowMouseMove);
     window.removeEventListener("mouseup",  onWindowMouseUp);
+    if (queueRelationRaf) cancelAnimationFrame(queueRelationRaf);
     document.body.style.cursor = "";
   });
 </script>
@@ -334,7 +553,24 @@
         <!-- ── QUEUE SECTION ── -->
         {#if hasQueue}
           <div class="section">
-            <div class="section-label">{t("queue.title")} ({app.queueRunStats ? app.queueRunStats.total : app.opQueue.length})</div>
+            <div class="queue-section-heading">
+              <div class="section-label">{t("queue.title")} ({app.queueRunStats ? app.queueRunStats.total : app.opQueue.length})</div>
+              {#if app.opQueue.length > 0}
+                <label class="queue-map-switch" title={t("queue.map.toggleHint")}>
+                  <input
+                    class="queue-map-switch-input"
+                    type="checkbox"
+                    checked={app.settings.showQueueRelationMap}
+                    onchange={(e) => app.updateSettings({ showQueueRelationMap: (e.target as HTMLInputElement).checked })}
+                    aria-label={t("queue.map.toggle")}
+                  />
+                  <span class="queue-map-switch-track" aria-hidden="true">
+                    <span class="queue-map-switch-thumb"></span>
+                  </span>
+                  <span class="queue-map-switch-label">{t("queue.map.toggle")}</span>
+                </label>
+              {/if}
+            </div>
 
             {#if app.queueRunStats}
               <div class="queue-stats-view">
@@ -407,7 +643,47 @@
               {/if}
 
               <!-- Queue cards list -->
-              <div class="queue-list" bind:this={queueListEl}>
+              {#if queueRelationMapVisible}
+                <div class="queue-relation-legend" aria-label={t("queue.map.legend")}>
+                  {#if relationKindPresent("dependency")}
+                    <span class="queue-relation-key queue-relation-key--dependency">{t("queue.map.dependency")}</span>
+                  {/if}
+                  {#if relationKindPresent("ordering")}
+                    <span class="queue-relation-key queue-relation-key--ordering">{t("queue.map.ordering")}</span>
+                  {/if}
+                  {#if relationKindPresent("blocking")}
+                    <span class="queue-relation-key queue-relation-key--blocking">{t("queue.map.blocking")}</span>
+                  {/if}
+                  {#if relationKindPresent("parallel")}
+                    <span class="queue-relation-key queue-relation-key--parallel">{t("queue.map.parallel")}</span>
+                  {/if}
+                </div>
+              {/if}
+
+              <div
+                class="queue-list"
+                bind:this={queueListEl}
+                style={`--queue-relation-rail-width: ${queueRelationMapVisible ? queueRelationRailWidth : 0}px;`}
+              >
+                {#if queueRelationMapVisible && queueRelationPaths.length > 0}
+                  <svg
+                    class="queue-relation-map"
+                    width={queueRelationSize.width}
+                    height={queueRelationSize.height}
+                    viewBox={`0 0 ${queueRelationSize.width} ${queueRelationSize.height}`}
+                  >
+                    {#each queueRelationPaths as link (link.key)}
+                      <g class="queue-relation-link" aria-label={link.title}>
+                        <path class={`queue-relation-path queue-relation-path--${link.kind}`} d={link.d} vector-effect="non-scaling-stroke" />
+                        <path class="queue-relation-hit" d={link.d} vector-effect="non-scaling-stroke">
+                          <title>{link.title}</title>
+                        </path>
+                        <circle class={`queue-relation-dot queue-relation-dot--${link.kind}`} cx={link.x} cy={link.y1} r="2.2" />
+                        <circle class={`queue-relation-dot queue-relation-dot--${link.kind}`} cx={link.x} cy={link.y2} r="2.8" />
+                      </g>
+                    {/each}
+                  </svg>
+                {/if}
                 {#each app.opQueue as op, i (op.id)}
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
                   <div
@@ -418,6 +694,8 @@
                     class:drop-before={draggedIdx !== null && dropInsertIdx === i}
                     class:drop-after={draggedIdx !== null && dropInsertIdx === i + 1}
                     style:--kind-color={KIND_COLOR[op.kind]}
+                    style:transform={draggedIdx === i ? `translateY(${dragOffsetY}px)` : undefined}
+                    data-op-id={op.id}
                     data-kind={op.kind}
                   >
                     <!-- Drag handle -->
@@ -937,10 +1215,190 @@
   }
 
   /* ── Queue list + cards ── */
+  .queue-section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 22px;
+  }
+
+  .queue-map-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+
+  .queue-map-switch-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .queue-map-switch-track {
+    position: relative;
+    width: 28px;
+    height: 16px;
+    border-radius: 999px;
+    background: var(--surface-alt);
+    border: 1px solid var(--line-strong);
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+
+  .queue-map-switch-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    background: var(--text-subtle);
+    transition: transform 120ms ease, background 120ms ease;
+  }
+
+  .queue-map-switch-input:checked + .queue-map-switch-track {
+    background: color-mix(in srgb, var(--accent) 24%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line-strong));
+  }
+
+  .queue-map-switch-input:checked + .queue-map-switch-track .queue-map-switch-thumb {
+    transform: translateX(12px);
+    background: var(--accent);
+  }
+
+  .queue-map-switch:has(.queue-map-switch-input:focus-visible) .queue-map-switch-track {
+    outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    outline-offset: 2px;
+  }
+
   .queue-list {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    position: relative;
+    padding-left: var(--queue-relation-rail-width, 30px);
+    transition: padding-left 140ms ease;
+  }
+
+  .queue-relation-legend {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 18px;
+    padding: 0 2px;
+    flex-wrap: wrap;
+  }
+
+  .queue-relation-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+
+    &::before {
+      content: "";
+      width: 14px;
+      height: 2px;
+      border-radius: 999px;
+      background: currentColor;
+    }
+  }
+
+  .queue-relation-key--dependency { color: var(--accent); }
+  .queue-relation-key--ordering { color: color-mix(in srgb, var(--text-muted) 82%, var(--text)); }
+  .queue-relation-key--blocking { color: var(--danger, #e5484d); }
+  .queue-relation-key--parallel { color: #b45309; }
+
+  .queue-relation-map {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .queue-relation-path {
+    fill: none;
+    stroke-width: 1.65px;
+    stroke-linecap: butt;
+    stroke-linejoin: round;
+    opacity: 0.72;
+  }
+
+  .queue-relation-link:hover .queue-relation-path,
+  .queue-relation-link:focus-within .queue-relation-path {
+    opacity: 1;
+    stroke-width: 2.35px;
+  }
+
+  .queue-relation-hit {
+    fill: none;
+    stroke: transparent;
+    stroke-width: 14px;
+    pointer-events: stroke;
+    cursor: help;
+  }
+
+  .queue-relation-dot {
+    opacity: 0.86;
+    pointer-events: none;
+  }
+
+  .queue-relation-path--dependency {
+    stroke: var(--accent);
+  }
+
+  .queue-relation-dot--dependency {
+    fill: var(--accent);
+  }
+
+  .queue-relation-path--ordering {
+    stroke: color-mix(in srgb, var(--text-muted) 82%, var(--text));
+  }
+
+  .queue-relation-path--ordering {
+    stroke-dasharray: 3 4;
+  }
+
+  .queue-relation-dot--ordering {
+    fill: color-mix(in srgb, var(--text-muted) 82%, var(--text));
+  }
+
+  .queue-relation-path--blocking {
+    stroke: var(--danger, #e5484d);
+  }
+
+  .queue-relation-path--blocking {
+    stroke-width: 2.1px;
+  }
+
+  .queue-relation-dot--blocking {
+    fill: var(--danger, #e5484d);
+  }
+
+  .queue-relation-path--parallel {
+    stroke: #b45309;
+  }
+
+  .queue-relation-path--parallel {
+    stroke-dasharray: 5 4;
+  }
+
+  .queue-relation-dot--parallel {
+    fill: #b45309;
   }
 
   .queue-plan-summary {
@@ -1057,10 +1515,15 @@
     border-radius: 6px;
     min-width: 0;
     position: relative;
+    z-index: 1;
     transition: opacity 0.15s, box-shadow 0.15s, border-color 0.15s, background 0.15s;
 
     &:hover { box-shadow: 0 1px 4px color-mix(in srgb, var(--kind-color) 15%, transparent); }
-    &.queue-card--dragging { opacity: 0.35; }
+    &.queue-card--dragging {
+      opacity: 0.78;
+      z-index: 4;
+      box-shadow: 0 8px 18px color-mix(in srgb, #000 18%, transparent);
+    }
 
     /* Vertical drop indicators */
     &.drop-before::before,

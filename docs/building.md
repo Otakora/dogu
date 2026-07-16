@@ -163,11 +163,16 @@ sudo apt install -y \
   libsoup-3.0-dev \
   libayatana-appindicator3-dev \
   librsvg2-dev \
-  patchelf
+  patchelf \
+  squashfs-tools
 ```
 
 `libfuse2t64` is needed by the AppImage tooling on Ubuntu 24.04+. SMB support
 links against the system `libsmbclient`.
+
+CI also sets `APPIMAGE_EXTRACT_AND_RUN=1` so downloaded AppImage tooling can run
+without relying on a FUSE mount, and `NO_STRIP=true` so `linuxdeploy` does not
+try to strip Dogu's bundled third-party helper binaries.
 
 ### Linux Flatpak build
 
@@ -337,6 +342,9 @@ Linux nativo:
 ```bash
 python3 tools/release.py build-linux-native
 ```
+
+En CI, el build AppImage se ejecuta con `APPIMAGE_EXTRACT_AND_RUN=1` y
+`NO_STRIP=true` para evitar dependencias fragiles de FUSE/strip en los runners.
 
 Flatpak:
 

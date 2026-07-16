@@ -137,6 +137,9 @@ def build_env() -> dict[str, str]:
     env = os.environ.copy()
     node_path = node_executable()
     env["PATH"] = str(node_path.parent) + os.pathsep + env.get("PATH", "")
+    if host_os() == "linux":
+        env.setdefault("APPIMAGE_EXTRACT_AND_RUN", "1")
+        env.setdefault("NO_STRIP", "true")
     return env
 
 
@@ -430,7 +433,7 @@ def build_linux_native() -> tuple[Path, Path]:
         )
 
     ensure_linux_sidecars_permissions()
-    run_tauri(["build"])
+    run_tauri(["build", "--bundles", "deb,appimage"])
     appimage = copy_latest("appimage/*.AppImage", versioned_filename("linux-appimage"))
     copy_latest_signature("appimage/*.AppImage", versioned_filename("linux-appimage-sig"))
     deb = copy_latest("deb/*.deb", versioned_filename("linux-deb"))

@@ -186,8 +186,12 @@ jobs:
             libsoup-3.0-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            squashfs-tools
       - name: Build Linux AppImage and DEB artifacts
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          NO_STRIP: "true"
         run: python3 tools/release.py build-linux-native
       - name: Upload Linux native artifacts
         uses: actions/upload-artifact@v4

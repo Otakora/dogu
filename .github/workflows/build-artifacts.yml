@@ -98,19 +98,18 @@ jobs:
 
           if [[ "$CHANNEL" == "beta" ]]; then
             RELEASE_TAG="beta"
-            RELEASE_NAME="Dogu Beta ${VERSION}"
             PRERELEASE="true"
             MAKE_LATEST="false"
             MANIFEST_NAME="latest-beta.json"
             ASSET_BASE_URL="https://github.com/Otakora/dogu/releases/download/beta"
           else
             RELEASE_TAG="v${VERSION}"
-            RELEASE_NAME="Dogu ${VERSION}"
             PRERELEASE="false"
             MAKE_LATEST="true"
             MANIFEST_NAME="latest.json"
             ASSET_BASE_URL="https://github.com/Otakora/dogu/releases/download/v${VERSION}"
           fi
+          RELEASE_NAME="$(python tools/release.py release-name --channel "$CHANNEL" --version "$VERSION")"
 
           {
             echo "version=$VERSION"

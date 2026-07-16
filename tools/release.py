@@ -85,6 +85,29 @@ def verify_version_metadata() -> str:
     return cargo_version
 
 
+def beta_release_display_name(version: str) -> str:
+    marker = "-beta."
+    if marker in version:
+        base_version, beta_number = version.split(marker, 1)
+        if base_version and beta_number:
+            return f"Beta {base_version} build {beta_number}"
+    return f"Beta {version}"
+
+
+def release_display_name(channel: str, version: str) -> str:
+    if channel == "stable":
+        return f"v{version}"
+    if channel == "beta":
+        return beta_release_display_name(version)
+    raise RuntimeError(f"Canal de release desconocido: {channel}")
+
+
+def release_notes_title(version: str) -> str:
+    if "-beta." in version:
+        return beta_release_display_name(version)
+    return f"v{version}"
+
+
 def versioned_filename(target: str, version: str | None = None) -> str:
     version = version or release_version()
     mapping = {
@@ -316,14 +339,14 @@ def extract_changelog_section(version: str) -> str:
 def write_release_notes(version: str, output: Path) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     body = extract_changelog_section(version)
-    output.write_text(f"# Dogu {version}\n\n{body}\n", encoding="utf-8")
+    output.write_text(f"# {release_notes_title(version)}\n\n{body}\n", encoding="utf-8")
     return output
 
 
 def updater_notes_from_file(path: Path) -> str:
     notes = path.read_text(encoding="utf-8").strip()
     lines = notes.splitlines()
-    if lines and lines[0].startswith("# Dogu "):
+    if lines and lines[0].startswith("# "):
         return "\n".join(lines[1:]).strip()
     return notes
 
@@ -488,6 +511,10 @@ def main() -> None:
     subparsers.add_parser("build-linux-flatpak", help="Genera el bundle Flatpak en Linux.")
     subparsers.add_parser("verify-version", help="Verifica que todos los metadatos de version coinciden.")
 
+    name_parser = subparsers.add_parser("release-name", help="Genera el nombre visible de la GitHub Release.")
+    name_parser.add_argument("--channel", choices=("stable", "beta"), required=True)
+    name_parser.add_argument("--version", default=release_version())
+
     notes_parser = subparsers.add_parser("write-release-notes", help="Extrae notas bilingues de CHANGELOG.md.")
     notes_parser.add_argument("--version", default=release_version())
     notes_parser.add_argument("--output", required=True, type=Path)
@@ -509,6 +536,9 @@ def main() -> None:
 
     if args.command == "verify-version":
         print(verify_version_metadata())
+        return
+    if args.command == "release-name":
+        print(release_display_name(args.channel, args.version))
         return
     if args.command == "build-windows":
         print(build_windows())

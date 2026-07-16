@@ -19,7 +19,7 @@ stable release even if that is a downgrade from the current beta build.
 - Expected source branch: `main`.
 - Version shape: clean semver, for example `0.2.5`.
 - Tag: `v0.2.5`.
-- GitHub Release: `Dogu 0.2.5`.
+- GitHub Release: `v0.2.5`.
 - Updater manifest: `latest.json`.
 - Dogu endpoint: `https://github.com/Otakora/dogu/releases/latest/download/latest.json`.
 - winget: stable only, package identifier `Otakora.Dogu`.
@@ -31,7 +31,7 @@ Stable releases must have a matching `CHANGELOG.md` section.
 - Expected source branch: `dev`.
 - Version shape: semver prerelease with `-beta.N`, for example `0.2.6-beta.1`.
 - Public release tag: rolling `beta`.
-- GitHub Release: `Dogu Beta 0.2.6-beta.1`.
+- GitHub Release: `Beta 0.2.6 build 1`.
 - Updater manifest: `latest-beta.json`.
 - Dogu endpoint: `https://github.com/Otakora/dogu/releases/download/beta/latest-beta.json`.
 - winget: beta is not submitted to winget.
@@ -105,7 +105,7 @@ a la beta actual.
 - Rama esperada: `main`.
 - Versión: semver limpio, por ejemplo `0.2.5`.
 - Tag: `v0.2.5`.
-- GitHub Release: `Dogu 0.2.5`.
+- GitHub Release: `v0.2.5`.
 - Manifest updater: `latest.json`.
 - Endpoint: `https://github.com/Otakora/dogu/releases/latest/download/latest.json`.
 - winget: solo stable, identificador `Otakora.Dogu`.
@@ -117,7 +117,7 @@ Stable debe tener sección equivalente en `CHANGELOG.md`.
 - Rama esperada: `dev`.
 - Versión: semver prerelease con `-beta.N`, por ejemplo `0.2.6-beta.1`.
 - Tag público: `beta`.
-- GitHub Release: `Dogu Beta 0.2.6-beta.1`.
+- GitHub Release: `Beta 0.2.6 build 1`.
 - Manifest updater: `latest-beta.json`.
 - Endpoint: `https://github.com/Otakora/dogu/releases/download/beta/latest-beta.json`.
 - winget: beta no se envía a winget.

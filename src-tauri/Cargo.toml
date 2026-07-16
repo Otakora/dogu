@@ -37,7 +37,7 @@ walkdir = "2"
 # every RVZ; Dogu only writes Stored/Deflated zips, and 7-Zip covers exotic
 # archives, so dropping the internal LZMA-zip reader is safe.
 zip = { version = "2", default-features = false, features = ["aes-crypto", "bzip2", "deflate", "deflate64", "time", "zstd"] }
-sysinfo = { version = "0.32", default-features = false, features = ["disk"] }
+sysinfo = { version = "0.39", default-features = false, features = ["disk"] }
 dirs = "5"
 portable-pty = "0.8"
 regex = "1"

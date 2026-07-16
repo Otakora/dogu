@@ -433,7 +433,7 @@ def build_linux_native() -> tuple[Path, Path]:
         )
 
     ensure_linux_sidecars_permissions()
-    run_tauri(["build", "--bundles", "deb,appimage"])
+    run_tauri(["build", "-vv", "--bundles", "deb,appimage"])
     appimage = copy_latest("appimage/*.AppImage", versioned_filename("linux-appimage"))
     copy_latest_signature("appimage/*.AppImage", versioned_filename("linux-appimage-sig"))
     deb = copy_latest("deb/*.deb", versioned_filename("linux-deb"))

@@ -159,6 +159,8 @@ sudo apt install -y \
   libsmbclient-dev \
   pkg-config \
   libgtk-3-dev \
+  libgdk-pixbuf2.0-bin \
+  libgdk-pixbuf2.0-dev \
   libwebkit2gtk-4.1-dev \
   libsoup-3.0-dev \
   libayatana-appindicator3-dev \
@@ -173,6 +175,11 @@ links against the system `libsmbclient`.
 CI also sets `APPIMAGE_EXTRACT_AND_RUN=1` so downloaded AppImage tooling can run
 without relying on a FUSE mount, and `NO_STRIP=true` so `linuxdeploy` does not
 try to strip Dogu's bundled third-party helper binaries.
+
+The GitHub runner also creates a compatibility symlink from
+`/usr/lib/gdk-pixbuf-2.0/2.10.0` to Ubuntu's multiarch GDK PixBuf module
+directory. This keeps `linuxdeploy-plugin-gtk` from failing when it expects the
+non-multiarch path.
 
 ### Linux Flatpak build
 

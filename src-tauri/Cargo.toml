@@ -1,6 +1,6 @@
 [package]
 name = "dogu"
-version = "0.2.5-beta.3"
+version = "0.2.5-beta.4"
 description = "A practical desktop file workbench for local files, remotes and queued operations."
 authors = ["Otakora"]
 edition = "2021"

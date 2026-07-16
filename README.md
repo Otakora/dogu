@@ -35,7 +35,7 @@ Dogu is a desktop file manager with two panes, remote connections and a queue th
 
 It is built for the kind of file work that usually gets messy: extracting archives, moving things between machines, converting disc images, preparing multi-disc playlists, cleaning old files and chaining several steps without babysitting every folder by hand.
 
-It started with ROM collection maintenance in mind, but most of the app behaves like a general-purpose file explorer with extra tools for archive and disc-image workflows.
+It started with ROM collection maintenance in mind, but most of the app behaves like a general-purpose file explorer with extra tools for archive and disc-image workflows. For cartridge-style libraries such as Nintendo Game Boy, Game Boy Advance, NES, SNES, Mega Drive/Genesis or arcade sets, Dogu mainly helps with extraction, transfers, cleanup and organization. For disc-based libraries, Dogu also exposes format-specific treatments such as CHD, CSO, XISO and RVZ when those formats fit the platform.
 
 ### A quick safety note ⚠️
 
@@ -151,25 +151,48 @@ RAR extraction is handled through 7-Zip where supported. Dogu does not bundle a 
 
 ### Disc-image tools 💿
 
-Dogu includes a few helpers for disc-image and ROM maintenance.
+Dogu includes helpers for ROM and disc-image maintenance. The format matters more than the platform name: Dogu offers a treatment when the selected files match a format it can safely process, and emulator support for the resulting format still depends on the emulator or frontend you use.
+
+Current platform-oriented treatments:
+
+| Family / platform use case | Dogu treatment | Typical inputs | Output |
+| --- | --- | --- | --- |
+| CD/GD/DVD based systems that support CHD, such as PlayStation, Sega Saturn, Mega-CD/Sega CD, PC Engine CD, Dreamcast GDI or compatible ISO-based systems | CHD conversion/restoration | `.cue`, `.gdi`, `.toc`, `.iso`, paired `.bin`/`.cue`, `.chd` | `.chd`, restored `.gdi`, `.cue`/`.bin` or `.iso` |
+| Sony PSP | CSO compression/restoration | `.iso`, `.cso` | `.cso` or `.iso` |
+| Original Xbox | XISO packing/unpacking | Xbox redump `.iso`, Xbox game folders, trimmed `.xiso.iso` / `.xiso`-named images | `.xiso.iso` or extracted folder |
+| Nintendo GameCube / Wii | RVZ conversion/restoration | GameCube/Wii `.iso`, `.rvz` | `.rvz` or `.iso` |
+| Multi-disc sets | M3U playlist generation | folders containing disc images | `.m3u` |
 
 CHD workflows:
 
 - Convert supported disc images to `.chd`.
-- Restore `.chd` files back to disc images.
+- Restore `.chd` files back to their native disc-image shape.
 - Scan folders for CUE/BIN and other supported sets.
-- Handle CUE files and their linked BIN files together.
+- Handle CUE, GDI and TOC files with their linked track files together.
 - Choose output names and destinations.
 - Optionally delete originals after success.
 - Optionally remove source subfolders after success.
 
-Other local disc-image treatments:
+CHD conversion sources currently exposed by Dogu:
 
-- ISO to CSO, and CSO back to ISO.
-- Xbox ISO/folder to XISO, and XISO back to a folder.
+| Input | How Dogu treats it |
+| --- | --- |
+| `.cue` | CD-style source. All referenced track files must be present. |
+| `.bin` | Accepted only when Dogu can pair it with a matching `.cue`; standalone raw `.bin` files are not converted by themselves. |
+| `.gdi` | Dreamcast GD-ROM source. Referenced track files must be present. |
+| `.toc` | CD TOC source. |
+| `.iso` | DVD-style source. For local files, Dogu avoids CHD when it detects a better dedicated treatment such as Xbox XISO or GameCube/Wii RVZ. |
+| `.chd` | Restorable source. Dogu reads CHD metadata and chooses `.gdi`, `.cue`/`.bin` or `.iso` automatically. |
+
+CDI is intentionally not exposed as a CHD source because it can be lossy and is not a safe preservation-oriented input.
+
+Other disc-image treatments:
+
+- PSP ISO to CSO, and CSO back to ISO.
+- Original Xbox redump ISO or game folder to XISO, and trimmed XISO back to a folder.
 - GameCube/Wii ISO to RVZ, and RVZ back to ISO.
 
-CSO, XISO and RVZ operations are local-only right now. RVZ can use Dogu's native `nod` engine, DolphinTool, or automatic fallback depending on settings and available tools.
+CHD, CSO, XISO and RVZ operations can be queued with local sources and with remote sources when the treatment can be identified safely from the selected file or folder. Content-detected ISO treatments, such as Xbox redump trimming and GameCube/Wii RVZ conversion, are offered for local ISOs where Dogu can inspect the disc. When a backend cannot perform the transformation directly, Dogu stages the data through its own process so the output still lands in the requested destination. RVZ can use Dogu's native `nod` engine, DolphinTool, or automatic fallback depending on settings and available tools.
 
 ### M3U playlists 🎵
 
@@ -274,7 +297,7 @@ Dogu es un gestor de archivos de escritorio con dos paneles, conexiones remotas 
 
 Está pensado para ese trabajo con archivos que suele volverse lioso: extraer comprimidos, mover cosas entre máquinas, convertir imágenes de disco, preparar playlists multidisco, limpiar archivos antiguos y encadenar varios pasos sin tener que vigilar cada carpeta a mano.
 
-Nació pensando en el mantenimiento de colecciones de ROMs, pero gran parte de la app funciona como un explorador de archivos general con herramientas extra para comprimidos e imágenes de disco.
+Nació pensando en el mantenimiento de colecciones de ROMs, pero gran parte de la app funciona como un explorador de archivos general con herramientas extra para comprimidos e imágenes de disco. En librerías de cartucho como Nintendo Game Boy, Game Boy Advance, NES, SNES, Mega Drive/Genesis o sets arcade, Dogu ayuda sobre todo a extraer, mover, limpiar y organizar. En librerías basadas en disco, Dogu también ofrece tratamientos específicos como CHD, CSO, XISO y RVZ cuando esos formatos encajan con la plataforma.
 
 ### Nota rápida de seguridad ⚠️
 
@@ -390,25 +413,48 @@ La extracción RAR se gestiona mediante 7-Zip cuando está soportada. Dogu no in
 
 ### Herramientas de imágenes de disco 💿
 
-Dogu incluye algunas utilidades para mantenimiento de ROMs e imágenes de disco.
+Dogu incluye utilidades para mantenimiento de ROMs e imágenes de disco. El formato importa más que el nombre de la plataforma: Dogu ofrece un tratamiento cuando los archivos seleccionados encajan con un formato que puede procesar con seguridad, y el soporte del formato resultante sigue dependiendo del emulador o frontend que uses.
+
+Tratamientos actuales orientados por plataforma:
+
+| Familia / caso de uso | Tratamiento en Dogu | Entradas típicas | Salida |
+| --- | --- | --- | --- |
+| Sistemas CD/GD/DVD que soportan CHD, como PlayStation, Sega Saturn, Mega-CD/Sega CD, PC Engine CD, Dreamcast GDI o sistemas ISO compatibles | Conversión/restauración CHD | `.cue`, `.gdi`, `.toc`, `.iso`, pareja `.bin`/`.cue`, `.chd` | `.chd`, restaurado `.gdi`, `.cue`/`.bin` o `.iso` |
+| Sony PSP | Compresión/restauración CSO | `.iso`, `.cso` | `.cso` o `.iso` |
+| Xbox original | Empaquetado/desempaquetado XISO | `.iso` redump de Xbox, carpetas de juego Xbox, imágenes recortadas `.xiso.iso` / con nombre `.xiso` | `.xiso.iso` o carpeta extraída |
+| Nintendo GameCube / Wii | Conversión/restauración RVZ | `.iso` de GameCube/Wii, `.rvz` | `.rvz` o `.iso` |
+| Sets multidisco | Generación de playlists M3U | carpetas con imágenes de disco | `.m3u` |
 
 Flujos CHD:
 
 - Convertir imágenes de disco compatibles a `.chd`.
-- Restaurar archivos `.chd` a imágenes de disco.
+- Restaurar archivos `.chd` a su forma nativa de imagen de disco.
 - Escanear carpetas buscando conjuntos CUE/BIN y otros formatos soportados.
-- Tratar archivos CUE y sus BIN enlazados como un conjunto.
+- Tratar archivos CUE, GDI y TOC con sus pistas enlazadas como un conjunto.
 - Elegir nombres y destinos de salida.
 - Eliminar originales opcionalmente tras completar con éxito.
 - Eliminar subcarpetas de origen opcionalmente tras completar con éxito.
 
-Otros tratamientos locales:
+Fuentes de conversión CHD expuestas actualmente por Dogu:
 
-- ISO a CSO, y CSO de vuelta a ISO.
-- ISO/carpeta Xbox a XISO, y XISO de vuelta a carpeta.
+| Entrada | Cómo la trata Dogu |
+| --- | --- |
+| `.cue` | Fuente tipo CD. Todos los archivos de pista referenciados deben estar presentes. |
+| `.bin` | Se acepta solo cuando Dogu puede emparejarlo con un `.cue`; los `.bin` crudos sueltos no se convierten por sí mismos. |
+| `.gdi` | Fuente Dreamcast GD-ROM. Los archivos de pista referenciados deben estar presentes. |
+| `.toc` | Fuente CD TOC. |
+| `.iso` | Fuente tipo DVD. En archivos locales, Dogu evita CHD cuando detecta un tratamiento dedicado mejor como XISO para Xbox o RVZ para GameCube/Wii. |
+| `.chd` | Fuente restaurable. Dogu lee la metadata del CHD y elige automáticamente `.gdi`, `.cue`/`.bin` o `.iso`. |
+
+CDI no se expone intencionadamente como fuente CHD porque puede ser un formato con pérdida y no es una entrada segura para preservación.
+
+Otros tratamientos de imágenes de disco:
+
+- ISO de PSP a CSO, y CSO de vuelta a ISO.
+- ISO redump de Xbox original o carpeta de juego a XISO, y XISO recortado de vuelta a carpeta.
 - ISO de GameCube/Wii a RVZ, y RVZ de vuelta a ISO.
 
-Las operaciones CSO, XISO y RVZ son solo locales por ahora. RVZ puede usar el motor nativo `nod`, DolphinTool o fallback automático según la configuración y las herramientas disponibles.
+Las operaciones CHD, CSO, XISO y RVZ pueden encolarse con fuentes locales y con fuentes remotas cuando el tratamiento puede identificarse con seguridad a partir del archivo o carpeta seleccionada. Los tratamientos de ISO detectados por contenido, como el recorte de redump Xbox y la conversión RVZ de GameCube/Wii, se ofrecen para ISOs locales donde Dogu puede inspeccionar el disco. Cuando el backend no puede transformar los datos directamente, Dogu los prepara a través de su propio proceso para que la salida termine en el destino solicitado. RVZ puede usar el motor nativo `nod`, DolphinTool o fallback automático según la configuración y las herramientas disponibles.
 
 ### Playlists M3U 🎵
 

@@ -1,30 +1,43 @@
-# 7-Zip integrado
+# Bundled 7-Zip
 
-Este proyecto integra binarios oficiales de 7-Zip para poder extraer `.7z` y `.rar` sin depender de herramientas instaladas por el usuario.
+Dogu bundles official 7-Zip binaries so archive extraction can work without
+depending on tools installed by the user.
 
-## RAR en Windows
+## English
 
-El binario historico `7za.exe` no soporta archivos `.rar`. Por eso Dogu incluye
-tambien `7z.exe` y `7z.dll`, que si soportan listar y extraer RAR/RAR5.
+### RAR on Windows
 
-Dogu usa ese backend para la vista previa de extraccion, los fantasmas de cola y
-la extraccion real. `7za.exe` se conserva como compatibilidad para operaciones
-7-Zip existentes.
+The historical `7za.exe` binary does not support `.rar`. Dogu therefore also
+bundles `7z.exe` and `7z.dll`, which can list and extract RAR/RAR5 archives.
 
-Dogu no incluye ningun compresor RAR. La creacion de `.rar` solo se habilita si
-el usuario tiene `rar`/WinRAR instalado en su sistema.
+Dogu uses that backend for extraction previews, queue ghost files and real
+extraction. `7za.exe` is kept for compatibility with existing 7-Zip operations.
 
-## Version integrada
+Dogu does not bundle a RAR compressor. Creating `.rar` files is enabled only when
+the user has `rar` or WinRAR installed on the system.
+
+### Bundled version
 
 - Version: `26.01`
-- Source oficial: [7-zip.org](https://www.7-zip.org/download.html)
+- Official source: [7-zip.org](https://www.7-zip.org/download.html)
 
-## Binarios
+### Binaries
 
-- Windows: `third_party/7zip/windows/7z.exe` + `7z.dll` para `.rar`, y `7za.exe` + `7za.dll`
-- Linux: `third_party/7zip/linux/7zz`
+- Windows: `third_party/7zip/windows/7z.exe` + `7z.dll` for `.rar`, plus `7za.exe` + `7za.dll`.
+- Linux: `third_party/7zip/linux/7zz`.
 
-## Licencias incluidas
+### Included licenses
 
 - Windows: `third_party/7zip/windows/License.txt`
 - Linux: `third_party/7zip/linux/License.txt`
+
+## Español
+
+Dogu incluye binarios oficiales de 7-Zip para extraer archivos sin depender de
+herramientas instaladas por el usuario.
+
+`7za.exe` no soporta `.rar`, así que en Windows Dogu incluye también `7z.exe` y
+`7z.dll`, capaces de listar y extraer RAR/RAR5. Dogu no incluye compresor RAR; la
+creación de `.rar` solo se habilita si el sistema aporta `rar` o WinRAR.
+
+Versión integrada: `26.01`.

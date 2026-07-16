@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .env
 .env.*
+.dev-secrets/
 .DS_Store
 .idea/
 .vscode/

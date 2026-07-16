@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Dogu",
-  "version": "0.2.4",
+  "version": "0.2.5-beta.1",
   "identifier": "io.github.otakora.dogu",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -27,6 +27,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "publisher": "Otakora",
     "homepage": "https://github.com/Otakora/dogu",
     "icon": [
@@ -51,6 +52,13 @@
       "nsis": {
         "languages": ["English", "Spanish"],
         "displayLanguageSelector": true
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

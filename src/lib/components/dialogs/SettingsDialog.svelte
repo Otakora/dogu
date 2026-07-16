@@ -4,9 +4,31 @@
   import Button from "../ui/Button.svelte";
   import AboutDialog from "./AboutDialog.svelte";
   import { t } from "../../i18n/index.js";
-  import type { Locale, RvzEngine } from "../../types/index.js";
+  import type { Locale, RvzEngine, UpdateChannel } from "../../types/index.js";
 
   let aboutOpen = $state(false);
+
+  async function chooseUpdateChannel(channel: UpdateChannel) {
+    if (channel === app.settings.updateChannel) return;
+
+    if (channel === "beta") {
+      if (!window.confirm(t("settingsDialog.updateBetaConfirm"))) return;
+      app.setUpdateChannel("beta");
+      const update = await app.checkForUpdates({ manual: true });
+      if (!update && !app.updateError) app.notify("success", t("settingsDialog.updatesUpToDate"));
+      return;
+    }
+
+    if (!window.confirm(t("settingsDialog.updateStableConfirm"))) return;
+    app.setUpdateChannel("stable");
+    const update = await app.checkForUpdates({ manual: true, allowDowngrade: true });
+    if (!update && !app.updateError) app.notify("success", t("settingsDialog.updatesUpToDate"));
+  }
+
+  async function checkUpdatesNow() {
+    const update = await app.checkForUpdates({ manual: true });
+    if (!update && !app.updateError) app.notify("success", t("settingsDialog.updatesUpToDate"));
+  }
 </script>
 
 {#if app.settingsOpen}
@@ -92,6 +114,75 @@
               class="checkbox"
               aria-label={t("settingsDialog.compactUi")}
             />
+          </div>
+        </div>
+
+        <!-- Updates -->
+        <div class="setting-group">
+          <div class="setting-label">{t("settingsDialog.updates")}</div>
+          <div class="updates-card">
+            <div class="setting-row setting-row--top">
+              <div class="setting-name-block">
+                <span class="setting-name">{t("settingsDialog.updateChannel")}</span>
+                <span class="setting-hint">
+                  {app.settings.updateChannel === "beta" ? t("settingsDialog.updateChannelBetaHint") : t("settingsDialog.updateChannelStableHint")}
+                </span>
+              </div>
+              <div class="toggle-group" role="group" aria-label={t("settingsDialog.updateChannel")}>
+                <button
+                  class="toggle-btn"
+                  class:toggle-btn--active={app.settings.updateChannel === "stable"}
+                  onclick={() => void chooseUpdateChannel("stable")}
+                  aria-pressed={app.settings.updateChannel === "stable"}
+                >
+                  {t("updates.channel.stable")}
+                </button>
+                <button
+                  class="toggle-btn"
+                  class:toggle-btn--active={app.settings.updateChannel === "beta"}
+                  onclick={() => void chooseUpdateChannel("beta")}
+                  aria-pressed={app.settings.updateChannel === "beta"}
+                >
+                  {t("updates.channel.beta")}
+                </button>
+              </div>
+            </div>
+
+            {#if app.settings.updateChannel === "beta"}
+              <p class="updates-warning">{t("settingsDialog.updateBetaWarning")}</p>
+            {/if}
+
+            <div class="setting-row setting-row--top">
+              <div class="setting-name-block">
+                <span class="setting-name">{t("settingsDialog.autoCheckUpdates")}</span>
+                <span class="setting-hint">{t("settingsDialog.autoCheckUpdatesHint")}</span>
+              </div>
+              <label class="setting-switch">
+                <input
+                  class="setting-switch-input"
+                  type="checkbox"
+                  checked={app.settings.autoCheckUpdates}
+                  onchange={(e) => app.updateSettings({ autoCheckUpdates: (e.target as HTMLInputElement).checked })}
+                  aria-label={t("settingsDialog.autoCheckUpdates")}
+                />
+                <span class="setting-switch-track" aria-hidden="true">
+                  <span class="setting-switch-thumb"></span>
+                </span>
+              </label>
+            </div>
+
+            <div class="updates-actions">
+              <Button variant="ghost" onclick={() => void checkUpdatesNow()} disabled={app.updateChecking || app.updateInstalling}>
+                {app.updateChecking ? t("settingsDialog.checkingUpdates") : t("settingsDialog.checkUpdates")}
+              </Button>
+              {#if app.lastUpdateCheckAt}
+                <span class="updates-last-check">{t("settingsDialog.lastUpdateCheck")}</span>
+              {/if}
+            </div>
+
+            {#if app.updateError}
+              <p class="updates-error">{app.updateError}</p>
+            {/if}
           </div>
         </div>
 
@@ -534,6 +625,49 @@
       radial-gradient(circle at 8% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 38%),
       linear-gradient(135deg, color-mix(in srgb, var(--accent) 7%, var(--surface-alt)), var(--surface-alt));
     border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  }
+
+  .updates-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 11px;
+    border-radius: 8px;
+    background: var(--surface-alt);
+    border: 1px solid var(--line);
+  }
+
+  .updates-warning,
+  .updates-error {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    border-radius: 7px;
+    padding: 7px 8px;
+  }
+
+  .updates-warning {
+    color: #b45309;
+    background: color-mix(in srgb, #f59e0b 12%, transparent);
+    border: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+  }
+
+  .updates-error {
+    color: var(--danger, #e5484d);
+    background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 28%, transparent);
+  }
+
+  .updates-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .updates-last-check {
+    color: var(--text-subtle);
+    font-size: 11px;
   }
 
   .queue-badge {

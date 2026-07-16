@@ -1,4 +1,5 @@
 import { untrack } from "svelte";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   ThemeMode,
@@ -23,6 +24,10 @@ import type {
   GhostEntry,
   JobPausedDto,
   ToolStatusDto,
+  UpdateChannel,
+  UpdateDownloadEvent,
+  UpdateDownloadProgress,
+  UpdateMetadataDto,
 } from "../types/index.js";
 import { normalizePath, uniqueDisplayPath, basenameOf } from "../utils/ghosts.js";
 import { collectAccentIssues, isAccentUnsafeKind } from "../utils/ascii.js";
@@ -243,6 +248,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   queueMaxConcurrent: DEFAULT_QUEUE_MAX_CONCURRENT,
   defaultQueueMode: false,
   showQueueRelationMap: true,
+  updateChannel: "stable",
+  autoCheckUpdates: true,
   defaultOverwriteOnConflict: false,
   renameOnConflict: true,
   rvzPrimaryEngine: "nod",
@@ -270,6 +277,8 @@ function loadSettings(): AppSettings {
       ...parsed,
       queueMaxConcurrent: clampQueueMaxConcurrent(parsed.queueMaxConcurrent),
       showQueueRelationMap: parsed.showQueueRelationMap !== false,
+      updateChannel: parsed.updateChannel === "beta" ? "beta" : "stable",
+      autoCheckUpdates: parsed.autoCheckUpdates !== false,
     } as AppSettings;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -752,6 +761,15 @@ function createAppState() {
   // Notifications
   let notifications = $state<NotificationEntry[]>([]);
 
+  // Updates
+  let updateChecking = $state(false);
+  let updateInstalling = $state(false);
+  let updateNoticeOpen = $state(false);
+  let availableUpdate = $state<UpdateMetadataDto | null>(null);
+  let updateDownloadProgress = $state<UpdateDownloadProgress | null>(null);
+  let updateError = $state<string | null>(null);
+  let lastUpdateCheckAt = $state<number | null>(null);
+
   // Busy overlay
   let busyCount = $state(0);
 
@@ -1054,6 +1072,78 @@ function createAppState() {
     };
   }
 
+  function pushNotification(kind: NotificationKind, text: string) {
+    const n = makeNotification(kind, text);
+    notifications = [n, ...notifications].slice(0, 8);
+    if (kind !== "error" && kind !== "warn") {
+      setTimeout(() => { notifications = notifications.filter(x => x.id !== n.id); }, 4000);
+    }
+  }
+
+  function isUpdaterNotConfiguredError(error: string): boolean {
+    return error.includes("Dogu updater is not configured") || error.includes("DOGU_UPDATER_PUBLIC_KEY");
+  }
+
+  async function checkForUpdates(options: { manual?: boolean; allowDowngrade?: boolean } = {}) {
+    if (updateChecking || updateInstalling) return null;
+    updateChecking = true;
+    updateError = null;
+    updateDownloadProgress = null;
+    try {
+      const update = await invoke<UpdateMetadataDto | null>("check_for_update", {
+        channel: settings.updateChannel,
+        allowDowngrade: !!options.allowDowngrade,
+      });
+      lastUpdateCheckAt = Date.now();
+      availableUpdate = update;
+      if (update) {
+        updateNoticeOpen = true;
+      }
+      return update;
+    } catch (error) {
+      const message = String(error);
+      const shouldSurface = options.manual || !isUpdaterNotConfiguredError(message);
+      updateError = shouldSurface ? message : null;
+      if (shouldSurface) {
+        pushNotification("error", message);
+      }
+      return null;
+    } finally {
+      updateChecking = false;
+    }
+  }
+
+  async function installAvailableUpdate() {
+    if (!availableUpdate || updateInstalling) return;
+    updateInstalling = true;
+    updateError = null;
+    updateDownloadProgress = { downloaded: 0, contentLength: null, percent: null };
+    const onEvent = new Channel<UpdateDownloadEvent>((event) => {
+      if (event.event === "started") {
+        updateDownloadProgress = {
+          downloaded: 0,
+          contentLength: event.data.contentLength,
+          percent: null,
+        };
+      } else if (event.event === "progress") {
+        const total = event.data.contentLength;
+        updateDownloadProgress = {
+          downloaded: event.data.downloaded,
+          contentLength: total,
+          percent: total && total > 0 ? Math.min(100, Math.round(event.data.downloaded / total * 100)) : null,
+        };
+      }
+    });
+
+    try {
+      await invoke("install_pending_update", { onEvent });
+    } catch (error) {
+      updateInstalling = false;
+      updateError = String(error);
+      pushNotification("error", updateError);
+    }
+  }
+
   return {
     // ── Settings ────────────────────────────────────────────
     get settings() { return settings; },
@@ -1062,9 +1152,39 @@ function createAppState() {
         ...settings,
         ...patch,
         queueMaxConcurrent: clampQueueMaxConcurrent(patch.queueMaxConcurrent ?? settings.queueMaxConcurrent),
+        updateChannel: patch.updateChannel === "beta" ? "beta" : (patch.updateChannel === "stable" ? "stable" : settings.updateChannel),
       };
       persistSettings(settings);
       applyTheme(settings.theme);
+    },
+
+    // ── Updates ─────────────────────────────────────────────
+    get updateChecking() { return updateChecking; },
+    get updateInstalling() { return updateInstalling; },
+    get updateNoticeOpen() { return updateNoticeOpen; },
+    get availableUpdate() { return availableUpdate; },
+    get updateDownloadProgress() { return updateDownloadProgress; },
+    get updateError() { return updateError; },
+    get lastUpdateCheckAt() { return lastUpdateCheckAt; },
+    async checkForUpdates(options?: { manual?: boolean; allowDowngrade?: boolean }) {
+      return checkForUpdates(options);
+    },
+    maybeAutoCheckForUpdates() {
+      if (!settings.autoCheckUpdates) return;
+      void checkForUpdates({ manual: false, allowDowngrade: false });
+    },
+    async installAvailableUpdate() {
+      await installAvailableUpdate();
+    },
+    dismissUpdateNotice() {
+      updateNoticeOpen = false;
+    },
+    clearUpdateError() {
+      updateError = null;
+    },
+    setUpdateChannel(channel: UpdateChannel) {
+      settings = { ...settings, updateChannel: channel };
+      persistSettings(settings);
     },
 
     // ── Theme ────────────────────────────────────────────────

@@ -51,6 +51,7 @@
   import JobsPanel from "../dialogs/JobsPanel.svelte";
   import ConfirmDialog from "../dialogs/ConfirmDialog.svelte";
   import SettingsDialog from "../dialogs/SettingsDialog.svelte";
+  import UpdateDialog from "../dialogs/UpdateDialog.svelte";
   import PropertiesDialog from "../dialogs/PropertiesDialog.svelte";
   import ExtractionDialog from "../dialogs/ExtractionDialog.svelte";
   import CompressionDialog from "../dialogs/CompressionDialog.svelte";
@@ -203,6 +204,7 @@
       // System info unavailable
     } finally {
       startupReady = true;
+      app.maybeAutoCheckForUpdates();
     }
 
     unlisten.push(await listen<JobProgressDto>("job-progress", ({ payload }) => {
@@ -1285,6 +1287,7 @@
 <!-- ── Dialogs ── -->
 <ConfirmDialog />
 <SettingsDialog />
+<UpdateDialog />
 
 {#if accentPrompt}
   <AccentWarningModal

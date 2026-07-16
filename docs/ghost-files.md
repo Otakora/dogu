@@ -96,3 +96,12 @@ Queue mode must be ON (the queue-mode toolbar button) for ghosts to appear.
 
 7. **Ghost guards.** Ghost files can't be opened, renamed, or inspected
    (Properties); those items are absent from a ghost's context menu.
+
+## Resumen en español
+
+Este documento queda como referencia técnica principal en inglés. La idea clave:
+los archivos fantasma permiten preparar operaciones sobre resultados que todavía
+no existen, enlazando dependencias en la cola para que Dogu ejecute cada paso en
+el orden correcto. Las pruebas manuales de arriba cubren los casos críticos:
+extracción a conversión, copia a compresión, eliminación en cascada, ausencia de
+falsas dependencias y protección de acciones no válidas sobre fantasmas.

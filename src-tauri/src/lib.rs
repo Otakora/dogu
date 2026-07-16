@@ -7,6 +7,7 @@ mod process;
 mod remote;
 mod sidecars;
 mod terminal;
+mod updates;
 
 use tauri::Manager;
 
@@ -16,11 +17,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(commands::SummaryRequestState {
             current_request_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
         .manage(pause::PauseRegistry::new())
         .manage(terminal::TerminalManager::new())
+        .manage(updates::PendingUpdate::new())
         .setup(|app| {
             let _ = app.handle();
             let remote_state = remote::RemoteState::new(&app.handle())?;
@@ -80,7 +83,9 @@ pub fn run() {
             commands::scan_for_m3u_groups,
             commands::generate_m3u_files,
             commands::get_compression_capabilities,
-            commands::start_compress
+            commands::start_compress,
+            updates::check_for_update,
+            updates::install_pending_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

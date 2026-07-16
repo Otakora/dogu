@@ -2,6 +2,20 @@ name: Release Artifacts
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel to build"
+        type: choice
+        required: true
+        default: stable
+        options:
+          - stable
+          - beta
+      publish:
+        description: "Publish/update the GitHub Release after building"
+        type: boolean
+        required: true
+        default: false
   push:
     tags:
       - "v*"
@@ -10,51 +24,114 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.workflow }}-${{ github.ref }}-${{ inputs.channel || 'tag' }}
   cancel-in-progress: false
 
+env:
+  DOGU_UPDATER_PUBLIC_KEY: ${{ secrets.DOGU_UPDATER_PUBLIC_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
 jobs:
-  verify-version:
+  verify-release:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ steps.meta.outputs.version }}
+      channel: ${{ steps.meta.outputs.channel }}
+      publish: ${{ steps.meta.outputs.publish }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      make_latest: ${{ steps.meta.outputs.make_latest }}
+      manifest_name: ${{ steps.meta.outputs.manifest_name }}
+      asset_base_url: ${{ steps.meta.outputs.asset_base_url }}
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Verify project version metadata
         id: version
-        shell: python
         run: |
-          import json
-          import os
-          import pathlib
-          import tomllib
+          VERSION=$(python tools/release.py verify-version)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Validate updater signing environment
+        run: |
+          test -n "$DOGU_UPDATER_PUBLIC_KEY" || (echo "Missing DOGU_UPDATER_PUBLIC_KEY secret" && exit 1)
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" || (echo "Missing TAURI_SIGNING_PRIVATE_KEY secret" && exit 1)
+      - name: Resolve release channel
+        id: meta
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          REF="${GITHUB_REF}"
+          EVENT="${GITHUB_EVENT_NAME}"
 
-          cargo_toml = pathlib.Path("src-tauri/Cargo.toml")
-          package_json = pathlib.Path("package.json")
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            CHANNEL="${{ inputs.channel }}"
+            PUBLISH="${{ inputs.publish }}"
+          else
+            TAG="${REF#refs/tags/}"
+            EXPECTED="v${VERSION}"
+            if [[ "$TAG" != "$EXPECTED" ]]; then
+              echo "Tag '$TAG' does not match project version '$EXPECTED'." >&2
+              exit 1
+            fi
+            if [[ "$VERSION" == *"-beta."* ]]; then
+              CHANNEL="beta"
+            else
+              CHANNEL="stable"
+            fi
+            PUBLISH="true"
+          fi
 
-          cargo_version = tomllib.loads(cargo_toml.read_text(encoding="utf-8"))["package"]["version"]
-          package_version = json.loads(package_json.read_text(encoding="utf-8"))["version"]
+          if [[ "$CHANNEL" == "beta" && "$VERSION" != *"-beta."* ]]; then
+            echo "Beta releases must use a semver prerelease like 0.2.6-beta.1." >&2
+            exit 1
+          fi
+          if [[ "$CHANNEL" == "stable" && "$VERSION" == *"-"* ]]; then
+            echo "Stable releases must not use prerelease versions." >&2
+            exit 1
+          fi
 
-          if cargo_version != package_version:
-              raise SystemExit(
-                  f"Version mismatch: Cargo.toml={cargo_version!r} package.json={package_version!r}"
-              )
+          if [[ "$CHANNEL" == "beta" ]]; then
+            RELEASE_TAG="beta"
+            RELEASE_NAME="Dogu Beta ${VERSION}"
+            PRERELEASE="true"
+            MAKE_LATEST="false"
+            MANIFEST_NAME="latest-beta.json"
+            ASSET_BASE_URL="https://github.com/Otakora/dogu/releases/download/beta"
+          else
+            RELEASE_TAG="v${VERSION}"
+            RELEASE_NAME="Dogu ${VERSION}"
+            PRERELEASE="false"
+            MAKE_LATEST="true"
+            MANIFEST_NAME="latest.json"
+            ASSET_BASE_URL="https://github.com/Otakora/dogu/releases/download/v${VERSION}"
+          fi
 
-          ref = os.environ.get("GITHUB_REF", "")
-          if ref.startswith("refs/tags/"):
-              tag = ref.removeprefix("refs/tags/")
-              expected = f"v{cargo_version}"
-              if tag != expected:
-                  raise SystemExit(f"Tag {tag!r} does not match project version {expected!r}")
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"version={cargo_version}\n")
+          {
+            echo "version=$VERSION"
+            echo "channel=$CHANNEL"
+            echo "publish=$PUBLISH"
+            echo "release_tag=$RELEASE_TAG"
+            echo "release_name=$RELEASE_NAME"
+            echo "prerelease=$PRERELEASE"
+            echo "make_latest=$MAKE_LATEST"
+            echo "manifest_name=$MANIFEST_NAME"
+            echo "asset_base_url=$ASSET_BASE_URL"
+          } >> "$GITHUB_OUTPUT"
+      - name: Verify release notes exist
+        run: |
+          python tools/release.py write-release-notes \
+            --version "${{ steps.version.outputs.version }}" \
+            --output "$RUNNER_TEMP/RELEASE_NOTES.md"
 
   windows:
     runs-on: windows-latest
-    needs: verify-version
+    needs: verify-release
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,12 +150,14 @@ jobs:
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dogu-windows-x64-${{ needs.verify-version.outputs.version }}
-          path: dist/dogu-windows-x64-*-setup.exe
+          name: dogu-windows-x64-${{ needs.verify-release.outputs.version }}
+          path: |
+            dist/dogu-windows-x64-*-setup.exe
+            dist/dogu-windows-x64-*-setup.exe.sig
 
-  linux-deb:
+  linux-native:
     runs-on: ubuntu-latest
-    needs: verify-version
+    needs: verify-release
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,17 +187,20 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      - name: Build Linux DEB artifact
-        run: python3 tools/release.py build-linux-deb
-      - name: Upload Linux DEB
+      - name: Build Linux AppImage and DEB artifacts
+        run: python3 tools/release.py build-linux-native
+      - name: Upload Linux native artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dogu-linux-deb-${{ needs.verify-version.outputs.version }}
-          path: dist/dogu-linux-x86_64-*.deb
+          name: dogu-linux-native-${{ needs.verify-release.outputs.version }}
+          path: |
+            dist/dogu-linux-x86_64-*.AppImage
+            dist/dogu-linux-x86_64-*.AppImage.sig
+            dist/dogu-linux-x86_64-*.deb
 
   linux-flatpak:
     runs-on: ubuntu-latest
-    needs: verify-version
+    needs: verify-release
     steps:
       - uses: actions/checkout@v4
         with:
@@ -154,59 +236,90 @@ jobs:
       - name: Upload Linux Flatpak
         uses: actions/upload-artifact@v4
         with:
-          name: dogu-linux-flatpak-${{ needs.verify-version.outputs.version }}
+          name: dogu-linux-flatpak-${{ needs.verify-release.outputs.version }}
           path: dist/dogu-linux-x86_64-*.flatpak
 
-  checksums:
+  package-release:
     runs-on: ubuntu-latest
     needs:
-      - verify-version
+      - verify-release
       - windows
-      - linux-deb
+      - linux-native
       - linux-flatpak
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Download built artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
           pattern: dogu-*
           merge-multiple: true
-      - name: Generate SHA256 checksums
+      - name: Generate release metadata
         shell: bash
         run: |
+          python tools/release.py write-release-notes \
+            --version "${{ needs.verify-release.outputs.version }}" \
+            --output release-artifacts/RELEASE_NOTES.md
+          python tools/release.py write-updater-manifest \
+            --channel "${{ needs.verify-release.outputs.channel }}" \
+            --version "${{ needs.verify-release.outputs.version }}" \
+            --base-url "${{ needs.verify-release.outputs.asset_base_url }}" \
+            --output "release-artifacts/${{ needs.verify-release.outputs.manifest_name }}" \
+            --notes-file release-artifacts/RELEASE_NOTES.md
+          if [[ "${{ needs.verify-release.outputs.channel }}" == "stable" ]]; then
+            python tools/release.py write-winget-manifest \
+              --version "${{ needs.verify-release.outputs.version }}" \
+              --installer-url "${{ needs.verify-release.outputs.asset_base_url }}" \
+              --output release-artifacts/Otakora.Dogu.yaml
+          fi
           cd release-artifacts
           sha256sum * > SHA256SUMS.txt
-      - name: Upload checksums
+      - name: Upload packaged release assets
         uses: actions/upload-artifact@v4
         with:
-          name: dogu-checksums-${{ needs.verify-version.outputs.version }}
-          path: release-artifacts/SHA256SUMS.txt
+          name: dogu-release-assets-${{ needs.verify-release.outputs.version }}
+          path: release-artifacts/*
 
   publish-release:
     runs-on: ubuntu-latest
     needs:
-      - verify-version
-      - windows
-      - linux-deb
-      - linux-flatpak
-      - checksums
-    if: startsWith(github.ref, 'refs/tags/v')
+      - verify-release
+      - package-release
+    if: needs.verify-release.outputs.publish == 'true'
     permissions:
       contents: write
     steps:
-      - name: Download built artifacts
+      - uses: actions/checkout@v4
+      - name: Move rolling beta tag
+        if: needs.verify-release.outputs.channel == 'beta'
+        run: |
+          git tag -f beta "$GITHUB_SHA"
+          git push origin refs/tags/beta --force
+      - name: Download packaged release assets
         uses: actions/download-artifact@v4
         with:
+          name: dogu-release-assets-${{ needs.verify-release.outputs.version }}
           path: release-artifacts
-          pattern: dogu-*
-          merge-multiple: true
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          tag_name: ${{ needs.verify-release.outputs.release_tag }}
+          name: ${{ needs.verify-release.outputs.release_name }}
+          prerelease: ${{ needs.verify-release.outputs.prerelease }}
+          make_latest: ${{ needs.verify-release.outputs.make_latest }}
+          body_path: release-artifacts/RELEASE_NOTES.md
           fail_on_unmatched_files: false
+          overwrite_files: true
           files: |
             release-artifacts/dogu-windows-x64-*-setup.exe
+            release-artifacts/dogu-windows-x64-*-setup.exe.sig
+            release-artifacts/dogu-linux-x86_64-*.AppImage
+            release-artifacts/dogu-linux-x86_64-*.AppImage.sig
             release-artifacts/dogu-linux-x86_64-*.deb
             release-artifacts/dogu-linux-x86_64-*.flatpak
+            release-artifacts/${{ needs.verify-release.outputs.manifest_name }}
             release-artifacts/SHA256SUMS.txt
+            release-artifacts/Otakora.Dogu.yaml

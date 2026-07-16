@@ -97,6 +97,30 @@ export type AppMetadataDto = {
   chdmanRuntime: ToolRuntimeDto;
 };
 
+export type UpdateChannel = "stable" | "beta";
+
+export type UpdateMetadataDto = {
+  version: string;
+  currentVersion: string;
+  channel: UpdateChannel;
+  body: string | null;
+  date: string | null;
+  isDowngrade: boolean;
+  canInstall: boolean;
+  manualUrl: string;
+};
+
+export type UpdateDownloadEvent =
+  | { event: "started"; data: { contentLength: number | null } }
+  | { event: "progress"; data: { downloaded: number; chunkLength: number; contentLength: number | null } }
+  | { event: "finished" };
+
+export type UpdateDownloadProgress = {
+  downloaded: number;
+  contentLength: number | null;
+  percent: number | null;
+};
+
 /** Startup status of one external tool + the capabilities it unlocks. */
 export type ToolStatusDto = {
   id: "chdman" | "sevenZip" | "dolphinTool";
@@ -378,6 +402,10 @@ export type AppSettings = {
   defaultQueueMode: boolean;
   /** Show dependency/conflict relation lines in the queue panel. */
   showQueueRelationMap: boolean;
+  /** Release channel used by the updater. */
+  updateChannel: UpdateChannel;
+  /** Check official release channels automatically on startup. */
+  autoCheckUpdates: boolean;
   /** Default "replace existing" behavior for operations without a dialog (copy/move)
    *  and the default state of the replace checkbox in operation dialogs. */
   defaultOverwriteOnConflict: boolean;

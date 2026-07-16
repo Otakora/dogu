@@ -85,6 +85,8 @@ Remote support includes browsing, basic file operations, transfers and saved con
 
 Disk usage is shown where Dogu can query it reliably. Some backends, such as FTP/FTPS and some SMB setups, may not expose portable free-space information.
 
+Transfers that pass through Dogu report byte-level progress. Remote-to-remote operations that can stay inside the remote backend prioritize speed and avoid staging large data locally.
+
 ### The queue is the heart of Dogu ⏳
 
 Queue mode lets you prepare work before executing it. That is useful when one task depends on another, such as:
@@ -110,6 +112,8 @@ The queue currently supports:
 - Generate M3U playlists.
 
 Queue tools include retry for one failed job, retry for all failed jobs, configurable concurrency, dependency-aware ordering and recoverable pauses for some errors.
+
+The queue panel also includes a relation map for dependencies, safe ordering and conflicts. Items that will disappear because of a queued move, cleanup or deletion are shown with a strikethrough preview.
 
 ### Ghost files, without the mystery 👻
 
@@ -186,7 +190,19 @@ Dogu includes:
 - CHD scan depth settings.
 - RVZ engine and fallback settings.
 - Tool-status checks for bundled or optional helpers.
+- Stable/Beta update channels with automatic checks enabled by default.
 - A built-in terminal panel for local shells and supported SSH sessions.
+
+### Updates and release channels
+
+Dogu has two update channels:
+
+- Stable: recommended official releases.
+- Beta: builds prepared from `dev` for users who want to try recent work earlier.
+
+If a user moves from Beta back to Stable, Dogu can offer the latest Stable release even when that means downgrading from a newer beta build.
+
+Automatic installation is supported for Windows NSIS installs and Linux AppImage builds. DEB and Flatpak builds can notify the user and open the release page, but they do not self-install until Dogu has a proper package repository path for those formats.
 
 ### Bundled and integrated tools
 
@@ -203,7 +219,7 @@ Legal and redistribution details are documented in [THIRD_PARTY_NOTICES](THIRD_P
 
 Requirements:
 
-- Node.js 20 or newer.
+- Node.js 20.19 or newer, or 22.12 or newer.
 - Rust stable toolchain.
 - Platform requirements for Tauri.
 
@@ -230,19 +246,21 @@ cargo test --manifest-path src-tauri/Cargo.toml
 Build release packages:
 
 ```bash
-npm run tauri:build
+python tools/release.py build-windows
 ```
+
+Release builds need the updater signing environment described in [docs/building.md](docs/building.md).
 
 Packaging notes:
 
 | Platform | Current status |
 | --- | --- |
-| Windows | NSIS installer builds are supported. |
+| Windows | NSIS installer builds are supported. Stable releases also prepare `Otakora.Dogu` winget metadata. |
+| Linux AppImage | Official automated artifact and the Linux self-update path. |
 | Linux | DEB and Flatpak are supported in the automated release flow. |
-| Linux AppImage | Can be built locally in some flows, but is not the primary automated release artifact right now. |
 | macOS | Not currently a maintained release target. |
 
-More build details are available in [docs/building.md](docs/building.md).
+More build details are available in [docs/building.md](docs/building.md) and [docs/release-channels.md](docs/release-channels.md).
 
 ---
 
@@ -306,6 +324,8 @@ El soporte remoto incluye navegación, operaciones básicas, transferencias y pe
 
 El uso de disco se muestra cuando Dogu puede consultarlo de forma fiable. Algunos backends, como FTP/FTPS y ciertas configuraciones SMB, pueden no ofrecer información portable de espacio libre.
 
+Las transferencias que pasan por Dogu muestran progreso por bytes. Las operaciones remoto-remoto que pueden permanecer dentro del backend remoto priorizan velocidad y evitan preparar grandes datos en local.
+
 ### La cola es el corazón de Dogu ⏳
 
 El modo cola permite preparar trabajo antes de ejecutarlo. Eso viene muy bien cuando una tarea depende de otra, por ejemplo:
@@ -331,6 +351,8 @@ La cola soporta actualmente:
 - Generar playlists M3U.
 
 La cola incluye reintento de una tarea fallida, reintento de todas las fallidas, concurrencia configurable, ordenación por dependencias y pausas recuperables para algunos errores.
+
+El panel de cola también incluye un mapa de relaciones para dependencias, orden seguro y conflictos. Los elementos que desaparecerán por un movimiento, limpieza o borrado en cola se muestran tachados como vista previa.
 
 ### Archivos fantasma, sin misterio 👻
 
@@ -407,7 +429,19 @@ Dogu incluye:
 - Profundidad de escaneo CHD configurable.
 - Ajustes de motor y fallback para RVZ.
 - Comprobación de estado de herramientas integradas u opcionales.
+- Canales de actualización Stable/Beta con comprobación automática activada por defecto.
 - Panel de terminal integrado para shells locales y sesiones SSH soportadas.
+
+### Actualizaciones y canales de release
+
+Dogu tiene dos canales de actualización:
+
+- Stable: releases oficiales recomendadas.
+- Beta: builds preparadas desde `dev` para probar antes cambios recientes.
+
+Si un usuario vuelve de Beta a Stable, Dogu puede ofrecer la última Stable aunque eso implique bajar desde una beta más nueva.
+
+La instalación automática está soportada en Windows NSIS y Linux AppImage. Los paquetes DEB y Flatpak pueden avisar al usuario y abrir la página de la release, pero no se autoinstalan hasta que Dogu tenga una ruta adecuada de repositorio para esos formatos.
 
 ### Herramientas integradas
 
@@ -424,7 +458,6 @@ Los detalles legales y de redistribución están documentados en [THIRD_PARTY_NO
 
 Requisitos:
 
-- Node.js 20 o superior.
 - Node.js 20.19 o superior, o 22.12 o superior.
 - Toolchain estable de Rust.
 - Requisitos de plataforma necesarios para Tauri.
@@ -452,16 +485,18 @@ cargo test --manifest-path src-tauri/Cargo.toml
 Construir paquetes de release:
 
 ```bash
-npm run tauri:build
+python tools/release.py build-windows
 ```
+
+Los builds de release necesitan el entorno de firma updater descrito en [docs/building.md](docs/building.md).
 
 Notas de empaquetado:
 
 | Plataforma | Estado actual |
 | --- | --- |
-| Windows | Los instaladores NSIS están soportados. |
+| Windows | Los instaladores NSIS están soportados. Las releases stable también preparan metadatos winget `Otakora.Dogu`. |
+| Linux AppImage | Artefacto oficial automatizado y ruta de autoactualización en Linux. |
 | Linux | DEB y Flatpak están soportados en el flujo automatizado de release. |
-| Linux AppImage | Puede compilarse localmente en algunos flujos, pero ahora mismo no es el artefacto principal de release automatizada. |
 | macOS | No es actualmente un objetivo de release mantenido. |
 
-Hay más detalles de compilación en [docs/building.md](docs/building.md).
+Hay más detalles de compilación en [docs/building.md](docs/building.md) y [docs/release-channels.md](docs/release-channels.md).

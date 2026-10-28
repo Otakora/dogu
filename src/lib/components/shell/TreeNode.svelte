@@ -13,9 +13,10 @@
     tabHighlights?: TabHighlight[];
     onNavigate?: (path: string) => void;
     onContextMenu?: (e: MouseEvent, entry: EntryDto) => void;
+    rootMeta?: import("svelte").Snippet;
   };
 
-  let { entry, depth = 0, iconVariant = "folder", tabHighlights = [], onNavigate, onContextMenu }: Props = $props();
+  let { entry, depth = 0, iconVariant = "folder", tabHighlights = [], onNavigate, onContextMenu, rootMeta }: Props = $props();
 
   let expanded = $state(false);
   let children = $state<EntryDto[]>([]);
@@ -119,6 +120,8 @@
 
     <span class="tree-label">{entry.name}</span>
   </div>
+
+  {#if rootMeta}{@render rootMeta()}{/if}
 
   <!-- Children -->
   {#if expanded && children.length > 0}

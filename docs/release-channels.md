@@ -86,8 +86,8 @@ Secrets commands.
 3. For beta, work from `dev` and use `x.y.z-beta.N`.
 4. For stable, promote approved work to `main` and use `x.y.z`.
 5. Run the `Release Artifacts` workflow manually or push `v<version>`.
-6. For stable, validate the generated winget manifest before submitting it to
-   `microsoft/winget-pkgs`.
+6. For stable, validate the generated winget multi-manifest folder before
+   submitting it to `microsoft/winget-pkgs`.
 
 ## Español
 
@@ -155,4 +155,4 @@ comandos de GitHub Secrets.
 3. Usar `x.y.z-beta.N` para beta desde `dev`.
 4. Usar `x.y.z` para stable desde `main`.
 5. Ejecutar el workflow de release o subir `v<version>`.
-6. En stable, validar el manifest winget antes de enviarlo.
+6. En stable, validar la carpeta multi-manifest de winget antes de enviarla.

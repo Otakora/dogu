@@ -21,6 +21,8 @@ export type EntryDto = {
   willBeReplaced?: boolean;
   /** Set on an entry that a queued op will remove from its current location. */
   willBeRemoved?: boolean;
+  willBeRecreated?: boolean;
+  queueRenamedTo?: string;
   /** Set on a real entry that a queued op wants to write over but can neither
    *  overwrite nor rename around — the op will fail at run time. */
   willConflict?: boolean;
@@ -166,6 +168,8 @@ export type SummaryOptionsPayload = {
 };
 
 export type ExtractionOptionsPayload = {
+  plannedFolderName?: string | null;
+  plannedEntries?: { from: string; to: string; isDir: boolean }[] | null;
   individualFolders: boolean;
   splitEntries: boolean;
   destinationMode: 'same' | 'custom';
@@ -300,6 +304,7 @@ export type ChdRestoreOptionsPayload = {
 // ── Compression ─────────────────────────────────────────────────
 
 export type DiscImageOptionsPayload = {
+  plannedOutputName?: string | null;
   destinationMode: 'same' | 'custom';
   destinationPath: string | null;
   deleteOriginals: boolean;
@@ -410,7 +415,7 @@ export type AppSettings = {
    *  and the default state of the replace checkbox in operation dialogs. */
   defaultOverwriteOnConflict: boolean;
   /** When an operation does NOT overwrite and hits a name collision, append a
-   *  numeric suffix " (2)", " (3)"… instead of failing/skipping. */
+   *  numeric suffix " (1)", " (2)"… instead of failing/skipping. */
   renameOnConflict: boolean;
   /** RVZ engine tried first for GameCube/Wii conversions. Default "nod". */
   rvzPrimaryEngine: RvzEngine;
@@ -525,6 +530,7 @@ export type DeaccentRenameResult = {
 export type QueuedOpKind =
   | 'copy'
   | 'move'
+  | 'rename'
   | 'delete'
   | 'extract'
   | 'compress'
@@ -568,11 +574,18 @@ export type QueuedOp = {
   batchTitle?: string;
   batchIndex?: number;
   batchTotal?: number;
+  /** Number in the execution that first attempted this step. */
+  originalStep?: number;
+  requiresReview?: string;
   sources: string[];
   destinations: string[];
   deletes: string[];
   /** Files/folders this op will create (ghost outputs). */
   produces: GhostEntry[];
+  /** Output paths fixed when this operation was added to the queue. */
+  fixedOutputs?: GhostEntry[];
+  fixedExtractionFolder?: boolean;
+  fixedExtractionEntries?: boolean;
   /** Ids of queued ops whose ghost outputs this op consumes as input. */
   dependsOn: string[];
   /** Effective conflict policy — drives the overlay's replace/rename/conflict rendering. */
@@ -584,7 +597,7 @@ export type QueuedOp = {
   rebuildWithRenames?: (renamed: Map<string, string>) => QueuedOp;
 };
 
-export type ConflictKind = 'source-deleted' | 'dest-deleted' | 'dest-collision';
+export type ConflictKind = 'source-deleted' | 'dest-deleted' | 'dest-collision' | 'source-written';
 
 // 'blocking'      → dangerous in sequential AND parallel (deleter runs first in queue)
 // 'parallel-only' → safe in sequential (order in queue protects it), dangerous in parallel

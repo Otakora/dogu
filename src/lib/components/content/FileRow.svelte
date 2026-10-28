@@ -2,19 +2,24 @@
   import { app } from "../../stores/app.svelte.js";
   import type { EntryDto } from "../../types/index.js";
   import { t } from "../../i18n/index.js";
+  import FileIcon from "./FileIcon.svelte";
+  import HighlightedName from "./HighlightedName.svelte";
 
   type Props = {
     entry: EntryDto;
     isSelected: boolean;
     isDropTarget: boolean;
     isDragSource: boolean;
+    highlight?: string;
+    discLabel?: string | null;
     onClick: (entry: EntryDto) => void;
     onActivate: (entry: EntryDto) => void;
     onContextMenu: (e: MouseEvent, entry: EntryDto) => void;
     onMousedown: (e: MouseEvent, entry: EntryDto) => void;
+    onShowQueueStory: (entry: EntryDto) => void;
   };
 
-  let { entry, isSelected, isDropTarget, isDragSource, onClick, onActivate, onContextMenu, onMousedown }: Props = $props();
+  let { entry, isSelected, isDropTarget, isDragSource, highlight = "", discLabel = null, onClick, onActivate, onContextMenu, onMousedown, onShowQueueStory }: Props = $props();
 
   // ── Inline rename ────────────────────────────────────────
   const isRenaming = $derived(app.renaming?.path === entry.path);
@@ -54,8 +59,8 @@
   class="file-row"
   class:file-row--selected={isSelected}
   class:file-row--dir={entry.isDir}
-  class:file-row--ghost={entry.isGhost}
-  class:file-row--removed={entry.willBeRemoved}
+  class:file-row--ghost={entry.isGhost || entry.willBeRecreated}
+  class:file-row--removed={entry.willBeRemoved && !entry.willBeRecreated}
   class:file-row--replaced={entry.willBeReplaced}
   class:file-row--conflict={entry.willConflict}
   class:file-row--drop-target={isDropTarget}
@@ -66,7 +71,8 @@
   aria-selected={isSelected}
   tabindex="0"
   draggable={false}
-  title={entry.willBeRemoved ? t("ghost.willBeRemoved")
+  title={entry.willBeRecreated ? t("ghost.willBeRecreated")
+    : entry.willBeRemoved ? t("ghost.willBeRemoved")
     : entry.willBeReplaced ? t("ghost.willBeReplaced")
     : entry.willConflict ? t("ghost.willConflict")
     : entry.isGhost ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending"))
@@ -79,28 +85,7 @@
   <!-- Icon -->
   <div class="file-col file-col--name">
     <span class="file-icon" aria-hidden="true">
-      {#if entry.isGhost}
-        <!-- Dashed outline = doesn't exist yet. Gold = folder, accent = file. -->
-        {#if entry.isDir}
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="3 2" class="icon-ghost-dir">
-            <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
-          </svg>
-        {:else}
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2" class="icon-ghost-file">
-            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
-            <polyline points="13 2 13 9 20 9"/>
-          </svg>
-        {/if}
-      {:else if entry.isDir}
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" class="icon-dir">
-          <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
-        </svg>
-      {:else}
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="icon-file">
-          <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
-          <polyline points="13 2 13 9 20 9"/>
-        </svg>
-      {/if}
+      <FileIcon {entry} size={16} />
     </span>
 
     {#if isRenaming}
@@ -117,8 +102,11 @@
         aria-label={t("fileRow.rename")}
       />
     {:else}
-      <span class="file-name">{entry.name}</span>
-      {#if entry.willBeRemoved}
+      <span class="file-name"><HighlightedName text={entry.name} query={highlight} /></span>
+      {#if discLabel && !entry.willBeRecreated}<span class="disc-kind-badge" title={t(entry.isGhost ? "discKind.predictedHint" : "discKind.detectedHint")}>{discLabel}</span>{/if}
+      {#if entry.willBeRecreated || entry.queueRenamedTo}
+        <button class="status-badge status-badge--story" title={t("ghost.storyOpen")} aria-label={t("ghost.storyOpen")} onclick={(event) => { event.stopPropagation(); onShowQueueStory(entry); }} onmousedown={(event) => event.stopPropagation()}>{t(entry.willBeRecreated ? "ghost.badgeFinalNew" : "ghost.badgeRenamed")}<svg aria-hidden="true" width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M3 4.5 6 7.5 9 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      {:else if entry.willBeRemoved}
         <span class="status-badge status-badge--removed">{t("ghost.badgeRemoved")}</span>
       {:else if entry.willBeReplaced}
         <span class="status-badge status-badge--replaced">{t("ghost.badgeReplaced")}</span>
@@ -135,15 +123,25 @@
   </div>
 
   <div class="file-col file-col--size" aria-label={t("fileRow.size")}>
-    {entry.isDir ? "—" : entry.sizeLabel}
+    {entry.isDir || entry.willBeRecreated ? "—" : entry.sizeLabel}
   </div>
 
   <div class="file-col file-col--modified" aria-label={t("fileRow.modified")}>
-    {entry.modifiedLabel || "—"}
+    {entry.willBeRecreated ? "—" : (entry.modifiedLabel || "—")}
   </div>
 </div>
 
 <style>
+  .disc-kind-badge {
+    flex: none;
+    margin-left: 6px;
+    padding: 1px 5px;
+    border: 1px solid #47865d;
+    border-radius: 4px;
+    color: #8dcc9d;
+    font-size: 10px;
+    line-height: 1.4;
+  }
   .file-row {
     display: flex;
     align-items: center;
@@ -162,7 +160,6 @@
     background: var(--accent-soft);
     color: var(--accent);
 
-    .icon-dir { color: var(--accent); }
     .file-col--type,
     .file-col--size,
     .file-col--modified { color: color-mix(in srgb, var(--accent) 60%, var(--text-muted)); }
@@ -208,11 +205,6 @@
 
   /* Icons */
   .file-icon { flex-shrink: 0; display: flex; }
-  .icon-dir  { color: #e0a030; }
-  .icon-file { color: var(--text-muted); }
-  /* Ghost icons: folder keeps the gold folder cue, file uses the accent. */
-  .icon-ghost-dir  { color: #e0a030; opacity: 0.9; }
-  .icon-ghost-file { color: var(--accent); opacity: 0.8; }
 
   /* Ghost (predicted, not-yet-existing) rows */
   .file-row--ghost {
@@ -242,6 +234,9 @@
     border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   }
 
+  .status-badge--story { cursor: pointer; gap: 4px; font-family: inherit; }
+  .status-badge--story:hover, .status-badge--story:focus-visible { border-color: var(--accent); outline-offset: 2px; }
+
   /* ── Real entries affected by queued operations ── */
   .status-badge--removed {
     color: var(--danger, #e5484d);
@@ -261,7 +256,7 @@
 
   .file-row--removed {
     .file-name { text-decoration: line-through; color: var(--text-subtle); }
-    .icon-dir, .icon-file, .icon-ghost-dir, .icon-ghost-file { opacity: 0.5; }
+    .file-icon { opacity: 0.5; }
   }
   .file-row--replaced {
     .file-name { color: #d9820b; text-decoration: line-through; }

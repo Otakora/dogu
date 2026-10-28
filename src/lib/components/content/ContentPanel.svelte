@@ -6,11 +6,14 @@
   import type { EntryDto, ContentSortKey, DiscKind, DiscKindDto } from "../../types/index.js";
   import type { DiscImageMode } from "../dialogs/DiscImageDialog.svelte";
   import FileRow from "./FileRow.svelte";
+  import FileIcon from "./FileIcon.svelte";
+  import HighlightedName from "./HighlightedName.svelte";
   import ContextMenu from "../ui/ContextMenu.svelte";
   import type { MenuItem } from "../ui/ContextMenu.svelte";
   import { t, tn } from "../../i18n/index.js";
   import { openTerminalAt, openRemoteTerminalAt } from "../../utils/terminal.js";
   import { ghostToEntry, buildGhost, joinPath, normalizePath, uniqueDisplayPath, basenameOf } from "../../utils/ghosts.js";
+  import { queueStory } from "../../utils/queue-story.js";
   import type { FileTransferItem, FileTransferOperation } from "../../utils/transfers.js";
   import { canDropFileItemsToPath, inferFileTransferOperation, isNoOpFileTransfer } from "../../utils/transfers.js";
 
@@ -42,9 +45,45 @@
 
   // ── Context menu ─────────────────────────────────────────
   let contextMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  // Content-based classification of `.iso` paths (from detect_disc_kinds),
-  // cached so a right-click probes each file at most once.
-  const discKindCache = new Map<string, DiscKind>();
+  // A changed size or modification time invalidates a previous probe.
+  let discKindCache = $state<Record<string, { fingerprint: string; kind: DiscKind | null }>>({});
+  const discFingerprint = (entry: EntryDto) => `${entry.size}:${entry.modifiedTs}`;
+  function cachedDiscKind(entry: EntryDto | undefined): DiscKind | null {
+    if (!entry || entry.isGhost) return null;
+    const cached = discKindCache[entry.path];
+    return cached?.fingerprint === discFingerprint(entry) ? cached.kind : null;
+  }
+  function discLabel(entry: EntryDto): string | null {
+    if (entry.isGhost) {
+      return app.opQueue.some(op => op.id === entry.ghostOpId && op.kind === "xiso-pack")
+        ? t("discKind.xisoPredicted") : null;
+    }
+    const kind = cachedDiscKind(entry);
+    return kind === "xiso" ? "XISO" : kind === "redump" ? t("discKind.xboxDump") : null;
+  }
+
+  // Probe asynchronously in small batches, leaving navigation responsive. Do
+  // not download remote images just to classify a directory listing.
+  $effect(() => {
+    const entries = pane.entries.filter(entry => !entry.isDir && !entry.isGhost && !entry.path.startsWith("remote://") && entry.extension.toLowerCase() === ".iso")
+      .map(entry => ({ path: entry.path, fingerprint: discFingerprint(entry) }));
+    let cancelled = false;
+    const pending = untrack(() => entries.filter(entry => discKindCache[entry.path]?.fingerprint !== entry.fingerprint));
+    void (async () => {
+      for (let index = 0; index < pending.length && !cancelled; index += 24) {
+        const batch = pending.slice(index, index + 24);
+        try {
+          const kinds = await invoke<DiscKindDto[]>("detect_disc_kinds", { paths: batch.map(entry => entry.path) });
+          if (cancelled) break;
+          const byPath = new Map(kinds.map(item => [item.path, item.kind]));
+          const next = { ...untrack(() => discKindCache) };
+          for (const entry of batch) next[entry.path] = { fingerprint: entry.fingerprint, kind: byPath.get(entry.path) ?? null };
+          discKindCache = next;
+        } catch { break; }
+      }
+    })();
+    return () => { cancelled = true; };
+  });
 
   // ── Column resize ─────────────────────────────────────────
   let resizingCol = $state<{ key: "name" | "type" | "size" | "modified"; startX: number; startW: number } | null>(null);
@@ -160,10 +199,17 @@
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest("[data-path]")) return;
     if (!contentBodyEl) return;
+    // The browser dispatches scrollbar presses to the scroll container.
+    // Only begin selection inside its client area, excluding both scrollbars
+    // (and borders), including a scrollbar placed on the left in RTL layouts.
+    const bodyRect = contentBodyEl.getBoundingClientRect();
+    const clientLeft = bodyRect.left + contentBodyEl.clientLeft;
+    const clientTop = bodyRect.top + contentBodyEl.clientTop;
+    if (e.clientX < clientLeft || e.clientX >= clientLeft + contentBodyEl.clientWidth
+      || e.clientY < clientTop || e.clientY >= clientTop + contentBodyEl.clientHeight) return;
     pendingPrimaryClickPath = null;
     fileDragGesture = null;
     ensureRubberBand();
-    const bodyRect = contentBodyEl.getBoundingClientRect();
     rbSX = e.clientX - bodyRect.left + contentBodyEl.scrollLeft;
     rbSY = e.clientY - bodyRect.top  + contentBodyEl.scrollTop;
     rbActive = true;
@@ -239,7 +285,7 @@
   // Merges the folder's real entries with the ghost outputs of queued ops,
   // resolving collisions the same way the backend will:
   //  - overwrite ON   → the real entry is marked "will be replaced" (no ghost row)
-  //  - renameOnConflict → the ghost is shown with a " (2)" suffix
+  //  - renameOnConflict → the ghost is shown with a " (1)" suffix
   //  - neither         → the real entry is marked "conflict" (op will fail)
   // Also marks entries a queued op will remove from this location ("will be removed"),
   // including ghost outputs consumed by later queued operations.
@@ -248,7 +294,7 @@
   function pathContainsOrEquals(parent: string, child: string): boolean {
     const p = normalizePath(parent);
     const c = normalizePath(child);
-    return c === p || (p.length > 0 && c.startsWith(`${p}/`));
+    return c === p || (p.length > 0 && c.startsWith(p.endsWith("/") ? p : `${p}/`));
   }
 
   function deletionCoversPath(deletes: string[], path: string): boolean {
@@ -262,17 +308,22 @@
     const existingByKey = new Map(pane.entries.map((e) => [normalizePath(e.path), e]));
     const deleteRoots = app.opQueue.flatMap((op) => op.deletes);
     const replaced = new Set<string>();
+    const recreated = new Set<string>();
     const conflicting = new Set<string>();
     const ghosts: EntryDto[] = [];
+    const outputs = new Map(app.opQueue.map(op => [op.id, app.resolvedOutputsFor(op.id)]));
+    const renamedSources = new Set(app.opQueue.filter(op => op.kind === "rename").flatMap(op => op.sources.map(normalizePath)));
 
     if (!pane.isSearching) {
-      for (const op of app.opQueue) {
-        for (const g of op.produces) {
+      for (const [opIndex, op] of app.opQueue.entries()) {
+        for (const g of app.resolvedOutputsFor(op.id)) {
           if (normalizePath(g.parentDir) !== dirKey) continue;
           const gkey = normalizePath(g.path);
           const existing = existingByKey.get(gkey);
           if (existing?.isGhost && existing.ghostOpId === g.producedByOpId) continue;
           const collides = taken.has(gkey);
+          const deletedEarlier = collides && app.opQueue.slice(0, opIndex).some(previous => deletionCoversPath(previous.deletes, g.path));
+          if (deletedEarlier) { recreated.add(gkey); continue; }
           if (collides && op.overwrite) { replaced.add(gkey); continue; }
           if (collides && !op.renameOnConflict) { conflicting.add(gkey); continue; }
           // Free slot, or renamed around the collision.
@@ -288,12 +339,48 @@
     const decorate = (e: EntryDto) => {
       const k = normalizePath(e.path);
       const rep = replaced.has(k);
-      const rem = deletionCoversPath(deleteRoots, e.path);
+      // A ghost can only be removed by operations queued after its producer.
+      const producerIndex = e.isGhost ? app.opQueue.findIndex(op => op.id === e.ghostOpId) : -1;
+      const effectiveDeletes = producerIndex >= 0
+        ? app.opQueue.slice(producerIndex + 1).flatMap(op => op.deletes)
+        : deleteRoots;
+      const rem = deletionCoversPath(effectiveDeletes, e.path);
       const con = conflicting.has(k);
-      return rep || rem || con ? { ...e, willBeReplaced: rep, willBeRemoved: rem, willConflict: con } : e;
+      const needsStory = recreated.has(k) || (e.isGhost && rem && renamedSources.has(k));
+      const story = needsStory ? queueStory(e.path, !!e.isGhost, e.ghostOpId, app.opQueue, outputs) : null;
+      const rec = recreated.has(k) && !!story?.finalExists;
+      const queueRenamedTo = e.isGhost && !story?.finalExists ? story?.renamedTo : undefined;
+      return rep || rem || con || rec || queueRenamedTo ? { ...e, willBeReplaced: rep, willBeRemoved: rem, willBeRecreated: rec, queueRenamedTo, willConflict: con } : e;
     };
     return [...pane.entries.map(decorate), ...ghosts.map(decorate)];
   });
+
+  let storyPath = $state<string | null>(null);
+  let storyProducer = $state<string | undefined>(undefined);
+  let storyIsGhost = $state(false);
+  const activeStory = $derived.by(() => {
+    if (!storyPath) return null;
+    const outputs = new Map(app.opQueue.map(op => [op.id, app.resolvedOutputsFor(op.id)]));
+    const story = queueStory(storyPath, storyIsGhost, storyProducer, app.opQueue, outputs);
+    return story.events.length ? story : null;
+  });
+  $effect(() => {
+    pane.currentPath;
+    pane.activeTabId;
+    untrack(() => { storyPath = null; });
+  });
+  function showQueueStory(entry: EntryDto) {
+    storyPath = entry.path;
+    storyProducer = entry.ghostOpId;
+    storyIsGhost = !!entry.isGhost;
+  }
+  function storyLabel(event: import("../../utils/queue-story.js").QueueStoryEvent): string {
+    const name = basenameOf(event.path);
+    if (event.action === "rename") return t("ghost.storyRename", { from: basenameOf(event.source ?? ""), to: name });
+    if (event.action === "remove") return t("ghost.storyRemove", { name });
+    if (event.action === "replace") return t("ghost.storyReplace", { name });
+    return t("ghost.storyCreate", { name });
+  }
 
   /** Looks up a display entry (real or ghost) by path. */
   function entryOf(path: string): EntryDto | undefined {
@@ -455,11 +542,27 @@
   let quickFilterOpen = $state(false);
   let quickFilterInputEl = $state<HTMLInputElement | undefined>(undefined);
 
-  const displayed = $derived(
-    quickFilter
-      ? sorted.filter(e => e.name.toLowerCase().includes(quickFilter.toLowerCase()))
-      : sorted
-  );
+  const displayed = $derived(sorted);
+  const quickMatches = $derived(quickFilter ? sorted.filter(e => e.name.toLowerCase().includes(quickFilter.toLowerCase())) : []);
+  let quickMatchIndex = $state(0);
+  const currentQuickIndex = $derived(quickMatches.length ? Math.min(quickMatchIndex, quickMatches.length - 1) : 0);
+
+  function scrollToQuickMatch() {
+    const entry = quickMatches[currentQuickIndex];
+    if (!entry) return;
+    requestAnimationFrame(() => panelEl?.querySelector<HTMLElement>(`[data-path="${CSS.escape(entry.path)}"]`)?.scrollIntoView({ block: "nearest" }));
+  }
+
+  function moveQuickMatch(delta: number) {
+    if (!quickMatches.length) return;
+    quickMatchIndex = (currentQuickIndex + delta + quickMatches.length) % quickMatches.length;
+    scrollToQuickMatch();
+  }
+
+  export function openQuickFind() {
+    quickFilterOpen = true;
+    requestAnimationFrame(() => { quickFilterInputEl?.focus(); quickFilterInputEl?.select(); });
+  }
 
   let typeaheadBuffer = "";
   let typeaheadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -480,6 +583,7 @@
 
   function closeQuickFilter() {
     quickFilter = "";
+    quickMatchIndex = 0;
     quickFilterOpen = false;
     panelEl?.focus();
   }
@@ -602,11 +706,13 @@
       } else {
         app.notify("error", t("contentPanel.couldNotLoad", { error: String(e) }));
         pane.setEntries([]);
+        // The tab no longer contains its previous listing. Leaving loadedPath
+        // pointing at that directory would skip its next load and show an empty view.
+        pane.setTabLoadedPath(null);
       }
     } finally {
       if (isCurrentRequest()) {
         pane.setLoading(false);
-        panelEl?.focus();
       }
     }
   }
@@ -700,7 +806,6 @@
     } finally {
       if (isCurrentRequest()) {
         pane.setLoading(false);
-        panelEl?.focus();
       }
     }
   }
@@ -708,7 +813,8 @@
   export function refresh() {
     if (pane.currentPath) {
       lastLoadKey = "";
-      loadPath(pane.currentPath);
+      if (pane.isSearching && pane.searchQuery) doSearch(pane.currentPath, pane.searchQuery);
+      else loadPath(pane.currentPath);
     }
   }
 
@@ -725,13 +831,14 @@
 
   // ── Inline create helpers ─────────────────────────────────
   function findUniqueName(base: string): string {
-    const existing = new Set(pane.entries.map(e => e.name.toLowerCase()));
-    if (!existing.has(base.toLowerCase())) return base;
+    const key = (name: string) => normalizePath(joinPath(pane.currentPath ?? "", name));
+    const existing = new Set(pane.entries.map(e => normalizePath(e.path)));
+    if (!existing.has(key(base))) return base;
     const dot = base.lastIndexOf(".");
     const [stem, ext] = dot > 0 ? [base.slice(0, dot), base.slice(dot)] : [base, ""];
     for (let i = 2; i < 200; i++) {
       const candidate = `${stem} (${i})${ext}`;
-      if (!existing.has(candidate.toLowerCase())) return candidate;
+      if (!existing.has(key(candidate))) return candidate;
     }
     return `${stem} ${Date.now()}${ext}`;
   }
@@ -845,10 +952,13 @@
 
     if ((e.ctrlKey || e.metaKey) && e.key === "f") {
       e.preventDefault();
-      quickFilterOpen = true;
-      requestAnimationFrame(() => quickFilterInputEl?.focus());
+      e.stopPropagation();
+      openQuickFind();
       return;
     }
+    // Editing a find/rename field must never trigger file shortcuts such as Delete.
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("input, textarea, [contenteditable='true']")) return;
 
     if (e.key === "Escape") {
       if (quickFilterOpen) { closeQuickFilter(); return; }
@@ -864,7 +974,7 @@
     }
 
     if (e.key === "F2" && sel.length === 1) {
-      const entry = pane.entries.find(en => en.path === sel[0]);
+      const entry = entryOf(sel[0]);
       if (entry) pane.startRename(entry.path, entry.name);
     }
 
@@ -924,16 +1034,21 @@
     };
     // Probe local .iso files by content so the menu offers only valid treatments.
     // Cached, so a right-click classifies each file at most once.
-    const localIsoPaths = sel.filter(p => !p.startsWith("remote://") && normalizeExt(p) === ".iso" && !discKindCache.has(p));
+    const localIsoPaths = sel.filter(p => !p.startsWith("remote://") && normalizeExt(p) === ".iso" && !entryOf(p)?.isGhost && !cachedDiscKind(entryOf(p)));
     if (localIsoPaths.length > 0) {
       try {
         const kinds = await invoke<DiscKindDto[]>("detect_disc_kinds", { paths: localIsoPaths });
-        for (const k of kinds) discKindCache.set(k.path, k.kind);
+        const next = { ...discKindCache };
+        for (const k of kinds) {
+          const selected = entryOf(k.path);
+          if (selected) next[k.path] = { fingerprint: discFingerprint(selected), kind: k.kind };
+        }
+        discKindCache = next;
       } catch { /* leave uncached — isoKindOf falls back to the naming convention */ }
     }
     // Classify an .iso: content when known, else the `.xiso` naming fallback.
     const isoKindOf = (p: string): DiscKind => {
-      const cached = discKindCache.get(p);
+      const cached = cachedDiscKind(entryOf(p));
       if (cached) return cached;
       const name = basenameOf(p).toLowerCase();
       return (name.endsWith(".xiso.iso") || name.endsWith(".xiso")) ? "xiso" : "iso";
@@ -1006,6 +1121,8 @@
 
     if (!isMulti && !selHasGhost) {
       items.push({ kind: "action", label: t("menu.openWith"), icon: openWithIcon, onclick: () => onOpenWith(sel[0]) });
+    }
+    if (!isMulti && (!selHasGhost || app.queueMode)) {
       items.push({ kind: "action", label: t("menu.rename"), shortcut: "F2", icon: renameIcon, onclick: () => pane.startRename(entry.path, entry.name) });
     }
 
@@ -1246,17 +1363,40 @@
         type="text"
         placeholder={t("contentPanel.quickFilterPlaceholder")}
         bind:value={quickFilter}
+        aria-label={t("contentPanel.quickFind")}
+        oninput={() => { quickMatchIndex = 0; requestAnimationFrame(scrollToQuickMatch); }}
         onkeydown={(e) => {
           if (e.key === "Escape") { e.stopPropagation(); closeQuickFilter(); }
-          if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); panelEl?.focus(); }
-          if (e.key === "Enter") { panelEl?.focus(); }
+          if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); moveQuickMatch(e.shiftKey ? -1 : 1); }
         }}
       />
       {#if quickFilter}
-        <span class="qf-count">{t("contentPanel.quickFilterCount", { shown: displayed.length, total: sorted.length })}</span>
+        <span class="qf-count" aria-live="polite">{t("contentPanel.quickFindCount", { current: quickMatches.length ? currentQuickIndex + 1 : 0, total: quickMatches.length })}</span>
+        <button class="qf-close" onclick={() => moveQuickMatch(-1)} disabled={!quickMatches.length} aria-label={t("contentPanel.quickFindPrevious")}>↑</button>
+        <button class="qf-close" onclick={() => moveQuickMatch(1)} disabled={!quickMatches.length} aria-label={t("contentPanel.quickFindNext")}>↓</button>
       {/if}
       <button class="qf-close" onclick={closeQuickFilter} aria-label="Close">✕</button>
     </div>
+  {/if}
+
+  {#if activeStory && storyPath}
+    <aside class="queue-story" aria-label={t("ghost.storyTitle")}>
+      <div class="queue-story-heading">
+        <div><span class="queue-story-kicker">{t("ghost.storyTitle")}</span><strong title={storyPath}>{basenameOf(storyPath)}</strong></div>
+        <button class="queue-story-close" onclick={(event) => { event.stopPropagation(); storyPath = null; }} aria-label={t("ghost.storyClose")}>✕</button>
+      </div>
+      <div class="queue-story-result" class:queue-story-result--absent={!activeStory.finalExists && !activeStory.renamedTo}>
+        {#if activeStory.renamedTo}{t("ghost.storyFinalRenamed", { name: basenameOf(activeStory.renamedTo) })}
+        {:else if activeStory.finalExists}{t("ghost.storyFinalPresent")}
+        {:else}{t("ghost.storyFinalAbsent")}{/if}
+      </div>
+      <ol class="queue-story-steps">
+        {#each activeStory.events as event (`${event.step}-${event.action}-${event.path}`)}
+          <li><span>{event.step}</span><div>{storyLabel(event)}</div></li>
+        {/each}
+      </ol>
+      <div class="queue-story-note">{t("ghost.storyConditional")}</div>
+    </aside>
   {/if}
 
   <!-- ── Content body ── -->
@@ -1331,13 +1471,16 @@
           {#each displayed as entry (entry.path)}
             <FileRow
               {entry}
+              discLabel={discLabel(entry)}
               isSelected={pane.selectedPaths.has(entry.path)}
               isDropTarget={activeDropPath === entry.path}
               isDragSource={draggedPaths.has(entry.path)}
+              highlight={quickFilterOpen ? quickFilter : ""}
               onClick={handleEntryClick}
               onActivate={handleActivate}
               onContextMenu={openContextMenu}
               onMousedown={handleMousedown}
+              onShowQueueStory={showQueueStory}
             />
           {/each}
         </div>
@@ -1349,8 +1492,8 @@
             <div
               class="grid-item"
               class:grid-item--selected={pane.selectedPaths.has(entry.path)}
-              class:grid-item--ghost={entry.isGhost}
-              class:grid-item--removed={entry.willBeRemoved}
+              class:grid-item--ghost={entry.isGhost || entry.willBeRecreated}
+              class:grid-item--removed={entry.willBeRemoved && !entry.willBeRecreated}
               class:grid-item--replaced={entry.willBeReplaced}
               class:grid-item--conflict={entry.willConflict}
               class:grid-item--drop-target={activeDropPath === entry.path}
@@ -1360,7 +1503,8 @@
               draggable={false}
               role="gridcell"
               tabindex="0"
-              title={entry.willBeRemoved ? t("ghost.willBeRemoved")
+              title={entry.willBeRecreated ? t("ghost.willBeRecreated")
+                : entry.willBeRemoved ? t("ghost.willBeRemoved")
                 : entry.willBeReplaced ? t("ghost.willBeReplaced")
                 : entry.willConflict ? t("ghost.willConflict")
                 : entry.isGhost ? (entry.ghostApproximate ? t("ghost.pendingApprox") : t("ghost.pending"))
@@ -1371,27 +1515,7 @@
               oncontextmenu={(e) => { e.preventDefault(); openContextMenu(e, entry); }}
             >
               <div class="grid-icon" aria-hidden="true">
-                {#if entry.isGhost}
-                  {#if entry.isDir}
-                    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="3 2" class="icon-ghost-dir-lg">
-                      <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
-                    </svg>
-                  {:else}
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="3 2" class="icon-ghost-file-lg">
-                      <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
-                      <polyline points="13 2 13 9 20 9"/>
-                    </svg>
-                  {/if}
-                {:else if entry.isDir}
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" class="icon-dir-lg">
-                    <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
-                  </svg>
-                {:else}
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" class="icon-file-lg">
-                    <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
-                    <polyline points="13 2 13 9 20 9"/>
-                  </svg>
-                {/if}
+                <FileIcon {entry} size={32} />
               </div>
               {#if pane.renaming?.path === entry.path}
                 <input
@@ -1411,7 +1535,11 @@
                   aria-label={t("contentPanel.renameInput")}
                 />
               {:else}
-                <span class="grid-name">{entry.name}</span>
+                <span class="grid-name"><HighlightedName text={entry.name} query={quickFilterOpen ? quickFilter : ""} /></span>
+                {#if discLabel(entry) && !entry.willBeRecreated}<span class="disc-kind-badge" title={t(entry.isGhost ? "discKind.predictedHint" : "discKind.detectedHint")}>{discLabel(entry)}</span>{/if}
+                {#if entry.willBeRecreated || entry.queueRenamedTo}
+                  <button class="queue-story-grid-button" onclick={(event) => { event.stopPropagation(); showQueueStory(entry); }} onmousedown={(event) => event.stopPropagation()}>{t(entry.willBeRecreated ? "ghost.badgeFinalNew" : "ghost.badgeRenamed")}</button>
+                {/if}
               {/if}
             </div>
           {/each}
@@ -1460,6 +1588,14 @@
 {/if}
 
 <style>
+  .disc-kind-badge {
+    padding: 1px 5px;
+    border: 1px solid #47865d;
+    border-radius: 4px;
+    color: #8dcc9d;
+    font-size: 10px;
+    line-height: 1.4;
+  }
   .content-panel {
     display: flex;
     flex-direction: column;
@@ -1614,6 +1750,21 @@
     animation: spin 0.7s linear infinite;
   }
 
+  .queue-story { margin: 5px 8px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line)); border-radius: 7px; background: color-mix(in srgb, var(--accent) 5%, var(--surface-alt)); font-size: 11px; max-height: min(200px, 35vh); overflow: auto; }
+  .queue-story-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .queue-story-heading > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .queue-story-heading strong { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-story-kicker { color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+  .queue-story-close { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; padding: 2px 5px; }
+  .queue-story-result { margin-top: 7px; color: var(--accent); font-weight: 700; }
+  .queue-story-result--absent { color: var(--text-muted); }
+  .queue-story-steps { list-style: none; padding: 0; margin: 7px 0 0; display: flex; flex-wrap: wrap; gap: 5px 14px; }
+  .queue-story-steps li { display: flex; align-items: baseline; gap: 5px; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+  .queue-story-steps li > span { flex: none; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 700; width: 17px; height: 17px; display: inline-flex; align-items: center; justify-content: center; }
+  .queue-story-note { margin-top: 7px; color: var(--text-muted); font-size: 10px; }
+  .queue-story-grid-button { border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); border-radius: 7px; background: var(--accent-soft); color: var(--accent); cursor: pointer; font-family: inherit; font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 1px 6px; }
+  .queue-story-grid-button:hover, .queue-story-grid-button:focus-visible { border-color: var(--accent); }
+
   .file-list {
     display: flex;
     flex-direction: column;
@@ -1662,10 +1813,6 @@
 
 
   .grid-icon { display: flex; align-items: center; justify-content: center; }
-  .icon-dir-lg { color: #e0a030; }
-  .icon-file-lg { color: var(--text-muted); }
-  .icon-ghost-dir-lg  { color: #e0a030; opacity: 0.9; }
-  .icon-ghost-file-lg { color: var(--accent); opacity: 0.8; }
 
   .grid-item--ghost {
     opacity: 0.78;

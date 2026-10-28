@@ -390,7 +390,36 @@ def write_winget_manifest(version: str, installer_url: str, output: Path) -> Pat
     if not installer_path.exists():
         raise RuntimeError(f"Falta el instalador Windows para winget: {installer_path}")
 
-    manifest = f"""PackageIdentifier: Otakora.Dogu
+    output.parent.mkdir(parents=True, exist_ok=True)
+    installer_sha256 = sha256_file(installer_path)
+    release_date = dt.date.today().isoformat()
+    asset_url = f"{installer_url.rstrip('/')}/{installer_name}"
+
+    version_manifest = f"""# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+PackageIdentifier: Otakora.Dogu
+PackageVersion: {version}
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.12.0
+"""
+    installer_manifest = f"""# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+PackageIdentifier: Otakora.Dogu
+PackageVersion: {version}
+InstallerType: nullsoft
+InstallModes:
+- silent
+- silentWithProgress
+UpgradeBehavior: install
+ReleaseDate: {release_date}
+Installers:
+- Architecture: x64
+  InstallerUrl: {asset_url}
+  InstallerSha256: {installer_sha256}
+ManifestType: installer
+ManifestVersion: 1.12.0
+"""
+    locale_manifest = f"""# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+PackageIdentifier: Otakora.Dogu
 PackageVersion: {version}
 PackageLocale: en-US
 Publisher: Otakora
@@ -400,21 +429,13 @@ PackageUrl: https://github.com/Otakora/dogu
 License: GPL-2.0-or-later
 LicenseUrl: https://github.com/Otakora/dogu/blob/main/LICENSE
 ShortDescription: A practical desktop file workbench for local files, remotes and queued operations.
-InstallerType: nullsoft
-InstallModes:
-- silent
-- silentWithProgress
-UpgradeBehavior: install
-ReleaseDate: {dt.date.today().isoformat()}
-Installers:
-- Architecture: x64
-  InstallerUrl: {installer_url.rstrip('/')}/{installer_name}
-  InstallerSha256: {sha256_file(installer_path)}
-ManifestType: singleton
+ManifestType: defaultLocale
 ManifestVersion: 1.12.0
 """
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(manifest, encoding="utf-8")
+
+    output.write_text(version_manifest, encoding="utf-8")
+    output.with_name("Otakora.Dogu.installer.yaml").write_text(installer_manifest, encoding="utf-8")
+    output.with_name("Otakora.Dogu.locale.en-US.yaml").write_text(locale_manifest, encoding="utf-8")
     return output
 
 
@@ -527,7 +548,7 @@ def main() -> None:
     updater_parser.add_argument("--notes", default="")
     updater_parser.add_argument("--notes-file", type=Path)
 
-    winget_parser = subparsers.add_parser("write-winget-manifest", help="Genera el manifest winget Otakora.Dogu.")
+    winget_parser = subparsers.add_parser("write-winget-manifest", help="Genera los manifests winget Otakora.Dogu.")
     winget_parser.add_argument("--version", default=release_version())
     winget_parser.add_argument("--installer-url", required=True)
     winget_parser.add_argument("--output", required=True, type=Path)

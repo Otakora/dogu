@@ -10,10 +10,11 @@
   import ConnectionForm from "./ConnectionForm.svelte";
   import Button from "../ui/Button.svelte";
   import { t } from "../../i18n/index.js";
+  import { connectSavedProfile } from "../../utils/connections.js";
 
   // ── State ────────────────────────────────────────────────
-  let profiles = $state<ConnectionProfileDto[]>([]);
-  let sessions = $state<ActiveConnectionDto[]>([]);
+  const profiles = $derived(app.connectionProfiles);
+  const sessions = $derived(app.activeConnections);
   let selectedProfileId = $state<string | null>(null);
   let editingProfile = $state<ConnectionProfileDto | null>(null);
   let isCreating = $state(false);
@@ -40,14 +41,14 @@
 
   async function loadAll() {
     try {
+      const profilesRevision = app.profilesRevision;
+      const sessionsRevision = app.sessionsRevision;
       const [p, s] = await Promise.all([
         invoke<ConnectionProfileDto[]>("list_connection_profiles"),
         invoke<ActiveConnectionDto[]>("list_active_connections"),
       ]);
-      profiles = p;
-      sessions = s;
-      app.setConnectionProfiles(p);
-      app.setActiveConnections(s);
+      if (app.profilesRevision === profilesRevision) app.setConnectionProfiles(p);
+      if (app.sessionsRevision === sessionsRevision) app.setActiveConnections(s);
     } catch (e) {
       app.notify("error", String(e));
     }
@@ -103,7 +104,8 @@
     isSaving = true;
     testResult = null;
     try {
-      await invoke("save_connection_profile", { profile: payload });
+      const saved = await invoke<ConnectionProfileDto>("save_connection_profile", { profile: payload });
+      app.setConnectionProfiles([...app.connectionProfiles.filter(profile => profile.id !== saved.id), saved]);
       await loadAll();
       cancelForm();
       app.notify("success", payload.id ? t("connectionManager.profileSaved") : t("connectionManager.profileAdded"));
@@ -143,13 +145,13 @@
         );
         if (runId !== testRunId) return;
         testResult = retryResult.connected
-          ? { ok: true, message: t("connectionManager.connectionSuccessful"), writeAccess: retryResult.writeAccess }
+          ? { ok: true, message: retryResult.writeAccess == null ? (retryResult.message ?? t("connectionManager.connectionSuccessful")) : t("connectionManager.connectionSuccessful"), writeAccess: retryResult.writeAccess }
           : { ok: false, message: retryResult.message ?? t("connectionManager.connectionFailed") };
         return;
       }
 
       testResult = result.connected
-        ? { ok: true, message: t("connectionManager.connectionSuccessful"), writeAccess: result.writeAccess }
+        ? { ok: true, message: result.writeAccess == null ? (result.message ?? t("connectionManager.connectionSuccessful")) : t("connectionManager.connectionSuccessful"), writeAccess: result.writeAccess }
         : { ok: false, message: result.message ?? t("connectionManager.connectionFailed") };
     } catch (e) {
       if (runId !== testRunId) return;
@@ -165,6 +167,7 @@
     deleteConfirmId = null;
     try {
       await invoke("delete_connection_profile", { profileId: id });
+      app.setConnectionProfiles(app.connectionProfiles.filter(profile => profile.id !== id));
       await loadAll();
       if (editingProfile?.id === id) cancelForm();
     } catch (e) {
@@ -177,63 +180,15 @@
     const runId = ++connectRunId;
     connectingId = profileId;
     try {
-      const result = await invokeWithTimeout<ConnectionOpenResultDto>(
-        "connect_connection_profile",
-        {
-          profileId,
-          trustCurrentFingerprint: false,
-        },
-        t("connectionManager.connectTimedOut"),
-      );
-      if (runId !== connectRunId) return;
-
-      if (result.requiresTrust && result.fingerprint) {
-        const profile = profiles.find((p) => p.id === profileId);
-        const trusted = await app.promptFingerprint(
-          result.fingerprint,
-          profile?.label ?? profile?.host ?? profileId
-        );
-        if (runId !== connectRunId) return;
-        if (trusted) {
-          // Retry with trust granted
-          const retryResult = await invokeWithTimeout<ConnectionOpenResultDto>(
-            "connect_connection_profile",
-            {
-              profileId,
-              trustCurrentFingerprint: true,
-            },
-            t("connectionManager.connectTimedOut"),
-          );
-          if (runId !== connectRunId) return;
-          if (retryResult.connected && retryResult.connection) {
-            sessions = [...sessions.filter((s) => s.profileId !== profileId), retryResult.connection];
-            app.setActiveConnections(sessions);
-            app.notify("success", t("connectionManager.connectedTo", { label: retryResult.connection.label }));
-            app.navigate(retryResult.connection.rootPath);
-            app.closeConnectionManager();
-          } else {
-            app.notify("error", retryResult.message ?? t("connectionManager.connectionFailedAfterTrust"));
-          }
-        }
-        return;
-      }
-
-      if (result.connected && result.connection) {
-        sessions = [...sessions.filter((s) => s.profileId !== profileId), result.connection];
-        app.setActiveConnections(sessions);
-        app.notify("success", t("connectionManager.connectedTo", { label: result.connection.label }));
-        app.navigate(result.connection.rootPath);
-        app.closeConnectionManager();
-      } else {
-        app.notify("error", result.message ?? t("connectionManager.couldNotConnect"));
-      }
-    } catch (e) {
-      if (runId !== connectRunId) return;
-      app.notify("error", formatInvokeError(e));
+      const connection = await connectSavedProfile(profileId);
+      if (runId !== connectRunId || !connection) return;
+      app.notify("success", t("connectionManager.connectedTo", { label: connection.label }));
+      app.navigate(connection.rootPath);
+      app.closeConnectionManager();
+    } catch (error) {
+      if (runId === connectRunId) app.notify("error", formatInvokeError(error));
     } finally {
-      if (runId === connectRunId) {
-        connectingId = null;
-      }
+      if (runId === connectRunId) connectingId = null;
     }
   }
 
@@ -248,8 +203,7 @@
         t("connectionManager.disconnectTimedOut"),
       );
       if (runId !== disconnectRunId) return;
-      sessions = sessions.filter((s) => s.sessionId !== sessionId);
-      app.setActiveConnections(sessions);
+      app.removeActiveConnection(sessionId);
     } catch (e) {
       if (runId !== disconnectRunId) return;
       app.notify("error", formatInvokeError(e));

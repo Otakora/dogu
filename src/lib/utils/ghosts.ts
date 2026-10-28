@@ -85,18 +85,27 @@ function looksLikeDir(name: string): boolean {
 
 // ── Normalisation for overlay/dependency matching ──────────────────────────
 
-/** Case-insensitive, separator-agnostic, trailing-slash-free key for a path. */
+/** Windows drive/UNC paths are case-insensitive; POSIX and remote paths retain case. */
 export function normalizePath(path: string): string {
-  return path.replace(/[/\\]+$/, "").replace(/\\/g, "/").toLowerCase();
+  const windows = !path.startsWith(REMOTE_PREFIX) && (/^[a-z]:[\\/]/i.test(path) || path.startsWith("\\\\"));
+  const normalized = windows ? path.replace(/\\/g, "/").toLowerCase() : path;
+  if (normalized === "/") return "/";
+  const trimmed = normalized.replace(/\/+$/, "");
+  return trimmed || normalized;
 }
 
 export function sameDir(a: string, b: string): boolean {
   return normalizePath(a) === normalizePath(b);
 }
 
+export function pathContains(parent: string, child: string): boolean {
+  const p = normalizePath(parent), c = normalizePath(child);
+  return c === p || (!!p && c.startsWith(p.endsWith("/") ? p : `${p}/`));
+}
+
 /**
  * Mirrors the backend `unique_path`: if `desired` is already taken, returns the
- * first "stem (N)" variant (N≥2, extension preserved) not present in `taken`
+ * first "stem (N)" variant (N≥1, extension preserved) not present in `taken`
  * (a set of normalized paths). Used to display the name a renamed output will get.
  */
 export function uniqueDisplayPath(desired: string, taken: Set<string>): string {
@@ -106,7 +115,7 @@ export function uniqueDisplayPath(desired: string, taken: Set<string>): string {
   const dot = name.lastIndexOf(".");
   const stem = dot > 0 ? name.slice(0, dot) : name;
   const ext = dot > 0 ? name.slice(dot) : ""; // includes the leading dot
-  let n = 2;
+  let n = 1;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const candidate = joinPath(dir, `${stem} (${n})${ext}`);
@@ -202,13 +211,13 @@ export function predictChdConvert(
 
     const fileName = `${stem}.chd`;
 
-    if (opts.destinationMode === "custom" && opts.destinationPath) {
-      return makeGhost(joinPath(opts.destinationPath, fileName), false, opId, false);
-    }
     if (opts.remoteDestination) {
       return makeGhost(joinPath(opts.remoteDestination, fileName), false, opId, false);
     }
-    const outDir = opts.depositToParent ? dirnameOf(srcDir) : srcDir;
+    if (opts.destinationMode === "custom" && opts.destinationPath) {
+      return makeGhost(joinPath(opts.destinationPath, fileName), false, opId, false);
+    }
+    const outDir = (src.startsWith(REMOTE_PREFIX) ? opts.destinationMode === "parent" : opts.depositToParent) ? dirnameOf(srcDir) : srcDir;
     return makeGhost(joinPath(outDir, fileName), false, opId, false);
   });
 }
@@ -228,25 +237,29 @@ export function predictChdRestore(
   for (const chd of chdPaths) {
     const stem = stemOf(basenameOf(chd));
     let destDir: string;
-    if (opts.destinationMode === "custom" && opts.destinationPath) {
-      destDir = opts.destinationPath;
-    } else if (opts.remoteDestination) {
+    if (opts.remoteDestination) {
       destDir = opts.remoteDestination;
+    } else if (opts.destinationMode === "custom" && opts.destinationPath) {
+      destDir = opts.destinationPath;
     } else {
       destDir = dirnameOf(chd);
     }
     if (opts.individualFolders) {
       const folderName =
-        opts.folderNamingMode === "custom" && opts.customFolderName ? opts.customFolderName : stem;
+        chdPaths.length === 1 && opts.folderNamingMode === "custom" && opts.customFolderName?.trim() ? opts.customFolderName.trim() : stem;
       destDir = joinPath(destDir, folderName);
-      ghosts.push(makeGhost(destDir, true, opId, true));
+      ghosts.push(makeGhost(destDir, true, opId, false));
     }
     const outName =
-      opts.outputNamingMode === "custom" && opts.customOutputName ? opts.customOutputName : stem;
+      chdPaths.length === 1 && opts.outputNamingMode === "custom" && opts.customOutputName?.trim() ? opts.customOutputName.trim() : stem;
     ghosts.push(makeGhost(joinPath(destDir, `${outName}.cue`), false, opId, true));
     ghosts.push(makeGhost(joinPath(destDir, `${outName}.bin`), false, opId, true));
   }
   return ghosts;
+}
+
+function discDestination(src: string, opts: DiscImageOptionsPayload): string {
+  return opts.remoteDestination || (opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src));
 }
 
 export function predictCsoConvert(
@@ -255,7 +268,7 @@ export function predictCsoConvert(
   opId: string,
 ): GhostEntry[] {
   return sources.map((src) => {
-    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    const destDir = discDestination(src, opts);
     return makeGhost(joinPath(destDir, `${stemOf(basenameOf(src))}.cso`), false, opId, false);
   });
 }
@@ -266,7 +279,7 @@ export function predictCsoRestore(
   opId: string,
 ): GhostEntry[] {
   return sources.map((src) => {
-    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    const destDir = discDestination(src, opts);
     return makeGhost(joinPath(destDir, `${stemOf(basenameOf(src))}.iso`), false, opId, false);
   });
 }
@@ -282,8 +295,8 @@ export function predictXisoPack(
   opId: string,
 ): GhostEntry[] {
   return sources.map((src) => {
-    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
-    return makeGhost(joinPath(destDir, `${xisoStem(src)}.xiso.iso`), false, opId, true);
+    const destDir = discDestination(src, opts);
+    return makeGhost(joinPath(destDir, `${xisoStem(src)}.xiso.iso`), false, opId, false);
   });
 }
 
@@ -293,8 +306,8 @@ export function predictXisoUnpack(
   opId: string,
 ): GhostEntry[] {
   return sources.map((src) => {
-    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
-    return makeGhost(joinPath(destDir, xisoStem(src)), true, opId, true);
+    const destDir = discDestination(src, opts);
+    return makeGhost(joinPath(destDir, xisoStem(src)), true, opId, false);
   });
 }
 
@@ -304,7 +317,7 @@ export function predictRvzConvert(
   opId: string,
 ): GhostEntry[] {
   return sources.map((src) => {
-    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    const destDir = discDestination(src, opts);
     return makeGhost(joinPath(destDir, `${stemOf(basenameOf(src))}.rvz`), false, opId, false);
   });
 }
@@ -315,7 +328,7 @@ export function predictRvzRestore(
   opId: string,
 ): GhostEntry[] {
   return sources.map((src) => {
-    const destDir = opts.destinationMode === "custom" && opts.destinationPath ? opts.destinationPath : dirnameOf(src);
+    const destDir = discDestination(src, opts);
     return makeGhost(joinPath(destDir, `${stemOf(basenameOf(src))}.iso`), false, opId, false);
   });
 }

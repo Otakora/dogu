@@ -299,7 +299,7 @@ fn inject_shell_integration(
         .unwrap_or_default();
 
     match shell_name.as_str() {
-        "bash" | "sh" => inject_bash(cmd, terminal_id),
+        "bash" => inject_bash(cmd, terminal_id),
         "zsh" => inject_zsh(cmd, terminal_id),
         "fish" => {
             inject_fish(cmd);

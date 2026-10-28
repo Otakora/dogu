@@ -5,6 +5,7 @@
   import { t } from "../../i18n/index.js";
   import type { AvailableShell } from "../../types/index.js";
   import { openTerminalAt } from "../../utils/terminal.js";
+  import { normalizePath } from "../../utils/ghosts.js";
   import TerminalTab from "./TerminalTab.svelte";
   import ContextMenu from "../ui/ContextMenu.svelte";
   import type { MenuItem } from "../ui/ContextMenu.svelte";
@@ -87,9 +88,8 @@
   // colors stable in split view while still prioritising the focused tab.
   function terminalTabColor(cwd: string | null): string | null {
     if (!cwd) return null;
-    const norm = (p: string) => p.replace(/[/\\]+$/, "").toLowerCase();
-    const ncwd = norm(cwd);
-    const matches = app.allTabHighlights.filter(tab => tab.path && norm(tab.path) === ncwd);
+    const ncwd = normalizePath(cwd);
+    const matches = app.allTabHighlights.filter(tab => tab.path && normalizePath(tab.path) === ncwd);
     return matches.find(tab => tab.isActive)?.color ?? matches[0]?.color ?? null;
   }
 

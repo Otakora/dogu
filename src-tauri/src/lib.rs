@@ -35,6 +35,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_children,
             commands::inspect_path,
+            commands::queue_path_exists,
             commands::search_entries,
             commands::summarize_paths,
             commands::create_folder,

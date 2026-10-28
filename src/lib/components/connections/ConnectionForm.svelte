@@ -94,6 +94,7 @@
     const e: Record<string, string> = {};
     if (!host.trim()) e.host = t("connectionForm.hostRequired");
     if (protocol === "smb" && !share.trim()) e.share = t("connectionForm.shareRequired");
+    else if (protocol === "smb" && (/[\\/]/.test(share.trim()) || [".", ".."].includes(share.trim()))) e.share = t("connectionForm.shareInvalid");
     if (portStr) {
       const n = parseInt(portStr, 10);
       if (isNaN(n) || n < 1 || n > 65535) e.port = t("connectionForm.portRange");

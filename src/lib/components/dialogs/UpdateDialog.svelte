@@ -8,6 +8,7 @@
   const update = $derived(app.availableUpdate);
 
   function progressLabel(): string {
+    if (app.updateDownloadFinished) return t("updateDialog.downloaded");
     const progress = app.updateDownloadProgress;
     if (!progress) return t("updateDialog.preparing");
     if (progress.percent !== null) return `${progress.percent}%`;
@@ -25,7 +26,7 @@
 </script>
 
 {#if app.updateNoticeOpen && update}
-  <Modal title={update.isDowngrade ? t("updateDialog.downgradeTitle") : t("updateDialog.title")} width="500px" onclose={() => app.dismissUpdateNotice()}>
+  <Modal title={update.isDowngrade ? t("updateDialog.downgradeTitle") : t("updateDialog.title")} width="500px" onclose={app.updateInstalling ? undefined : () => app.dismissUpdateNotice()}>
     {#snippet children()}
       <div class="update-body">
         <div class="update-version-row">
@@ -54,10 +55,11 @@
         {/if}
 
         {#if app.updateInstalling}
-          <div class="update-progress" aria-label={progressLabel()}>
+          <div class="update-progress" role="progressbar" aria-label={progressLabel()} aria-valuemin="0" aria-valuemax="100" aria-valuenow={app.updateDownloadProgress?.percent ?? undefined}>
             <div class="update-progress-track">
               <div
                 class="update-progress-fill"
+                class:update-progress-indeterminate={app.updateDownloadProgress?.percent == null && !app.updateDownloadFinished}
                 style:width={app.updateDownloadProgress?.percent !== null && app.updateDownloadProgress?.percent !== undefined ? `${app.updateDownloadProgress.percent}%` : "35%"}
               ></div>
             </div>
@@ -172,6 +174,19 @@
     border-radius: inherit;
     background: var(--accent);
     transition: width 120ms ease;
+  }
+
+  .update-progress-indeterminate {
+    animation: progress-indeterminate 1.2s ease-in-out infinite alternate;
+  }
+
+  @keyframes progress-indeterminate {
+    from { transform: translateX(0); }
+    to { transform: translateX(185%); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .update-progress-indeterminate { animation: none; }
   }
 
   .update-error {

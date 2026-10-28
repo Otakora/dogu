@@ -334,4 +334,4 @@ jobs:
             release-artifacts/dogu-linux-x86_64-*.flatpak
             release-artifacts/${{ needs.verify-release.outputs.manifest_name }}
             release-artifacts/SHA256SUMS.txt
-            release-artifacts/Otakora.Dogu.yaml
+            release-artifacts/Otakora.Dogu*.yaml

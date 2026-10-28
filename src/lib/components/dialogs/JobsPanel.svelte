@@ -6,6 +6,8 @@
   import type { QueueConflict, QueuedOp, QueuedOpKind } from "../../types/index.js";
   import { collectAccentIssues, isAccentUnsafeKind } from "../../utils/ascii.js";
   import { normalizePath } from "../../utils/ghosts.js";
+  import { canRetryFailedJob } from "../../utils/queue-runner.js";
+  import { simplifyRelationLinks } from "../../utils/queue-plan.js";
 
   let { onDeaccentOp }: { onDeaccentOp?: (op: QueuedOp) => void } = $props();
 
@@ -44,33 +46,72 @@
 
   // ── Log expansion ─────────────────────────────────────────
   let expandedLogs = $state<Set<string>>(new Set());
+  let queueView = $state<"compact" | "detailed">("compact");
+  let selectedQueueId = $state<string | null>(null);
+  let showAllOutputs = $state(false);
+  let liveFilter = $state<"all" | "running" | "attention">("all");
+  let liveExpanded = $state(false);
+  let selectedLiveId = $state<string | null>(null);
   function toggleLogs(jobId: string) {
     const next = new Set(expandedLogs);
     if (next.has(jobId)) next.delete(jobId); else next.add(jobId);
     expandedLogs = next;
   }
 
+  // Keep successful summaries briefly; failed or blocked runs remain reviewable.
+  $effect(() => {
+    const result = app.queueRunStats;
+    if (!result || app.queueRunning || result.failed > 0 || result.skipped > 0 || result.completed !== result.total) return;
+    const timer = setTimeout(() => {
+      if (!app.queueRunning && app.queueRunStats === result) app.dismissQueueRunStats();
+    }, 5000);
+    return () => clearTimeout(timer);
+  });
+
   // ── Derived ───────────────────────────────────────────────
-  const runningCount        = $derived(app.jobs.filter(j => !j.done).length);
+  const visibleJobs         = $derived(app.jobs.filter(j => !j.retried));
+  const runningCount        = $derived(visibleJobs.filter(j => !j.done).length);
   const hasQueue            = $derived(app.opQueue.length > 0 || !!app.queueRunStats);
-  const hasJobs             = $derived(app.jobs.length > 0);
-  const panelVisible        = $derived(hasQueue || hasJobs);
+  const hasJobs             = $derived(visibleJobs.length > 0);
   const blockingConflicts   = $derived(app.queueConflicts.filter(c => c.severity === 'blocking'));
   const parallelConflicts   = $derived(app.queueConflicts.filter(c => c.severity === 'parallel-only'));
-  const hasConflicts        = $derived(app.queueConflicts.length > 0);
   const hasBlockingConflicts= $derived(blockingConflicts.length > 0);
-  const hasQueueWarnings    = $derived(hasConflicts || app.queueHasDependencies);
-  const retryableFailedJobs = $derived(app.jobs.filter(j => j.done && !j.success && !!j.retryQueuedOp && !j.retried));
+  const hasQueueWarnings    = $derived(hasBlockingConflicts || app.queuePlan.invalidDependencies || app.queueAccentBlocked.size > 0 || app.opQueue.some(op => !!op.requiresReview));
+  const retryableFailedJobs = $derived(app.jobs.filter(j => canRetryFailedJob(j, app.opQueue)));
   const canRetryAllFailed   = $derived(retryableFailedJobs.length > 0 && !app.queueRunning && !app.failedQueueRetryRunning);
   const hasAccentBlocks     = $derived(app.queueAccentBlocked.size > 0);
-  const canRunSmart         = $derived(hasQueue && !hasBlockingConflicts && !hasAccentBlocks && !app.queueRunning);
+  const canRunSmart         = $derived(hasQueue && !hasBlockingConflicts && !hasAccentBlocks && !app.opQueue.some(op => !!op.requiresReview) && !app.queuePlan.invalidDependencies && !app.queueRunning && !app.failedQueueRetryRunning);
   // Sequential is safe even with parallel-only conflicts (queue order protects it)
-  const canRunSequential    = $derived(hasQueue && !hasBlockingConflicts && !hasAccentBlocks && !app.queueRunning);
+  const canRunSequential    = $derived(hasQueue && !hasBlockingConflicts && !hasAccentBlocks && !app.opQueue.some(op => !!op.requiresReview) && !app.queuePlan.invalidDependencies && !app.queueRunning && !app.failedQueueRetryRunning);
+  const liveSteps = $derived.by(() => {
+    const priority: Record<string, number> = { running: 0, failed: 1, skipped: 2, pending: 3, succeeded: 4 };
+    return app.queueExecutionSteps
+      .map((step, index) => ({ ...step, index }))
+      .filter(step => liveFilter === "all" || (liveFilter === "running" ? step.state === "running" : step.state === "failed" || step.state === "skipped"))
+      .sort((a, b) => priority[a.state] - priority[b.state] || a.index - b.index);
+  });
+  function jobForStep(id: string) { return app.jobs.find(job => job.retryQueuedOp?.id === id); }
+  const selectedLiveStep = $derived(app.queueExecutionSteps.find(step => step.op.id === selectedLiveId)
+    ?? app.queueExecutionSteps.find(step => step.state === "running")
+    ?? app.queueExecutionSteps[0] ?? null);
+  const selectedLiveJob = $derived(selectedLiveStep ? jobForStep(selectedLiveStep.op.id) : undefined);
+  const displayedJobs = $derived(app.queueRunning
+    ? visibleJobs.filter(job => !job.retryQueuedOp || !app.queueExecutionSteps.some(step => step.op.id === job.retryQueuedOp?.id) || job.id === selectedLiveJob?.id)
+    : visibleJobs);
+  const selectedOp = $derived(app.opQueue.find(op => op.id === selectedQueueId) ?? app.opQueue[0] ?? null);
+  function previousStepState(id: string) { return app.queueExecutionSteps.find(step => step.op.id === id)?.state; }
+  function showJob(jobId: string) {
+    const job = app.jobs.find(item => item.id === jobId);
+    if (job?.retryQueuedOp) selectedLiveId = job.retryQueuedOp.id;
+    expandedLogs = new Set([...expandedLogs, jobId]);
+    void tick().then(() => document.getElementById(`queue-job-${jobId}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+  }
 
   // ── Kind metadata ─────────────────────────────────────────
   const KIND_COLOR: Record<QueuedOpKind, string> = {
     copy:         "#3b82f6",
     move:         "#f59e0b",
+    rename:       "#e879b2",
     delete:       "#ef4444",
     extract:      "#8b5cf6",
     compress:     "#10b981",
@@ -87,7 +128,7 @@
 
   function kindLabel(k: QueuedOpKind): string {
     const map: Record<QueuedOpKind, Parameters<typeof t>[0]> = {
-      copy: "queue.kind.copy", move: "queue.kind.move", delete: "queue.kind.delete",
+      copy: "queue.kind.copy", move: "queue.kind.move", rename: "queue.kind.rename", delete: "queue.kind.delete",
       extract: "queue.kind.extract", compress: "queue.kind.compress",
       "chd-convert": "queue.kind.chdConvert", "chd-restore": "queue.kind.chdRestore",
       "cso-convert": "queue.kind.csoConvert", "cso-restore": "queue.kind.csoRestore",
@@ -106,7 +147,7 @@
   function dependencyLabel(op: QueuedOp): string | null {
     if (op.dependsOn.length === 0) return null;
     const steps = op.dependsOn
-      .map(id => app.opQueue.findIndex(o => o.id === id) + 1)
+      .map(id => stepNumberForId(id))
       .filter(n => n > 0)
       .sort((a, b) => a - b);
     return steps.length ? steps.join(", ") : null;
@@ -126,7 +167,8 @@
   }
 
   function stepNumberForId(id: string): number {
-    return app.opQueue.findIndex(o => o.id === id) + 1;
+    const index = app.opQueue.findIndex(o => o.id === id);
+    return index < 0 ? 0 : app.opQueue[index].originalStep ?? index + 1;
   }
 
   function waveStepTitle(id: string): string {
@@ -173,6 +215,12 @@
     }
     if (targets.length === 0) {
       return sources.slice(0, 2).map((source) => ({ source, target: null, extraTargets: 0 }));
+    }
+    if (sources.length > 1 && (targets.length !== sources.length || ["compress", "extract", "m3u"].includes(op.kind))) {
+      return [
+        ...sources.slice(0, 2).map(source => ({ source, target: null, extraTargets: 0 })),
+        { source: null, target: targets[0], extraTargets: Math.max(0, targets.length - 1) },
+      ];
     }
     if (sources.length === 1) {
       return [{
@@ -243,24 +291,28 @@
     for (const [toId, predecessors] of app.queuePlan.orderPredecessors) {
       for (const fromId of predecessors) {
         if (dependencyKeys.has(`${fromId}:${toId}`)) continue;
+        // A conflict line already conveys this ordering constraint.
+        if (app.queueConflicts.some(c => c.severity === "parallel-only" &&
+          ((c.opAId === fromId && c.opBId === toId) || (c.opAId === toId && c.opBId === fromId)))) continue;
         add("ordering", fromId, toId);
       }
     }
 
     for (const conflict of app.queueConflicts) {
-      add(
-        conflict.severity === "blocking" ? "blocking" : "parallel",
-        conflict.opAId,
-        conflict.opBId,
-        conflict.pathA,
-      );
+      const aIndex = app.opQueue.findIndex(op => op.id === conflict.opAId);
+      const bIndex = app.opQueue.findIndex(op => op.id === conflict.opBId);
+      const [fromId, toId] = aIndex <= bIndex
+        ? [conflict.opAId, conflict.opBId] : [conflict.opBId, conflict.opAId];
+      if (conflict.severity !== "blocking" && dependencyKeys.has(`${fromId}:${toId}`)) continue;
+      add(conflict.severity === "blocking" ? "blocking" : "parallel", fromId, toId, conflict.pathA);
     }
 
-    return links.slice(0, 40);
+    return links;
   }
 
-  const queueRelationLinks = $derived.by(buildQueueRelationLinks);
-  const queueRelationMapVisible = $derived(app.settings.showQueueRelationMap && queueRelationLinks.length > 0);
+  const allQueueRelationLinks = $derived.by(buildQueueRelationLinks);
+  const queueRelationLinks = $derived(simplifyRelationLinks(allQueueRelationLinks.slice(0, 40)));
+  const queueRelationMapVisible = $derived(queueView === "detailed" && app.settings.showQueueRelationMap && queueRelationLinks.length > 0);
 
   // ── Conflict descriptions ─────────────────────────────────
   type ConflictParts = {
@@ -278,6 +330,7 @@
 
     const path = basename(c.pathA);
     const key  = c.kind === "source-deleted" ? "queue.conflict.sourceDeleted"
+               : c.kind === "source-written" ? "queue.conflict.sourceWritten"
                : c.kind === "dest-deleted"   ? "queue.conflict.destDeleted"
                :                               "queue.conflict.destCollision";
     // Template uses %%A%% / %%B%% as split sentinels; {path} is interpolated normally
@@ -303,7 +356,6 @@
   let dragOffsetY   = $state(0);
   let queueListEl   = $state<HTMLElement | undefined>();
   let queueRelationRailWidth = $state(QUEUE_RELATION_MIN_RAIL);
-  let queueRelationSize = $state({ width: 0, height: 0 });
   let queueRelationPaths = $state<RenderedQueueRelationLink[]>([]);
   let queueRelationRaf = 0;
 
@@ -341,6 +393,10 @@
       listRect = list.getBoundingClientRect();
     }
 
+    // Bounding rectangles include the app's CSS zoom; SVG coordinates use
+    // unzoomed CSS pixels. Convert both axes before drawing the paths.
+    const scaleX = list.offsetWidth ? listRect.width / list.offsetWidth : 1;
+    const scaleY = list.offsetHeight ? listRect.height / list.offsetHeight : 1;
     const cardById = new Map<string, HTMLElement>();
     list.querySelectorAll<HTMLElement>(".queue-card[data-op-id]").forEach((card) => {
       const id = card.dataset.opId;
@@ -368,13 +424,15 @@
       const total = attachmentTotals.get(id) ?? 1;
       const seen = attachmentSeen.get(id) ?? 0;
       attachmentSeen.set(id, seen + 1);
-      if (total <= 1) return rect.top - listRect.top + rect.height / 2;
+      const height = rect.height / scaleY;
+      const center = (rect.top - listRect.top) / scaleY + height / 2;
+      if (total <= 1) return center;
 
-      const step = Math.min(7, Math.max(3, (rect.height - 14) / Math.max(1, total - 1)));
+      const step = Math.min(7, Math.max(3, (height - 14) / Math.max(1, total - 1)));
       const offset = (seen - (total - 1) / 2) * step;
-      const maxOffset = Math.max(0, rect.height / 2 - 9);
+      const maxOffset = Math.max(0, height / 2 - 9);
       const clampedOffset = Math.max(-maxOffset, Math.min(maxOffset, offset));
-      return rect.top - listRect.top + rect.height / 2 + clampedOffset;
+      return center + clampedOffset;
     }
 
     const rendered: RenderedQueueRelationLink[] = [];
@@ -386,7 +444,8 @@
 
       const fromRect = from.getBoundingClientRect();
       const toRect = to.getBoundingClientRect();
-      const cardX = Math.min(fromRect.left, toRect.left) - listRect.left - 2;
+      // Leave the arrowhead in the rail, outside the card's painted border.
+      const cardX = (Math.min(fromRect.left, toRect.left) - listRect.left) / scaleX - 5;
       const lane = laneByKey.get(link.key) ?? index;
       const usableRail = Math.max(1, cardX - 18);
       const laneGap = relationCount <= 1 ? 0 : usableRail / Math.max(1, relationCount - 1);
@@ -397,10 +456,8 @@
       rendered.push({ ...link, d, x: cardX, y1, y2 });
     }
 
-    queueRelationSize = {
-      width: Math.max(1, list.scrollWidth),
-      height: Math.max(1, list.scrollHeight),
-    };
+    // Coordinates are CSS pixels relative to the list. The SVG has no viewBox,
+    // so they stay 1:1 instead of being rescaled as its bounds change.
     queueRelationPaths = rendered;
   }
 
@@ -482,7 +539,7 @@
   });
 </script>
 
-{#if panelVisible}
+{#if app.jobsPanelOpen}
   <div class="jobs-panel" class:open={app.jobsPanelOpen}>
 
     <!-- ── Header strip (always visible) ── -->
@@ -492,7 +549,7 @@
           <path d="M2 7.5L5.5 4L9 7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         <span class="jobs-title">{t("jobsPanel.title")}</span>
-        {#if app.queueRunStats}
+        {#if app.queueRunning && app.queueRunStats}
           <span class="badge badge--queue" aria-label="queue progress">{app.queueRunStats.completed}/{app.queueRunStats.total}</span>
         {:else}
           {#if hasQueue}
@@ -507,6 +564,35 @@
         {/if}
       </button>
 
+      <div class="jobs-summary">
+        {#if queueView === "compact" && !app.queueRunning && app.opQueue.length > 1 && !hasBlockingConflicts}
+          <span class="queue-heading-hint">{t("queue.compactPlan", { first: app.queuePlan.firstWave, lanes: app.queuePlan.maxConcurrent })}</span>
+        {/if}
+      </div>
+      {#if app.opQueue.length > 0 && !app.queueRunning}
+                <div class="queue-view-controls">
+                  <div class="queue-view-switch" role="group" aria-label={t("queue.viewLabel")}>
+                    <button class:active={queueView === "compact"} aria-pressed={queueView === "compact"} onclick={() => queueView = "compact"}>{t("queue.viewCompact")}</button>
+                    <button class:active={queueView === "detailed"} aria-pressed={queueView === "detailed"} onclick={() => queueView = "detailed"}>{t("queue.viewDetailed")}</button>
+                  </div>
+                {#if queueView === "detailed"}
+                <label class="queue-map-switch" title={t("queue.map.toggleHint")}>
+                  <input
+                    class="queue-map-switch-input"
+                    type="checkbox"
+                    checked={app.settings.showQueueRelationMap}
+                    onchange={(e) => app.updateSettings({ showQueueRelationMap: (e.target as HTMLInputElement).checked })}
+                    aria-label={t("queue.map.toggle")}
+                  />
+                  <span class="queue-map-switch-track" aria-hidden="true">
+                    <span class="queue-map-switch-thumb"></span>
+                  </span>
+                  <span class="queue-map-switch-label">{t("queue.map.toggle")}</span>
+                </label>
+                {/if}
+                </div>
+              {/if}
+
       {#if app.jobsPanelOpen && (app.opQueue.length > 0 || hasJobs)}
         <div class="jobs-actions" aria-label="Queue actions">
           {#if app.opQueue.length > 0}
@@ -520,7 +606,7 @@
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
                   <path d="M3 1.8v6.4L8 5 3 1.8z"/>
                 </svg>
-                {t("queue.runSmart")}
+                {t(app.queueRunStats && (app.queueRunStats.failed > 0 || app.queueRunStats.skipped > 0) ? "queue.retryPending" : "queue.runSmart")}
               </button>
               <button
                 class="header-btn header-btn--secondary"
@@ -548,32 +634,49 @@
 
     <!-- ── Expandable body ── -->
     {#if app.jobsPanelOpen}
-      <div class="jobs-body">
+      <div class="jobs-body" class:jobs-body--split={app.queueRunning && app.queueExecutionSteps.length > 0}>
+        {#if !hasQueue && !hasJobs}
+          <div class="jobs-empty">{t("jobsPanel.noJobs")}</div>
+        {/if}
+
+        {#if app.queueRunning && app.queueRunStats}
+          <div class="queue-overview" aria-label={t("queue.executionTitle")}>
+            <div class="queue-overview-label">
+              <svg class="spin" width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <circle cx="7" cy="7" r="5.5" stroke="var(--line-strong)" stroke-width="1.5"/>
+                <path d="M7 1.5A5.5 5.5 0 0 1 12.5 7" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <strong>{t("queue.executionTitle")}</strong>
+              <span>{t("queue.stats.completed", { completed: app.queueRunStats.completed, total: app.queueRunStats.total })}</span>
+            </div>
+            <div class="queue-overview-progress" role="progressbar" aria-label={t("queue.overallProgress")} aria-valuemin="0" aria-valuemax={app.queueRunStats.total} aria-valuenow={app.queueRunStats.completed}>
+              <div style:width="{app.queueRunStats.total ? Math.round(app.queueRunStats.completed / app.queueRunStats.total * 100) : 0}%"></div>
+            </div>
+            <div class="queue-overview-counts">
+              {#if app.queueRunStats.running > 0}<span class="stat-running">{t("queue.stats.running", { count: app.queueRunStats.running })}</span>{/if}
+              {#if app.queueRunStats.succeeded > 0}<span class="stat-ok">✓ {t("queue.countSucceeded", { count: app.queueRunStats.succeeded })}</span>{/if}
+              {#if app.queueRunStats.failed > 0}<span class="stat-fail">✗ {t("queue.countFailed", { count: app.queueRunStats.failed })}</span>{/if}
+              {#if app.queueRunStats.skipped > 0}<span class="stat-skip">↷ {t("queue.countBlocked", { count: app.queueRunStats.skipped })}</span>{/if}
+            </div>
+          </div>
+        {/if}
 
         <!-- ── QUEUE SECTION ── -->
         {#if hasQueue}
           <div class="section">
-            <div class="queue-section-heading">
-              <div class="section-label">{t("queue.title")} ({app.queueRunStats ? app.queueRunStats.total : app.opQueue.length})</div>
-              {#if app.opQueue.length > 0}
-                <label class="queue-map-switch" title={t("queue.map.toggleHint")}>
-                  <input
-                    class="queue-map-switch-input"
-                    type="checkbox"
-                    checked={app.settings.showQueueRelationMap}
-                    onchange={(e) => app.updateSettings({ showQueueRelationMap: (e.target as HTMLInputElement).checked })}
-                    aria-label={t("queue.map.toggle")}
-                  />
-                  <span class="queue-map-switch-track" aria-hidden="true">
-                    <span class="queue-map-switch-thumb"></span>
-                  </span>
-                  <span class="queue-map-switch-label">{t("queue.map.toggle")}</span>
-                </label>
-              {/if}
-            </div>
+            {#if app.queueRunning}
+              <div class="section-label">{t("queue.stepsHeading")}</div>
+            {/if}
 
-            {#if app.queueRunStats}
+            {#if app.queuePlan.invalidDependencies && !app.queueRunning}
+              <p class="queue-invalid">{t("queue.invalidDependencies")}</p>
+            {/if}
+            {#if app.queueRunStats && !app.queueRunning}
               <div class="queue-stats-view">
+                <div class="queue-result-heading">
+                  <strong>{t(app.queueRunning ? "queue.executionTitle" : "queue.lastResult")}</strong>
+                  {#if !app.queueRunning}<button class="job-btn" onclick={() => app.dismissQueueRunStats()}>{t("queue.dismissResult")}</button>{/if}
+                </div>
                 <div class="queue-progress-track">
                   <div class="queue-progress-fill" style:width="{Math.round(app.queueRunStats.completed / app.queueRunStats.total * 100)}%"></div>
                 </div>
@@ -589,18 +692,44 @@
                     <span class="stat-running">{t("queue.stats.running", { count: app.queueRunStats.running })}</span>
                   {/if}
                   {#if app.queueRunStats.succeeded > 0}
-                    <span class="stat-ok">✓{app.queueRunStats.succeeded}</span>
+                    <span class="stat-ok">✓ {t("queue.countSucceeded", { count: app.queueRunStats.succeeded })}</span>
                   {/if}
                   {#if app.queueRunStats.failed > 0}
-                    <span class="stat-fail">✗{app.queueRunStats.failed}</span>
+                    <span class="stat-fail">✗ {t("queue.countFailed", { count: app.queueRunStats.failed })}</span>
                   {/if}
                   {#if app.queueRunStats.skipped > 0}
-                    <span class="stat-skip">↷{app.queueRunStats.skipped}</span>
+                    <span class="stat-skip">↷ {t("queue.countBlocked", { count: app.queueRunStats.skipped })}</span>
                   {/if}
                 </div>
               </div>
-            {:else}
-              {#if app.queuePlan.total > 1 && !hasBlockingConflicts}
+            {/if}
+            {#if app.queueRunning && app.queueExecutionSteps.length > 0}
+              <div class="queue-live-filters" role="group" aria-label={t("queue.filterLabel")}>
+                <button class:active={liveFilter === "all"} aria-pressed={liveFilter === "all"} onclick={() => { liveFilter = "all"; liveExpanded = false; }}>{t("queue.filterAll")}</button>
+                <button class:active={liveFilter === "running"} aria-pressed={liveFilter === "running"} onclick={() => { liveFilter = "running"; liveExpanded = false; }}>{t("queue.filterRunning")}</button>
+                <button class:active={liveFilter === "attention"} aria-pressed={liveFilter === "attention"} onclick={() => { liveFilter = "attention"; liveExpanded = false; }}>{t("queue.filterAttention")}</button>
+              </div>
+              <div class="queue-live-list" aria-label={t("queue.liveSteps")}>
+                {#each liveSteps.slice(0, liveExpanded ? undefined : 50) as step (step.op.id)}
+                  {@const job = jobForStep(step.op.id)}
+                  <div class="queue-live-step" class:queue-live-step--selected={selectedLiveStep?.op.id === step.op.id} class:queue-live-step--failed={step.state === "failed"} class:queue-live-step--blocked={step.state === "skipped"} class:queue-live-step--running={step.state === "running"} role="button" tabindex="0" aria-pressed={selectedLiveStep?.op.id === step.op.id} onclick={() => selectedLiveId = step.op.id} onkeydown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectedLiveId = step.op.id; } }}>
+                    <span class="queue-live-number">{step.op.originalStep ?? step.index + 1}</span>
+                    <span class="queue-live-kind" style:color={KIND_COLOR[step.op.kind]}>{kindLabel(step.op.kind)}</span>
+                    <span class="queue-live-name" title={step.op.sources[0] ?? step.op.deletes[0] ?? ""}>{basename(step.op.sources[0] ?? step.op.deletes[0] ?? "")}</span>
+                    <span class="queue-live-status">{t(step.state === "pending" ? "queue.stepPending" : step.state === "running" ? "queue.stepRunning" : step.state === "succeeded" ? "queue.stepSucceeded" : step.state === "failed" ? "queue.stepFailed" : "queue.stepBlocked")}{#if step.state === "running" && job} · {Math.round(job.progress)}%{/if}{#if job?.paused} · {t("jobPause.title")}{/if}</span>
+                    {#if step.state === "running" && job}
+                      <span class="queue-live-progress" role="progressbar" aria-label={basename(step.op.sources[0] ?? step.op.title)} aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(job.progress)}><span style:width="{Math.max(0, Math.min(100, job.progress))}%"></span></span>
+                    {/if}
+                    {#if app.queueStepErrors[step.op.id]}<span class="queue-step-error" title={app.queueStepErrors[step.op.id]}>{app.queueStepErrors[step.op.id]}</span>{/if}
+                    {#if step.state === "failed" && job}<button class="job-btn" onclick={() => showJob(job.id)}>{t("queue.viewError")}</button>{/if}
+                  </div>
+                {/each}
+                {#if liveSteps.length === 0}<div class="queue-live-empty">{t("queue.filterEmpty")}</div>{/if}
+                {#if !liveExpanded && liveSteps.length > 50}<button class="queue-show-more" onclick={() => liveExpanded = true}>{t("queue.showMore", { count: liveSteps.length - 50 })}</button>{/if}
+              </div>
+            {/if}
+            {#if !app.queueRunning && app.opQueue.length > 0}
+              {#if queueView === "detailed" && app.queuePlan.total > 1 && !hasBlockingConflicts}
                 <div class="queue-plan-summary">
                   <div class="queue-plan-copy">
                     <strong>{t("queue.smartPlanTitle")}</strong>
@@ -610,7 +739,7 @@
                       lanes: app.queuePlan.maxConcurrent,
                     })}</span>
                   </div>
-                  <div class="queue-wave-map" aria-label={t("queue.wavePlanLabel")}>
+                  <div class="queue-wave-map" aria-label={t("queue.wavePlanLabel")} title={t("queue.wavePlanHint")}>
                     {#each visiblePlanLevels() as wave, waveIdx}
                       <div class="queue-wave">
                         <span class="queue-wave-label">{t("queue.wave", { n: waveIdx + 1 })}</span>
@@ -645,188 +774,30 @@
               <!-- Queue cards list -->
               {#if queueRelationMapVisible}
                 <div class="queue-relation-legend" aria-label={t("queue.map.legend")}>
+                  <span class="queue-relation-help">{t("queue.map.direction")}</span>
                   {#if relationKindPresent("dependency")}
                     <span class="queue-relation-key queue-relation-key--dependency">{t("queue.map.dependency")}</span>
                   {/if}
-                  {#if relationKindPresent("ordering")}
+                  {#if relationKindPresent("ordering") || relationKindPresent("parallel")}
                     <span class="queue-relation-key queue-relation-key--ordering">{t("queue.map.ordering")}</span>
                   {/if}
                   {#if relationKindPresent("blocking")}
                     <span class="queue-relation-key queue-relation-key--blocking">{t("queue.map.blocking")}</span>
                   {/if}
-                  {#if relationKindPresent("parallel")}
-                    <span class="queue-relation-key queue-relation-key--parallel">{t("queue.map.parallel")}</span>
+                  {#if allQueueRelationLinks.length > 40}
+                    <span class="queue-relation-key">{t("queue.map.truncated", { count: allQueueRelationLinks.length - 40 })}</span>
                   {/if}
                 </div>
               {/if}
 
-              <div
-                class="queue-list"
-                bind:this={queueListEl}
-                style={`--queue-relation-rail-width: ${queueRelationMapVisible ? queueRelationRailWidth : 0}px;`}
-              >
-                {#if queueRelationMapVisible && queueRelationPaths.length > 0}
-                  <svg
-                    class="queue-relation-map"
-                    width={queueRelationSize.width}
-                    height={queueRelationSize.height}
-                    viewBox={`0 0 ${queueRelationSize.width} ${queueRelationSize.height}`}
-                  >
-                    {#each queueRelationPaths as link (link.key)}
-                      <g class="queue-relation-link" aria-label={link.title}>
-                        <path class={`queue-relation-path queue-relation-path--${link.kind}`} d={link.d} vector-effect="non-scaling-stroke" />
-                        <path class="queue-relation-hit" d={link.d} vector-effect="non-scaling-stroke">
-                          <title>{link.title}</title>
-                        </path>
-                        <circle class={`queue-relation-dot queue-relation-dot--${link.kind}`} cx={link.x} cy={link.y1} r="2.2" />
-                        <circle class={`queue-relation-dot queue-relation-dot--${link.kind}`} cx={link.x} cy={link.y2} r="2.8" />
-                      </g>
-                    {/each}
-                  </svg>
-                {/if}
-                {#each app.opQueue as op, i (op.id)}
-                  <!-- svelte-ignore a11y_no_static_element_interactions -->
-                  <div
-                    class="queue-card"
-                    class:queue-card--chained={op.dependsOn.length > 0}
-                    class:queue-card--blocked={opAccentBlocked(op)}
-                    class:queue-card--dragging={draggedIdx === i}
-                    class:drop-before={draggedIdx !== null && dropInsertIdx === i}
-                    class:drop-after={draggedIdx !== null && dropInsertIdx === i + 1}
-                    style:--kind-color={KIND_COLOR[op.kind]}
-                    style:transform={draggedIdx === i ? `translateY(${dragOffsetY}px)` : undefined}
-                    data-op-id={op.id}
-                    data-kind={op.kind}
-                  >
-                    <!-- Drag handle -->
-                    <!-- svelte-ignore a11y_no_static_element_interactions -->
-                    <div
-                      class="drag-handle"
-                      onmousedown={(e) => onEntryMouseDown(e, i)}
-                      title="Drag to reorder"
-                      aria-hidden="true"
-                    >
-                      <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor">
-                        <circle cx="3" cy="3"  r="1.3"/>
-                        <circle cx="7" cy="3"  r="1.3"/>
-                        <circle cx="3" cy="7"  r="1.3"/>
-                        <circle cx="7" cy="7"  r="1.3"/>
-                        <circle cx="3" cy="11" r="1.3"/>
-                        <circle cx="7" cy="11" r="1.3"/>
-                      </svg>
-                    </div>
-
-                    <!-- Step block: big number + action -->
-                    <div class="op-step" class:op-step--chained={op.dependsOn.length > 0} class:op-step--batched={!!op.batchId}>
-                      <span class="op-step-num">{i + 1}</span>
-                      <span class="op-step-kind">{kindLabel(op.kind)}</span>
-                    </div>
-
-                    <!-- Content -->
-                    <div class="op-content">
-                      <div class="op-header">
-                        <div class="op-title" title={op.title}>{op.title}</div>
-                        <div class="op-meta">
-                          {#if batchLabel(op)}
-                            <div class="op-batch" title={op.batchTitle}>
-                              <span class="op-batch-mark" aria-hidden="true"></span>
-                              <span>{batchLabel(op)}</span>
-                            </div>
-                          {/if}
-                          {#if dependencyLabel(op)}
-                            <div class="op-chain" title={t("queue.parallelDisabledDeps")} aria-label={t("queue.parallelDisabledDeps")}>
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-                              </svg>
-                              <span>{t("queue.chainedAfter", { n: dependencyLabel(op) ?? "" })}</span>
-                            </div>
-                          {/if}
-                        </div>
-                      </div>
-                      {#if opFlowRows(op).length > 0}
-                        <div class="op-flows">
-                          {#each opFlowRows(op) as flow}
-                            <div class="op-flow" title={flowTitle(flow)}>
-                              {#if flow.source}
-                                <span
-                                  class="op-flow-name op-flow-source"
-                                  class:op-flow-name--removed={opRemovesPath(op, flow.source)}
-                                >{basename(flow.source)}</span>
-                              {/if}
-                              {#if flow.target}
-                                {#if flow.source}
-                                  <span class="op-flow-arrow" aria-hidden="true">-&gt;</span>
-                                {/if}
-                                <span class="op-flow-name op-flow-target">{basename(flow.target)}</span>
-                                {#if flow.extraTargets > 0}
-                                  <span class="op-flow-more">+{flow.extraTargets}</span>
-                                {/if}
-                              {/if}
-                            </div>
-                          {/each}
-                          {#if opHiddenSourceCount(op) > 0}
-                            <span class="op-flow-more">+{opHiddenSourceCount(op)}</span>
-                          {/if}
-                        </div>
-                      {/if}
-                      {#if opFlowRows(op).length === 0 && op.destinations.length > 0 && op.kind !== "delete"}
-                        <div class="op-flows">
-                          <div class="op-flow" title={op.destinations[0]}>
-                            <span class="op-flow-arrow" aria-hidden="true">-&gt;</span>
-                            <span class="op-flow-name op-flow-target">{basename(op.destinations[0])}</span>
-                          </div>
-                        </div>
-                      {/if}
-                      {#if opAccentBlocked(op)}
-                        <div class="op-accent-block">
-                          <span class="op-accent-msg">⚠ {t("accents.queueBlocked")}</span>
-                          <button class="op-deaccent-btn" onclick={() => onDeaccentOp?.(op)}>
-                            {t("accents.deaccentAction")}
-                          </button>
-                        </div>
-                      {/if}
-                    </div>
-
-                    <!-- Controls -->
-                    <div class="op-controls">
-                      <button
-                        class="icon-btn"
-                        onclick={() => app.moveOpQueueItem(i, -1)}
-                        disabled={i === 0}
-                        title="Move up"
-                        aria-label="Move up"
-                      >
-                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                          <path d="M2 7L5 3L8 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                        </svg>
-                      </button>
-                      <button
-                        class="icon-btn"
-                        onclick={() => app.moveOpQueueItem(i, 1)}
-                        disabled={i === app.opQueue.length - 1}
-                        title="Move down"
-                        aria-label="Move down"
-                      >
-                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                          <path d="M2 3L5 7L8 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                        </svg>
-                      </button>
-                      <button
-                        class="icon-btn icon-btn--remove"
-                        onclick={() => { const n = app.removeFromQueue(op.id); if (n > 1) app.notify("info", t("queue.removedWithDependents", { count: n })); }}
-                        title={t("queue.remove")}
-                        aria-label={t("queue.remove")}
-                      >
-                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                          <path d="M2 2L8 8M8 2L2 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                        </svg>
-                      </button>
-                    </div>
-                  </div>
-                {/each}
-              </div>
-
+              {#if app.queueHasDependencies || app.queuePlan.hasOrderingConstraints || hasBlockingConflicts || parallelConflicts.length > 0}
+                <details class="queue-scheduling" class:queue-scheduling--blocking={hasBlockingConflicts}>
+                  <summary>
+                    <span class="queue-scheduling-icon" aria-hidden="true">{hasBlockingConflicts ? "!" : "✓"}</span>
+                    <span>{t(hasBlockingConflicts ? "queue.schedulingBlocked" : "queue.schedulingSafe")}</span>
+                    <span class="queue-scheduling-action">{t("queue.schedulingDetails")}</span>
+                  </summary>
+                  <div class="queue-scheduling-content">
               {#if app.queueHasDependencies || app.queuePlan.hasOrderingConstraints}
                 <div class="conflicts-box conflicts-box--dependencies">
                   <div class="conflicts-header">
@@ -899,18 +870,264 @@
                   {/each}
                 </div>
               {/if}
+                  </div>
+                </details>
+              {/if}
+              <div class="queue-workspace" class:queue-workspace--compact={queueView === "compact"}>
+              <div
+                class="queue-list"
+                bind:this={queueListEl}
+                style={`--queue-relation-rail-width: ${queueRelationMapVisible ? queueRelationRailWidth : 0}px;`}
+              >
+                {#if queueRelationMapVisible && queueRelationPaths.length > 0}
+                  <svg
+                    class="queue-relation-map"
+                  >
+                    {#each queueRelationPaths as link (link.key)}
+                      <g class="queue-relation-link" aria-label={link.title}>
+                        <path class={`queue-relation-path queue-relation-path--${link.kind}`} d={link.d} vector-effect="non-scaling-stroke" />
+                        <path class="queue-relation-hit" d={link.d} vector-effect="non-scaling-stroke">
+                          <title>{link.title}</title>
+                        </path>
+                        <circle class={`queue-relation-dot queue-relation-dot--${link.kind}`} cx={link.x} cy={link.y1} r="2.2" />
+                        <path class={`queue-relation-arrow queue-relation-arrow--${link.kind}`} d={`M ${link.x - 8} ${link.y2 - 4} L ${link.x} ${link.y2} L ${link.x - 8} ${link.y2 + 4} Z`} />
+                      </g>
+                    {/each}
+                  </svg>
+                {/if}
+                {#each app.opQueue as op, i (op.id)}
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <div
+                    class="queue-card"
+                    class:queue-card--chained={op.dependsOn.length > 0}
+                    class:queue-card--blocked={opAccentBlocked(op)}
+                    class:queue-card--dragging={draggedIdx === i}
+                    class:queue-card--selected={queueView === "compact" && selectedOp?.id === op.id}
+                    class:queue-card--compact={queueView === "compact"}
+                    class:drop-before={draggedIdx !== null && dropInsertIdx === i}
+                    class:drop-after={draggedIdx !== null && dropInsertIdx === i + 1}
+                    style:--kind-color={KIND_COLOR[op.kind]}
+                    style:transform={draggedIdx === i ? `translateY(${dragOffsetY}px)` : undefined}
+                    data-op-id={op.id}
+                    data-kind={op.kind}
+                  >
+                    <!-- Drag handle -->
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <div
+                      class="drag-handle"
+                      onmousedown={(e) => onEntryMouseDown(e, i)}
+                      title="Drag to reorder"
+                      aria-hidden="true"
+                    >
+                      <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor">
+                        <circle cx="3" cy="3"  r="1.3"/>
+                        <circle cx="7" cy="3"  r="1.3"/>
+                        <circle cx="3" cy="7"  r="1.3"/>
+                        <circle cx="7" cy="7"  r="1.3"/>
+                        <circle cx="3" cy="11" r="1.3"/>
+                        <circle cx="7" cy="11" r="1.3"/>
+                      </svg>
+                    </div>
+
+                    <!-- Step block: big number + action -->
+                    <div class="op-step" class:op-step--chained={op.dependsOn.length > 0} class:op-step--batched={!!op.batchId}>
+                      <span class="op-step-num">{op.originalStep ?? i + 1}</span>
+                      <span class="op-step-kind">{kindLabel(op.kind)}</span>
+                    </div>
+
+                    <!-- Content -->
+                    <div class="op-content">
+                      {#if op.requiresReview}
+                        <div class="queue-step-error">{op.requiresReview}</div>
+                        <button class="job-btn" onclick={() => app.acknowledgeQueueReview(op.id)}>{t("queue.reviewAcknowledged")}</button>
+                      {/if}
+                      {#if queueView === "compact"}
+                        <button class="queue-row-select" aria-pressed={selectedOp?.id === op.id} onclick={() => { selectedQueueId = op.id; showAllOutputs = false; }}>
+                          <span class="queue-row-main">{basename(opDisplaySources(op)[0] ?? op.destinations[0] ?? op.title)}</span>
+                          <span class="queue-row-meta">
+                            {#if previousStepState(op.id) === "failed"}<span class="queue-previous-state--failed">{t("queue.stepFailed")}</span>
+                            {:else if previousStepState(op.id) === "skipped"}<span class="queue-previous-state">{t("queue.stepBlocked")}</span>
+                            {:else if opAccentBlocked(op) || blockingConflicts.some(c => c.opAId === op.id || c.opBId === op.id)}<span class="queue-previous-state--failed">{t("queue.stepNeedsReview")}</span>
+                            {:else if dependencyLabel(op)}{t("queue.chainedAfter", { n: dependencyLabel(op) ?? "" })}
+                            {:else}{t("queue.readyStep")}{/if}
+                          </span>
+                        </button>
+                      {:else}
+                      <div class="op-header">
+                        <div class="op-title" title={op.title}>{op.title}</div>
+                        <div class="op-meta">
+                          {#if previousStepState(op.id) === "failed"}<span class="queue-previous-state queue-previous-state--failed">{t("queue.stepFailed")}</span>
+                          {:else if previousStepState(op.id) === "skipped"}<span class="queue-previous-state">{t("queue.stepBlocked")}</span>{/if}
+                          {#if batchLabel(op)}
+                            <div class="op-batch" title={op.batchTitle}>
+                              <span class="op-batch-mark" aria-hidden="true"></span>
+                              <span>{batchLabel(op)}</span>
+                            </div>
+                          {/if}
+                          {#if dependencyLabel(op)}
+                            <div class="op-chain" title={t("queue.parallelDisabledDeps")} aria-label={t("queue.parallelDisabledDeps")}>
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                              </svg>
+                              <span>{t("queue.chainedAfter", { n: dependencyLabel(op) ?? "" })}</span>
+                            </div>
+                          {/if}
+                        </div>
+                      </div>
+                      {#if opFlowRows(op).length > 0}
+                        <div class="op-flows">
+                          {#each opFlowRows(op) as flow}
+                            <div class="op-flow" title={flowTitle(flow)}>
+                              {#if flow.source}
+                                <span
+                                  class="op-flow-name op-flow-source"
+                                  class:op-flow-name--removed={opRemovesPath(op, flow.source)}
+                                >{basename(flow.source)}</span>
+                              {/if}
+                              {#if flow.target}
+                                {#if flow.source}
+                                  <span class="op-flow-arrow" aria-hidden="true">-&gt;</span>
+                                {/if}
+                                <span class="op-flow-name op-flow-target">{basename(flow.target)}</span>
+                                {#if flow.extraTargets > 0}
+                                  <span class="op-flow-more">+{flow.extraTargets}</span>
+                                {/if}
+                              {/if}
+                            </div>
+                          {/each}
+                          {#if opHiddenSourceCount(op) > 0}
+                            <span class="op-flow-more">+{opHiddenSourceCount(op)}</span>
+                          {/if}
+                        </div>
+                      {/if}
+                      {#if opFlowRows(op).length === 0 && op.destinations.length > 0 && op.kind !== "delete"}
+                        <div class="op-flows">
+                          <div class="op-flow" title={op.destinations[0]}>
+                            <span class="op-flow-arrow" aria-hidden="true">-&gt;</span>
+                            <span class="op-flow-name op-flow-target">{basename(op.destinations[0])}</span>
+                          </div>
+                        </div>
+                      {/if}
+                      {#if opAccentBlocked(op)}
+                        <div class="op-accent-block">
+                          <span class="op-accent-msg">⚠ {t("accents.queueBlocked")}</span>
+                          <button class="op-deaccent-btn" onclick={() => onDeaccentOp?.(op)}>
+                            {t("accents.deaccentAction")}
+                          </button>
+                        </div>
+                      {/if}
+                      {#if app.queueStepErrors[op.id]}
+                        <div class="queue-step-error" title={app.queueStepErrors[op.id]}>{app.queueStepErrors[op.id]}</div>
+                      {:else if previousStepState(op.id) === "failed" && jobForStep(op.id)}
+                        <div class="queue-step-error">{jobForStep(op.id)?.resultMessage}</div>
+                        <button class="job-btn queue-error-action" onclick={() => showJob(jobForStep(op.id)!.id)}>{t("queue.viewError")}</button>
+                      {/if}
+                      {/if}
+                    </div>
+
+                    <!-- Controls -->
+                    <div class="op-controls">
+                      <button
+                        class="icon-btn"
+                        onclick={() => app.moveOpQueueItem(i, -1)}
+                        disabled={i === 0}
+                        title="Move up"
+                        aria-label="Move up"
+                      >
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                          <path d="M2 7L5 3L8 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                      </button>
+                      <button
+                        class="icon-btn"
+                        onclick={() => app.moveOpQueueItem(i, 1)}
+                        disabled={i === app.opQueue.length - 1}
+                        title="Move down"
+                        aria-label="Move down"
+                      >
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                          <path d="M2 3L5 7L8 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                      </button>
+                      <button
+                        class="icon-btn icon-btn--remove"
+                        onclick={() => { const n = app.removeFromQueue(op.id); if (n > 1) app.notify("info", t("queue.removedWithDependents", { count: n })); }}
+                        title={t("queue.remove")}
+                        aria-label={t("queue.remove")}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                          <path d="M2 2L8 8M8 2L2 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+              {#if queueView === "compact" && selectedOp}
+                <aside class="queue-inspector" aria-label={t("queue.stepDetails")}>
+                  <div class="queue-inspector-heading">
+                    <div><span class="queue-inspector-kicker">{t("queue.selectedStep", { n: stepNumberForId(selectedOp.id) })}</span><strong>{kindLabel(selectedOp.kind)}</strong></div>
+                    {#if previousStepState(selectedOp.id) === "failed"}<span class="queue-previous-state queue-previous-state--failed">{t("queue.stepFailed")}</span>
+                    {:else if previousStepState(selectedOp.id) === "skipped"}<span class="queue-previous-state">{t("queue.stepBlocked")}</span>{/if}
+                  </div>
+                  {#if batchLabel(selectedOp)}<div class="queue-inspector-batch">{batchLabel(selectedOp)}</div>{/if}
+                  <div class="queue-inspector-scroll">
+                    {#if opDisplaySources(selectedOp).length}
+                      <div class="queue-detail-group"><span>{t("queue.sources")}</span>{#each opDisplaySources(selectedOp) as path}<div class="queue-detail-path" title={path}>{path}</div>{/each}</div>
+                    {/if}
+                    {#if selectedOp.destinations.length}
+                      <div class="queue-detail-group"><span>{t("queue.destinations")}</span>{#each selectedOp.destinations as path}<div class="queue-detail-path" title={path}>{path}</div>{/each}</div>
+                    {/if}
+                    {#if app.resolvedOutputsFor(selectedOp.id).length}
+                      {@const outputs = app.resolvedOutputsFor(selectedOp.id)}
+                      <div class="queue-detail-group"><span>{t("queue.expectedOutputs")} · {outputs.length}</span>{#each outputs.slice(0, showAllOutputs ? undefined : 3) as ghost}<div class="queue-detail-path" title={ghost.path}>{ghost.path}</div>{/each}
+                        {#if outputs.length > 3}<button class="queue-detail-more" onclick={() => showAllOutputs = !showAllOutputs}>{showAllOutputs ? t("queue.showFewerOutputs") : t("queue.showOutputs", { count: outputs.length - 3 })}</button>{/if}
+                      </div>
+                    {/if}
+                    {#if dependencyLabel(selectedOp)}<div class="queue-detail-group"><span>{t("queue.relationships")}</span><div>{t("queue.chainedAfter", { n: dependencyLabel(selectedOp) ?? "" })}</div></div>{/if}
+                    {#if app.queuePlan.hardSuccessors.get(selectedOp.id)?.size}
+                      <div class="queue-detail-group"><span>{t("queue.usedBy")}</span><div class="queue-inspector-links">
+                        {#each Array.from(app.queuePlan.hardSuccessors.get(selectedOp.id) ?? []) as id}
+                          <button onclick={() => { selectedQueueId = id; showAllOutputs = false; }}>{t("queue.selectedStep", { n: stepNumberForId(id) })}</button>
+                        {/each}
+                      </div></div>
+                    {/if}
+                    {#if app.queueStepErrors[selectedOp.id] || (previousStepState(selectedOp.id) === "failed" && jobForStep(selectedOp.id))}
+                      <div class="queue-detail-group queue-detail-error"><span>{t("queue.errorDetails")}</span><div>{app.queueStepErrors[selectedOp.id] ?? jobForStep(selectedOp.id)?.resultMessage}</div>
+                        {#if jobForStep(selectedOp.id)}<button class="job-btn" onclick={() => showJob(jobForStep(selectedOp!.id)!.id)}>{t("queue.viewError")}</button>{/if}
+                      </div>
+                    {/if}
+                    {#if opAccentBlocked(selectedOp)}<div class="op-accent-block"><span class="op-accent-msg">⚠ {t("accents.queueBlocked")}</span><button class="op-deaccent-btn" onclick={() => onDeaccentOp?.(selectedOp!)}>{t("accents.deaccentAction")}</button></div>{/if}
+                  </div>
+                </aside>
+              {/if}
+              </div>
+
             {/if}
           </div>
         {/if}
 
         <!-- ── ACTIVE / COMPLETED JOBS ── -->
-        {#if hasJobs}
-          {#if hasQueue}
+        {#if displayedJobs.length > 0 || (app.queueRunning && selectedLiveStep)}
+          <div class="jobs-history">
+          {#if app.queueRunning && selectedLiveStep}
+            <div class="live-inspector-heading">
+              <span class="section-label">{t("queue.liveSelectedStep", { number: selectedLiveStep.op.originalStep ?? app.queueExecutionSteps.findIndex(step => step.op.id === selectedLiveStep!.op.id) + 1 })}</span>
+              <strong title={selectedLiveStep.op.sources[0] ?? selectedLiveStep.op.deletes[0] ?? ""}>{kindLabel(selectedLiveStep.op.kind)} · {basename(selectedLiveStep.op.sources[0] ?? selectedLiveStep.op.deletes[0] ?? "")}</strong>
+            </div>
+            {#if !selectedLiveJob}
+              <div class="live-inspector-empty">{t(selectedLiveStep.state === "pending" ? "queue.stepPending" : selectedLiveStep.state === "skipped" ? "queue.stepBlocked" : selectedLiveStep.state === "failed" ? "queue.stepFailed" : selectedLiveStep.state === "running" ? "queue.stepRunning" : "queue.stepSucceeded")}{#if app.queueStepErrors[selectedLiveStep.op.id]}<div class="queue-step-error">{app.queueStepErrors[selectedLiveStep.op.id]}</div>{/if}</div>
+            {/if}
+          {:else if hasQueue}
             <div class="section-label" style="margin-top: 4px">{t("jobsPanel.title")}</div>
           {/if}
 
-          {#each app.jobs as job (job.id)}
-            <div class="job-entry" class:done={job.done} class:failed={job.done && !job.success}>
+            {#each displayedJobs as job (job.id)}
+            {#if app.queueRunning && selectedLiveJob?.id !== job.id}
+              <div class="section-label">{t("queue.otherOperation")}</div>
+            {/if}
+            <div id={`queue-job-${job.id}`} class="job-entry" class:job-entry--selected={app.queueRunning && selectedLiveJob?.id === job.id} class:done={job.done} class:failed={job.done && !job.success}>
 
               <!-- ── Title row ── -->
               <div class="job-row">
@@ -940,7 +1157,7 @@
                   {/if}
                 </span>
                 {#if job.done}
-                  {#if !job.success && job.retryQueuedOp && !job.retried}
+                  {#if canRetryFailedJob(job, app.opQueue)}
                     <button
                       class="job-btn"
                       onclick={() => app.retryFailedJob(job.id)}
@@ -953,6 +1170,7 @@
 
               {#if !job.done}
                 <!-- ── Progress bar (full-width) + percentage ── -->
+                {#if app.queueRunning && selectedLiveJob?.id === job.id}<div class="live-progress-label">{t("queue.stepProgress")}</div>{/if}
                 <div class="job-progress-bar-row">
                   <div class="progress-track">
                     <div
@@ -967,6 +1185,9 @@
                 <!-- ── Current item label ── -->
                 {#if job.message && !job.paused}
                   <div class="job-current-item">{job.message}</div>
+                {/if}
+                {#if job.logs[job.logs.length - 1]?.includes("reintento automatico")}
+                  <div class="job-retrying">{job.logs[job.logs.length - 1]}</div>
                 {/if}
 
                 <!-- ── Pause banner ── -->
@@ -1015,6 +1236,7 @@
 
             </div>
           {/each}
+          </div>
         {/if}
 
       </div>
@@ -1028,7 +1250,7 @@
     flex-shrink: 0;
     border-top: 1px solid var(--line);
     background: var(--surface);
-    max-height: 340px;
+    max-height: min(52vh, 480px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -1040,20 +1262,21 @@
   .jobs-header {
     display: flex;
     align-items: center;
-    height: 32px;
+    min-height: 36px;
+    flex-wrap: wrap;
     flex-shrink: 0;
     padding: 0 7px 0 0;
     gap: 6px;
-    overflow: hidden;
+    padding-block: 3px;
   }
 
   .jobs-toggle {
     display: flex;
     align-items: center;
     gap: 6px;
-    flex: 1;
+    flex: 0 0 auto;
     min-width: 0;
-    height: 100%;
+    min-height: 28px;
     padding: 0 8px;
     background: none;
     border: none;
@@ -1101,12 +1324,16 @@
   .badge--queue { background: #8b5cf6; }
   .badge--warn  { background: #f59e0b; }
 
+  .jobs-summary { flex: 1 1 80px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
   .jobs-actions {
     display: flex;
     align-items: center;
     gap: 5px;
     min-width: 0;
     flex-shrink: 0;
+    flex-wrap: wrap;
+    padding-bottom: 2px;
   }
 
   .jobs-run-actions {
@@ -1199,6 +1426,18 @@
     scrollbar-color: var(--line-strong) transparent;
   }
 
+  .jobs-body--split { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr); align-items: start; gap: 10px 14px; }
+  .queue-overview { grid-column: 1 / -1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 5px 8px 8px; border-bottom: 1px solid var(--line); }
+  .queue-overview-label, .queue-overview-counts { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+  .queue-overview-label strong { color: var(--text); font-weight: 650; }
+  .queue-overview-progress { flex: 1; min-width: 60px; max-width: 280px; height: 3px; overflow: hidden; border-radius: 999px; background: var(--line-strong); }
+  .queue-overview-progress > div { height: 100%; background: color-mix(in srgb, var(--accent) 65%, var(--text-muted)); transition: width .4s ease; }
+  .queue-overview-counts { flex-wrap: wrap; }
+  @media (max-width: 850px) { .queue-overview { flex-wrap: wrap; gap: 6px 10px; } .queue-overview-progress { max-width: none; } }
+  .jobs-history { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .jobs-empty { padding: 16px 8px; color: var(--text-muted); font-size: 12px; text-align: center; }
+  .jobs-body--split .jobs-history { max-height: 310px; overflow-y: auto; }
+
   .section {
     display: flex;
     flex-direction: column;
@@ -1215,12 +1454,49 @@
   }
 
   /* ── Queue list + cards ── */
-  .queue-section-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    min-height: 22px;
+  .queue-view-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 0 0 auto; }
+  .queue-heading-hint { color: var(--text-muted); font-size: 10.5px; }
+  .queue-scheduling { border: 1px solid var(--line); border-radius: 6px; background: var(--surface-alt); color: var(--text-muted); font-size: 11px; }
+  .queue-scheduling summary { display: flex; align-items: center; gap: 7px; min-height: 26px; padding: 3px 8px; cursor: pointer; list-style: none; }
+  .queue-scheduling summary::-webkit-details-marker { display: none; }
+  .queue-scheduling summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .queue-scheduling-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 15px; height: 15px; border-radius: 50%; color: var(--accent); background: var(--accent-soft); font-size: 10px; font-weight: 800; }
+  .queue-scheduling-action { margin-left: auto; color: var(--accent); white-space: nowrap; font-weight: 650; }
+  .queue-scheduling-content { display: flex; flex-direction: column; gap: 5px; max-height: 160px; overflow: auto; padding: 0 8px 8px; }
+  .queue-scheduling--blocking { border-color: color-mix(in srgb, var(--error, #ef4444) 45%, var(--line)); color: var(--text); }
+  .queue-scheduling--blocking .queue-scheduling-icon { color: var(--error, #ef4444); background: color-mix(in srgb, var(--error, #ef4444) 12%, transparent); }
+  .queue-view-switch { display: flex; padding: 2px; gap: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-alt); }
+  .queue-view-switch button { border: 0; background: transparent; color: var(--text-muted); padding: 4px 9px; border-radius: 5px; font-size: 11px; cursor: pointer; }
+  .queue-view-switch button.active { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+  .queue-workspace--compact { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(300px, 1.15fr); gap: 10px; align-items: stretch; }
+  .queue-workspace--compact .queue-list { max-height: 245px; overflow-y: auto; padding: 0; gap: 3px; scrollbar-width: thin; }
+  .queue-card--compact { padding: 3px 5px 3px 0; min-height: 42px; }
+  .queue-card--compact .op-step { width: 64px; padding: 3px 2px; gap: 1px; }
+  .queue-card--compact .op-step-num { font-size: 14px; }
+  .queue-card--compact .op-step-kind { font-size: 8px; }
+  .queue-card--compact .op-controls { flex-direction: row; gap: 1px; }
+  .queue-card--compact.queue-card--selected { border-color: var(--accent); border-left-color: var(--kind-color); background: color-mix(in srgb, var(--accent) 10%, var(--surface-alt)); }
+  .queue-row-select { min-width: 0; width: 100%; border: 0; background: none; text-align: left; display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 0; }
+  .queue-row-main { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 12px; font-weight: 600; }
+  .queue-row-meta { flex: none; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+  .queue-inspector { min-width: 0; display: flex; flex-direction: column; gap: 6px; max-height: 245px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-alt); }
+  .queue-inspector-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .queue-inspector-heading div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .queue-inspector-heading strong { color: var(--text); font-size: 13px; }
+  .queue-inspector-kicker { color: var(--accent); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+  .queue-inspector-batch { color: var(--text-muted); font-size: 10px; }
+  .queue-inspector-scroll { overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 7px; scrollbar-width: thin; }
+  .queue-detail-group { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--text); overflow-wrap: anywhere; }
+  .queue-detail-group > span { color: var(--text-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+  .queue-detail-path { overflow-wrap: anywhere; }
+  .queue-detail-more, .queue-inspector-links button { align-self: flex-start; border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 11px; cursor: pointer; }
+  .queue-inspector-links { display: flex; flex-wrap: wrap; gap: 8px; }
+  .queue-detail-error, .queue-compact-warning { color: var(--error, #ef4444); }
+  .queue-compact-warning { padding: 5px 8px; font-size: 11px; border: 1px solid color-mix(in srgb, var(--error, #ef4444) 35%, var(--line)); border-radius: 5px; }
+  @media (max-width: 850px) {
+    .queue-workspace--compact, .jobs-body--split { display: flex; flex-direction: column; }
+    .queue-workspace--compact .queue-list, .queue-inspector { max-height: 180px; }
+    .queue-row-meta { display: none; }
   }
 
   .queue-map-switch {
@@ -1289,6 +1565,40 @@
     transition: padding-left 140ms ease;
   }
 
+  .queue-live-filters { display: flex; gap: 4px; flex-wrap: wrap; padding: 3px 0; }
+  .queue-live-filters button, .queue-show-more {
+    border: 1px solid var(--line); border-radius: 5px; background: transparent;
+    color: var(--text-muted); font-size: 11px; padding: 3px 8px; cursor: pointer;
+  }
+  .queue-live-filters button.active { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+  .queue-live-list { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+  .queue-live-step { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-alt); font-size: 11px; color: var(--text-muted); }
+  .queue-live-number { flex: none; min-width: 20px; text-align: center; font-variant-numeric: tabular-nums; }
+  .queue-live-kind { flex: none; font-weight: 700; }
+  .queue-live-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .queue-live-status { flex: none; font-weight: 650; white-space: nowrap; }
+  .queue-live-progress { width: 55px; height: 4px; flex: none; overflow: hidden; border-radius: 4px; background: var(--line); }
+  .queue-live-progress span { display: block; height: 100%; background: var(--accent); }
+  .queue-live-step { cursor: pointer; }
+  .queue-live-step:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .queue-live-step--selected { background: var(--accent-soft); border-color: var(--accent); }
+  .live-inspector-heading { display: flex; flex-direction: column; gap: 5px; padding: 5px 3px 3px; min-width: 0; }
+  .live-inspector-heading strong { color: var(--text); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .live-inspector-empty { padding: 12px; color: var(--text-muted); background: var(--surface-alt); border: 1px solid var(--line); border-radius: 5px; font-size: 12px; }
+  .queue-live-step--running { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .queue-live-step--failed { border-color: color-mix(in srgb, var(--error, #ef4444) 55%, var(--line)); color: var(--error, #ef4444); }
+  .queue-live-step--blocked { color: #b45309; }
+  .queue-live-empty { padding: 8px; color: var(--text-muted); font-size: 11px; }
+  .queue-step-error { color: var(--error, #ef4444); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+  .queue-live-step .queue-step-error { max-width: 25%; white-space: nowrap; }
+  .queue-previous-state { color: #b45309; font-size: 10px; font-weight: 700; }
+  .queue-previous-state--failed { color: var(--error, #ef4444); }
+  .queue-result-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--text); font-size: 12px; }
+  .job-retrying { color: #b45309; font-size: 11px; overflow-wrap: anywhere; }
+  .queue-error-action { align-self: flex-start; margin-top: 4px; }
+
+  .queue-invalid { color: var(--danger, #e5484d); font-size: 12px; margin: 6px 0; }
+
   .queue-relation-legend {
     display: flex;
     align-items: center;
@@ -1320,13 +1630,14 @@
   .queue-relation-key--dependency { color: var(--accent); }
   .queue-relation-key--ordering { color: color-mix(in srgb, var(--text-muted) 82%, var(--text)); }
   .queue-relation-key--blocking { color: var(--danger, #e5484d); }
-  .queue-relation-key--parallel { color: #b45309; }
 
   .queue-relation-map {
     position: absolute;
     inset: 0;
     z-index: 0;
-    overflow: visible;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
     pointer-events: none;
   }
 
@@ -1356,6 +1667,13 @@
     opacity: 0.86;
     pointer-events: none;
   }
+
+  .queue-relation-arrow { pointer-events: none; }
+  .queue-relation-arrow--dependency { fill: var(--accent); }
+  .queue-relation-arrow--ordering { fill: var(--text-muted); }
+  .queue-relation-arrow--blocking { fill: var(--danger, #e5484d); }
+  .queue-relation-arrow--parallel { fill: var(--text-muted); }
+  .queue-relation-help { font-size: 10px; color: var(--text-muted); }
 
   .queue-relation-path--dependency {
     stroke: var(--accent);
@@ -1390,7 +1708,7 @@
   }
 
   .queue-relation-path--parallel {
-    stroke: #b45309;
+    stroke: var(--text-muted);
   }
 
   .queue-relation-path--parallel {
@@ -1398,7 +1716,7 @@
   }
 
   .queue-relation-dot--parallel {
-    fill: #b45309;
+    fill: var(--text-muted);
   }
 
   .queue-plan-summary {
@@ -1543,7 +1861,7 @@
 
   .queue-card--chained {
     border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
-    border-left-color: color-mix(in srgb, var(--accent) 88%, var(--kind-color));
+    border-left-color: var(--kind-color);
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 6%, transparent);
 
     &:hover {
@@ -1573,7 +1891,7 @@
   /* Step block: prominent number + action on the left of each card */
   .op-step {
     flex-shrink: 0;
-    width: 50px;
+    width: 64px;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1603,8 +1921,8 @@
   }
 
   .op-step--chained {
-    border-color: color-mix(in srgb, var(--accent) 42%, transparent);
-    box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 44%, transparent);
+    border-color: color-mix(in srgb, var(--kind-color) 42%, transparent);
+    box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--kind-color) 44%, transparent);
   }
 
   .op-step--batched {
@@ -1967,6 +2285,10 @@
 
     &.failed { border-color: color-mix(in srgb, var(--error, #ef4444) 40%, var(--line)); }
   }
+
+  .job-entry--selected { border-color: color-mix(in srgb, var(--accent) 36%, var(--line)); background: color-mix(in srgb, var(--accent) 4%, var(--surface-alt)); padding: 12px; }
+  .job-entry--selected .progress-track { height: 8px; }
+  .live-progress-label { color: var(--text-muted); font-size: 10px; font-weight: 650; }
 
   .job-row {
     display: flex;

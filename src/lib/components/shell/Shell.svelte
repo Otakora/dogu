@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { runTransferBatch } from "../../utils/transfer-batch.js";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount, onDestroy } from "svelte";
@@ -42,6 +43,8 @@
     joinPath,
     stemOf,
   } from "../../utils/ghosts.js";
+  import { extractionDestination, extractionGhosts } from "../../utils/extraction-ghosts.js";
+  import { predictedCueTracks, predictsEmptyGhostContainer } from "../../utils/chd-ghosts.js";
 
   import Sidebar from "./Sidebar.svelte";
   import Pane from "./Pane.svelte";
@@ -49,6 +52,7 @@
   import ConnectionManager from "../connections/ConnectionManager.svelte";
   import { openTerminalAt } from "../../utils/terminal.js";
   import JobsPanel from "../dialogs/JobsPanel.svelte";
+  import StatusBar from "./StatusBar.svelte";
   import ConfirmDialog from "../dialogs/ConfirmDialog.svelte";
   import SettingsDialog from "../dialogs/SettingsDialog.svelte";
   import UpdateDialog from "../dialogs/UpdateDialog.svelte";
@@ -101,30 +105,59 @@
     window.addEventListener("mouseup", onUp);
   }
 
+  function resizeSidebarWithKeyboard(e: KeyboardEvent) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    sidebarWidth = Math.max(140, Math.min(500, sidebarWidth + (e.key === "ArrowRight" ? 10 : -10)));
+    localStorage.setItem("dogu-sidebar-width", String(Math.round(sidebarWidth)));
+  }
+
   // ── Pane splitter resize ──────────────────────────────────
-  let splitPercent = $state(50);
+  let sideSplitPercent = $state(50);
+  let stackedSplitPercent = $state(50);
+  const splitPercent = $derived(app.splitOrientation === "stacked" ? stackedSplitPercent : sideSplitPercent);
   let paneAreaEl = $state<HTMLElement | undefined>(undefined);
+
+  function setSplitPercent(value: number, orientation: "stacked" | "side-by-side") {
+    const percent = Math.max(20, Math.min(80, value));
+    if (orientation === "stacked") stackedSplitPercent = percent;
+    else sideSplitPercent = percent;
+  }
+
+  function persistSplitPercent(orientation: "stacked" | "side-by-side") {
+    const key = orientation === "stacked" ? "dogu-split-stack-percent" : "dogu-split-percent";
+    localStorage.setItem(key, String(Math.round(orientation === "stacked" ? stackedSplitPercent : sideSplitPercent)));
+  }
 
   function startPaneSplitResize(e: MouseEvent) {
     e.preventDefault();
-    const startX = e.clientX;
+    const orientation = app.splitOrientation;
+    const stacked = orientation === "stacked";
+    const start = stacked ? e.clientY : e.clientX;
     const startPct = splitPercent;
-    const areaW = paneAreaEl?.getBoundingClientRect().width ?? 800;
-
+    const rect = paneAreaEl?.getBoundingClientRect();
+    const size = Math.max(1, stacked ? (rect?.height ?? 800) : (rect?.width ?? 800));
     function onMove(ev: MouseEvent) {
-      const delta = ev.clientX - startX;
-      const deltaPct = (delta / areaW) * 100;
-      splitPercent = Math.max(20, Math.min(80, startPct + deltaPct));
+      const current = stacked ? ev.clientY : ev.clientX;
+      setSplitPercent(startPct + (current - start) / size * 100, orientation);
     }
-
     function onUp() {
-      localStorage.setItem("dogu-split-percent", String(Math.round(splitPercent)));
+      persistSplitPercent(orientation);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     }
-
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+  }
+
+  function resizePaneWithKeyboard(e: KeyboardEvent) {
+    const stacked = app.splitOrientation === "stacked";
+    const decrease = stacked ? e.key === "ArrowUp" : e.key === "ArrowLeft";
+    const increase = stacked ? e.key === "ArrowDown" : e.key === "ArrowRight";
+    if (!decrease && !increase) return;
+    e.preventDefault();
+    setSplitPercent(splitPercent + (increase ? 5 : -5), app.splitOrientation);
+    persistSplitPercent(app.splitOrientation);
   }
 
   // ── Dialog state ─────────────────────────────────────────
@@ -136,7 +169,6 @@
   let discImageState = $state<{ mode: DiscImageMode; sources: string[] } | null>(null);
   let toolScreenOpen = $state(false);
   let m3uDirs = $state<string[] | null>(null);
-  let startupReady = $state(false);
 
   // ── Job / queue ID counters ───────────────────────────────
   let _jobSeq = 0;
@@ -161,7 +193,7 @@
       app.addToQueue(op);
       app.notify("info", t("queue.operationQueued"));
     } else {
-      op.execute();
+      void op.execute(undefined, op);
     }
   }
 
@@ -178,34 +210,46 @@
 
   onMount(async () => {
     const stored = localStorage.getItem("dogu-sidebar-width");
-    if (stored) sidebarWidth = Math.max(140, Math.min(500, parseInt(stored, 10)));
+    if (stored && Number.isFinite(Number(stored))) sidebarWidth = Math.max(140, Math.min(500, Number(stored)));
 
     const storedSplit = localStorage.getItem("dogu-split-percent");
-    if (storedSplit) splitPercent = Math.max(20, Math.min(80, parseInt(storedSplit, 10)));
+    if (storedSplit && Number.isFinite(Number(storedSplit))) setSplitPercent(Number(storedSplit), "side-by-side");
+    const storedStackedSplit = localStorage.getItem("dogu-split-stack-percent");
+    if (storedStackedSplit && Number.isFinite(Number(storedStackedSplit))) setSplitPercent(Number(storedStackedSplit), "stacked");
 
-    try {
-      const [vols, kf, caps, tools] = await Promise.all([
-        invoke<VolumeDto[]>("list_volumes"),
-        invoke<KnownFoldersDto>("get_known_folders"),
-        invoke<CompressionCapabilitiesDto>("get_compression_capabilities"),
-        invoke<ToolStatusDto[]>("check_tools"),
-      ]);
-      app.setVolumes(vols);
-      app.setKnownFolders(kf);
-      compressionCapabilities = caps;
+    // Populate startup information independently so a slow disk or tool probe
+    // never prevents the window from becoming usable.
+    void invoke<VolumeDto[]>("list_volumes").then(app.setVolumes).catch(() => {});
+    void invoke<KnownFoldersDto>("get_known_folders").then(app.setKnownFolders).catch(() => {});
+    void invoke<CompressionCapabilitiesDto>("get_compression_capabilities")
+      .then(caps => { compressionCapabilities = caps; }).catch(() => {});
+    void invoke<ToolStatusDto[]>("check_tools").then(tools => {
       app.setToolStatus(tools);
-
-      // Every launch we re-check tools. Auto-open the preparation screen only
-      // when a *required* tool is missing/not runnable; optional ones (e.g.
-      // DolphinTool — nod still covers RVZ) are surfaced discreetly in
-      // Settings/About instead of nagging on every launch.
       if (app.toolProblems.some(p => !p.optional)) toolScreenOpen = true;
-    } catch {
-      // System info unavailable
-    } finally {
-      startupReady = true;
-      app.maybeAutoCheckForUpdates();
-    }
+    }).catch(() => {});
+
+    const initialProfilesRevision = app.profilesRevision;
+    const initialSessionsRevision = app.sessionsRevision;
+    void invoke<import("../../types/index.js").ConnectionProfileDto[]>("list_connection_profiles")
+      .then(profiles => { if (app.profilesRevision === initialProfilesRevision) app.setConnectionProfiles(profiles); })
+      .catch(error => { if (app.profilesRevision === initialProfilesRevision) app.setConnectionProfilesError(); app.notify("error", String(error)); });
+    void invoke<import("../../types/index.js").ActiveConnectionDto[]>("list_active_connections")
+      .then(connections => { if (app.sessionsRevision === initialSessionsRevision) app.setActiveConnections(connections); })
+      .catch(error => app.notify("error", String(error)));
+
+    // Render the application before starting the network check.
+    requestAnimationFrame(() => app.maybeAutoCheckForUpdates());
+
+    unlisten.push(await listen<string>("remote-edit-started", () => {
+      app.notify("info", t("shell.remoteEditStarted"));
+    }));
+    unlisten.push(await listen<string>("remote-edit-saved", ({ payload }) => {
+      refreshVisibleLocations([payload]);
+      app.notify("success", t("shell.remoteEditSaved"));
+    }));
+    unlisten.push(await listen<string>("remote-edit-error", ({ payload }) => {
+      app.notify("error", payload);
+    }));
 
     unlisten.push(await listen<JobProgressDto>("job-progress", ({ payload }) => {
       app.updateJobProgress(payload.jobId, payload.progress * 100, payload.message);
@@ -214,8 +258,13 @@
       app.appendJobLog(payload.jobId, payload.line);
     }));
     unlisten.push(await listen<JobFinishedDto>("job-finished", ({ payload }) => {
+      const op = app.jobs.find(job => job.id === payload.jobId)?.retryQueuedOp;
       app.finishJob(payload.jobId, payload.success, payload.message);
-      if (payload.success) refreshContent();
+      if (op) {
+        const paths = [...op.destinations, ...op.produces.map(item => dirnameOf(item.path)), ...op.deletes.map(dirnameOf)];
+        if (paths.length) refreshVisibleLocations(paths);
+        else if (payload.success) refreshContent();
+      } else if (payload.success) refreshContent();
     }));
     unlisten.push(await listen<JobPausedDto>("job-paused", ({ payload }) => {
       app.pauseJob(payload);
@@ -256,6 +305,14 @@
 
   // ── Keyboard shortcuts ────────────────────────────────────
   function handleAppKey(e: KeyboardEvent) {
+    if (!e.defaultPrevented && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest(".modal-backdrop") && !app.settingsOpen && !app.connectionManagerOpen) {
+        e.preventDefault();
+        focusedPane()?.openQuickFind();
+      }
+      return;
+    }
     if (e.key === "F5") { e.preventDefault(); focusedPane()?.refresh(); return; }
 
     if (e.key === "Escape") {
@@ -301,10 +358,56 @@
   // ── Rename commit ─────────────────────────────────────────
   function handleRenameCommitRaw(e: Event) {
     const { path, newName } = (e as CustomEvent<{ path: string; newName: string }>).detail;
+    const name = newName.trim();
     app.cancelRename();
-    invoke("rename_path", { path, newName })
-      .then(() => focusedPane()?.refresh())
-      .catch(err => app.notify("error", t("shell.renameFailed", { error: String(err) })));
+    if (!name || name === "." || name === ".." || /[\\/\x00]/.test(name)) { app.notify("error", t("shell.invalidRename")); return; }
+    if (name === basenameOf(path)) return;
+    if (!app.queueMode && !isQueueBackedPath(path)) {
+      invoke("rename_path", { path, newName: name })
+        .then(() => focusedPane()?.refresh())
+        .catch(err => app.notify("error", t("shell.renameFailed", { error: String(err) })));
+      return;
+    }
+    void enqueueRename(path, name);
+  }
+
+  async function enqueueRename(path: string, newName: string) {
+    const target = joinPath(dirnameOf(path), newName);
+    try {
+      let occupied = await invoke<boolean>("queue_path_exists", { path: target });
+      const targetKey = normalizePath(target);
+      for (const previous of app.opQueue) {
+        if (previous.deletes.some(deleted => {
+          const key = normalizePath(deleted);
+          return targetKey === key || targetKey.startsWith(key + "/");
+        })) occupied = false;
+        if (app.resolvedOutputsFor(previous.id).some(output => normalizePath(output.path) === targetKey)) occupied = true;
+      }
+      if (occupied) { app.notify("error", t("shell.queuedRenameOccupied")); return; }
+      const id = newQueueId();
+      const ghost = app.queueGhosts.find(item => normalizePath(item.path) === normalizePath(path));
+      const entry = app.panes.flatMap(pane => pane.tabs.flatMap(tab => tab.entries)).find(item => normalizePath(item.path) === normalizePath(path));
+      const op: QueuedOp = {
+        id, title: t("menu.rename"), kind: "rename", sources: [path], destinations: [dirnameOf(path)],
+        deletes: [path], produces: [buildGhost(target, ghost?.isDir ?? entry?.isDir ?? false, id, false)],
+        dependsOn: [], overwrite: false, renameOnConflict: false,
+        execute: async (providedJobId, retryQueuedOp) => {
+          const jobId = providedJobId ?? newJobId();
+          app.startJob(jobId, t("menu.rename"), { retryQueuedOp });
+          try {
+            await invoke("rename_path", { path, newName });
+            app.finishJob(jobId, true, "");
+            refreshVisibleLocations([dirnameOf(path)]);
+            return true;
+          } catch (error) {
+            app.finishJob(jobId, false, String(error));
+            return false;
+          }
+        },
+      };
+      app.addToQueue(op);
+      app.notify("info", t("queue.operationQueued"));
+    } catch (error) { app.notify("error", t("shell.renameFailed", { error: String(error) })); }
   }
 
   // ── Delete ────────────────────────────────────────────────
@@ -344,7 +447,7 @@
     const p = normalizePath(parent);
     const c = normalizePath(child);
     if (!p) return c === p;
-    return c === p || c.startsWith(`${p}/`);
+    return c === p || c.startsWith(p.endsWith("/") ? p : `${p}/`);
   }
 
   function compactDeletePaths(paths: string[]): string[] {
@@ -410,14 +513,55 @@
     const cb = app.clipboard;
     const dest = app.currentPath;
     if (!cb || !dest) return;
-
     const isCut = cb.operation === "cut";
     const paths = [...cb.paths];
-
-    if (isCut) app.setClipboard(null);
-
     const items = paths.map((path) => ({ path, isDir: !/\.[^./\\]+$/.test(path) }));
-    enqueueOrRun(buildTransferOp(items, dest, isCut ? "move" : "copy"));
+    void prepareTransfer(items, dest, isCut ? "move" : "copy", () => {
+      if (isCut) app.setClipboard(null);
+    });
+  }
+
+  async function prepareTransfer(items: FileTransferItem[], dest: string, operation: FileTransferOperation, onStart?: () => void) {
+    if (isNoOpFileTransfer(items, dest, operation) || isRecursiveFileTransfer(items, dest)) return;
+    const start = (overwrite: boolean) => {
+      onStart?.();
+      const batchId = newBatchId();
+      const title = operation === "move" ? t("shell.moving") : t("shell.copying");
+      const ops = items.map((item, index) => withBatch(
+        buildTransferOp([item], dest, operation, overwrite), batchId, title, index + 1, items.length,
+      ));
+      if (app.queueMode || transferTouchesGhostTree(items, dest)) {
+        enqueueOps(ops);
+      } else {
+        // Share the queue planner's concurrency and collision ordering.
+        void runTransferBatch(ops, app.queueMaxConcurrent, op => op.execute(undefined, op), enqueueOps, error => app.notify("error", String(error)));
+      }
+    };
+    if (!app.settings.defaultOverwriteOnConflict) {
+      start(false);
+      return;
+    }
+    if (items.some(item => normalizePath(joinPath(dest, basenameOf(item.path))) === normalizePath(item.path))) {
+      app.notify("error", t("shell.sameTransferSource"));
+      return;
+    }
+    try {
+      const collisions = await Promise.all(items.map(async item => {
+        const target = joinPath(dest, basenameOf(item.path));
+        if (isQueueBackedPath(target)) return true;
+        return await invoke<boolean>("queue_path_exists", { path: target });
+      }));
+      const count = collisions.filter(Boolean).length;
+      if (!count) { start(false); return; }
+      app.openConfirm({
+        title: t("shell.overwriteTitle"),
+        message: t("shell.overwriteRemoteConfirm", { count }),
+        confirmLabel: t("shell.overwriteTitle"),
+        onConfirm: () => start(true),
+      });
+    } catch (error) {
+      app.notify("error", String(error));
+    }
   }
 
   async function executePaste(paths: string[], dest: string, isCut: boolean, overwrite: boolean, renameOnConflict: boolean, providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
@@ -430,13 +574,14 @@
     });
     const done = app.waitForJob(jobId);
     try {
-      await invoke("start_copy_or_move_paths", { jobId, paths, destination: dest, operation: op, overwrite, renameOnConflict });
+      const fixedTarget = paths.length === 1 ? retryQueuedOp?.fixedOutputs?.[0]?.path : undefined;
+      const fixedTargetName = fixedTarget ? basenameOf(fixedTarget) : undefined;
+      await invoke("start_copy_or_move_paths", { jobId, paths, destination: dest, operation: op, overwrite, renameOnConflict, fixedTargetName });
     } catch (e) {
       app.notify("error", String(e));
       app.finishJob(jobId, false, String(e));
     }
     const ok = await done;
-    if (ok) refreshVisibleLocations([dest, ...paths.map((path) => dirnameOf(path))]);
     return ok;
   }
 
@@ -452,11 +597,11 @@
     return isQueueBackedPath(dest) || items.some((item) => isQueueBackedPath(item.path));
   }
 
-  function buildTransferOp(items: FileTransferItem[], dest: string, operation: FileTransferOperation): QueuedOp {
+  function buildTransferOp(items: FileTransferItem[], dest: string, operation: FileTransferOperation, requestedOverwrite = app.settings.defaultOverwriteOnConflict): QueuedOp {
     const paths = items.map((item) => item.path);
     const opId = newQueueId();
-    const overwrite = app.settings.defaultOverwriteOnConflict;
-    const renameOnConflict = app.settings.renameOnConflict;
+    const overwrite = requestedOverwrite;
+    const renameOnConflict = overwrite ? false : app.settings.renameOnConflict;
     const isMove = operation === "move";
     return {
       id: opId,
@@ -475,16 +620,7 @@
 
   function handleDropItems(items: FileTransferItem[], dest: string, preferredOperation?: FileTransferOperation | null) {
     if (items.length === 0) return;
-    const operation = inferFileTransferOperation(items, dest, preferredOperation);
-    if (isNoOpFileTransfer(items, dest, operation)) return;
-    if (isRecursiveFileTransfer(items, dest)) return;
-    const op = buildTransferOp(items, dest, operation);
-    if (transferTouchesGhostTree(items, dest) && !app.queueMode) {
-      app.addToQueue(op);
-      app.notify("info", t("queue.operationQueued"));
-      return;
-    }
-    enqueueOrRun(op);
+    void prepareTransfer(items, dest, inferFileTransferOperation(items, dest, preferredOperation));
   }
 
   // ── Extraction ────────────────────────────────────────────
@@ -511,13 +647,12 @@
   }
 
   function buildExtractOp(archives: string[], opts: ExtractionOptionsPayload): QueuedOp {
-    const destinations = opts.destinationPath
-      ? [opts.destinationPath]
-      : archives.map(a => parentDir(a));
+    const destinations = archives.map(a => extractionDestination(a, opts));
     return {
       id: newQueueId(),
       title: t("shell.extracting"),
       kind: 'extract',
+      fixedExtractionFolder: opts.individualFolders,
       sources: archives,
       destinations,
       deletes: opts.deleteArchives ? archives : [],
@@ -525,7 +660,20 @@
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: (jobId, retryQueuedOp) => executeExtraction(archives, opts, jobId, retryQueuedOp),
+      execute: (jobId, retryQueuedOp) => {
+        const root = retryQueuedOp?.fixedOutputs?.find(output => output.isDir && normalizePath(dirnameOf(output.path)) === normalizePath(destinations[0]));
+        let effective = root && opts.individualFolders && archives.length === 1
+          ? { ...opts, plannedFolderName: basenameOf(root.path), renameOnConflict: false }
+          : opts;
+        if (retryQueuedOp?.fixedExtractionEntries && retryQueuedOp.fixedOutputs && archives.length === 1) {
+          const base = destinations[0].replace(/\\/g, "/").replace(/\/+$/, "");
+          const relative = (path: string) => path.replace(/\\/g, "/").slice(base.length).replace(/^\/+/, "");
+          effective = { ...effective, plannedEntries: retryQueuedOp.produces.map((output, index) => ({
+            from: relative(output.path), to: relative(retryQueuedOp.fixedOutputs![index].path), isDir: output.isDir,
+          })), renameOnConflict: false };
+        }
+        return executeExtraction(archives, effective, jobId, retryQueuedOp);
+      },
     };
   }
 
@@ -543,7 +691,8 @@
   async function enqueueExtract(archives: string[], opts: ExtractionOptionsPayload) {
     opts = { ...opts, renameOnConflict: app.settings.renameOnConflict };
     if (!app.queueMode) {
-      void buildExtractOp(archives, opts).execute();
+      const op = buildExtractOp(archives, opts);
+      void op.execute(undefined, op);
       return;
     }
 
@@ -556,22 +705,20 @@
       return batchId ? withBatch(op, batchId, batchTitle, index + 1, archives.length) : op;
     });
 
-    const previewable = archives.filter(a => !isGhostPath(a) && !a.startsWith("remote://"));
-    if (previewable.length > 0) {
+    for (const op of ops) {
+      const archive = op.sources[0];
+      op.produces = extractionGhosts(archive, opts, op.id);
+      if (isGhostPath(archive)) continue;
       try {
         const rows = await invoke<ExtractionPreviewRow[]>("build_extraction_preview_deep", {
-          archives: previewable, options: opts,
+          archives: [archive], options: opts,
         });
-        const rowsByArchive = new Map(rows.map((row) => [normalizePath(row.archivePath), row]));
-        for (const op of ops) {
-          const row = rowsByArchive.get(normalizePath(op.sources[0] ?? ""));
-          if (!row) continue;
-          op.produces = row.entries
-            .filter(e => e.destinationPath)
-            .map(e => buildGhost(e.destinationPath, e.isDir, op.id, false));
+        if (rows[0]) {
+          op.produces = extractionGhosts(archive, opts, op.id, rows[0]);
+          if (!opts.individualFolders && op.produces.length > 0) op.fixedExtractionEntries = true;
         }
       } catch (e) {
-        app.notify("warn", t("queue.extractGhostPreviewFailed", { error: String(e) }));
+        app.notify("warn", t("queue.extractGhostPreviewFailed", { error: `${basenameOf(archive)}: ${String(e)}` }));
       }
     }
     enqueueOps(ops);
@@ -617,9 +764,7 @@
     const rootParts = root.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean);
     const pathParts = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean);
     if (pathParts.length < rootParts.length) return null;
-    for (let i = 0; i < rootParts.length; i++) {
-      if (rootParts[i].toLowerCase() !== pathParts[i].toLowerCase()) return null;
-    }
+    if (!pathContainsOrEquals(root, path)) return null;
     return pathParts.slice(rootParts.length).join("/");
   }
 
@@ -792,14 +937,14 @@
 
       let sourcePath = p;
       let displayExtensions = [`.${ext}`];
-      let requiredPaths = [p];
+      let requiredPaths = ext === "cue" ? uniquePaths([p, ...predictedCueTracks(p, app.queueGhosts.map(g => g.path))]) : [p];
 
       if (ext === "bin") {
         const cuePath = cueSiblingForGhostBin(p, ghostSet);
         if (!cuePath) continue;
         sourcePath = cuePath;
         displayExtensions = [".bin", ".cue"];
-        requiredPaths = [cuePath, p];
+        requiredPaths = uniquePaths([cuePath, ...predictedCueTracks(cuePath, app.queueGhosts.map(g => g.path)), p]);
       }
 
       const key = normalizePath(sourcePath);
@@ -922,29 +1067,34 @@
   function buildConvertChdOp(chdSources: ChdSourceDto[], rawOpts: ChdConversionOptionsPayload): QueuedOp {
     const paths = chdSources.map((source) => source.sourcePath);
     const opts: ChdConversionOptionsPayload = { ...rawOpts, renameOnConflict: app.settings.renameOnConflict };
-    const deletePaths = opts.deleteOriginals
-      ? uniquePaths([
-          ...chdSources.flatMap((source) => source.requiredPaths),
-          ...(opts.deleteOriginalSubfolders
-            ? chdSources
-                .map((source) => source.containerDir)
-                .filter((dir) => !dir.startsWith("remote://"))
-            : []),
-        ])
-      : [];
+    const requiredPaths = uniquePaths(chdSources.flatMap(source => source.requiredPaths));
+    const outputDirs = paths.map(path => opts.remoteDestination || (opts.destinationMode === "custom" ? opts.destinationPath : null)
+      || ((path.startsWith("remote://") ? opts.destinationMode === "parent" : opts.depositToParent) ? dirnameOf(dirnameOf(path)) : dirnameOf(path)));
+    const removableDirs = opts.deleteOriginalSubfolders ? chdSources.map(source => source.containerDir).filter(dir => {
+      const isGhostDir = app.queueGhosts.some(ghost => ghost.isDir && normalizePath(ghost.path) === normalizePath(dir));
+      return isGhostDir ? predictsEmptyGhostContainer(dir, app.queueGhosts, requiredPaths, outputDirs) : !dir.startsWith("remote://");
+    }) : [];
+    const deletePaths = opts.deleteOriginals ? uniquePaths([...requiredPaths, ...removableDirs]) : [];
     const opId = newQueueId();
+    const produces = predictChdConvert(paths, opts, opId);
     return {
       id: opId,
       title: t("shell.convertingToChd"),
       kind: 'chd-convert',
       sources: paths,
-      destinations: paths.map(p => parentDir(p)),
+      destinations: uniquePaths(produces.map(ghost => dirnameOf(ghost.path))),
       deletes: deletePaths,
-      produces: predictChdConvert(paths, opts, opId),
+      produces,
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: (jobId, retryQueuedOp) => executeConvertChd(paths, opts, jobId, retryQueuedOp),
+      execute: (jobId, retryQueuedOp) => {
+        const fixed = retryQueuedOp?.fixedOutputs;
+        const effective = fixed?.length === 1 && paths.length === 1
+          ? { ...opts, customName: basenameOf(fixed[0].path).replace(/\.chd$/i, ""), renameOnConflict: false }
+          : opts;
+        return executeConvertChd(paths, effective, jobId, retryQueuedOp);
+      },
       rebuildWithRenames: (map) =>
         buildConvertChdOp(chdSources.map((s) => remapChdSource(s, map)), rawOpts),
     };
@@ -979,8 +1129,8 @@
 
   function buildRestoreChdOp(paths: string[], rawOpts: ChdRestoreOptionsPayload): QueuedOp {
     const opts: ChdRestoreOptionsPayload = { ...rawOpts, renameOnConflict: app.settings.renameOnConflict };
-    const destinations = opts.destinationPath
-      ? [opts.destinationPath]
+    const destinations = opts.remoteDestination || opts.destinationPath
+      ? [opts.remoteDestination ?? opts.destinationPath!]
       : paths.map(p => parentDir(p));
     const opId = newQueueId();
     return {
@@ -994,7 +1144,17 @@
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: (jobId, retryQueuedOp) => executeRestoreChd(paths, opts, jobId, retryQueuedOp),
+      execute: (jobId, retryQueuedOp) => {
+        const fixed = retryQueuedOp?.fixedOutputs;
+        const folder = fixed?.find(output => output.isDir);
+        const file = fixed?.find(output => !output.isDir);
+        const effective = fixed && paths.length === 1 && file
+          ? { ...opts, outputNamingMode: "custom" as const, customOutputName: stemOf(basenameOf(file.path)),
+              ...(folder ? { folderNamingMode: "custom" as const, customFolderName: basenameOf(folder.path) } : {}),
+              renameOnConflict: false }
+          : opts;
+        return executeRestoreChd(paths, effective, jobId, retryQueuedOp);
+      },
       rebuildWithRenames: (map) =>
         buildRestoreChdOp(paths.map((p) => map.get(p) ?? p), rawOpts),
     };
@@ -1084,7 +1244,7 @@
       rvzEnableFallback: app.settings.rvzEnableFallback,
     };
     const opId = newQueueId();
-    const destinations = opts.destinationPath ? [opts.destinationPath] : paths.map(p => parentDir(p));
+    const destinations = opts.remoteDestination || opts.destinationPath ? [opts.remoteDestination ?? opts.destinationPath!] : paths.map(p => parentDir(p));
     const produces =
       mode === "cso-convert" ? predictCsoConvert(paths, opts, opId)
       : mode === "cso-restore" ? predictCsoRestore(paths, opts, opId)
@@ -1103,7 +1263,13 @@
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: (jobId, retryQueuedOp) => executeDiscImage(mode, paths, opts, jobId, retryQueuedOp),
+      execute: (jobId, retryQueuedOp) => {
+        const fixed = retryQueuedOp?.fixedOutputs;
+        const effective = fixed?.length === 1 && paths.length === 1
+          ? { ...opts, plannedOutputName: basenameOf(fixed[0].path), renameOnConflict: false }
+          : opts;
+        return executeDiscImage(mode, paths, effective, jobId, retryQueuedOp);
+      },
     };
   }
 
@@ -1156,12 +1322,12 @@
 
   function buildCompressOp(sources: string[], rawOpts: CompressionOptionsPayload): QueuedOp {
     const opts: CompressionOptionsPayload = { ...rawOpts, renameOnConflict: app.settings.renameOnConflict };
-    const destinations = opts.destinationPath
-      ? [opts.destinationPath]
+    const destinations = opts.remoteDestination || opts.destinationPath
+      ? [opts.remoteDestination ?? opts.destinationPath!]
       : sources.map(p => parentDir(p));
     const opId = newQueueId();
     // "Same folder as source" places the archive alongside the sources.
-    const archiveDir = opts.destinationPath ?? opts.remoteDestination ?? dirnameOf(sources[0] ?? "");
+    const archiveDir = opts.remoteDestination ?? opts.destinationPath ?? dirnameOf(sources[0] ?? "");
     return {
       id: opId,
       title: t("shell.compressing"),
@@ -1173,7 +1339,13 @@
       dependsOn: [],
       overwrite: opts.overwrite,
       renameOnConflict: opts.renameOnConflict ?? false,
-      execute: (jobId, retryQueuedOp) => executeCompress(sources, opts, jobId, retryQueuedOp),
+      execute: (jobId, retryQueuedOp) => {
+        const fixed = retryQueuedOp?.fixedOutputs;
+        const effective = fixed?.length === 1
+          ? { ...opts, archiveName: stemOf(basenameOf(fixed[0].path)), renameOnConflict: false }
+          : opts;
+        return executeCompress(sources, effective, jobId, retryQueuedOp);
+      },
     };
   }
 
@@ -1227,23 +1399,26 @@
 <svelte:window onkeydown={handleAppKey} />
 <svelte:document oncontextmenu={(e) => e.preventDefault()} />
 
-<div class="shell" class:startup-loading={!startupReady} style="--sidebar-width: {sidebarWidth}px">
+<div class="shell" style="--sidebar-width: {sidebarWidth}px">
   <!-- ── Sidebar ── -->
   <Sidebar />
 
   <!-- ── Sidebar resize handle ── -->
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <div class="sidebar-resizer" role="separator" onmousedown={startSidebarResize}></div>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
+  <div class="sidebar-resizer" role="separator" tabindex="0" aria-orientation="vertical"
+    aria-label={t("sidebar.resize")} aria-valuemin="140" aria-valuemax="500" aria-valuenow={Math.round(sidebarWidth)}
+    onkeydown={resizeSidebarWithKeyboard} onmousedown={startSidebarResize}></div>
 
   <!-- ── Main column ── -->
   <div class="shell-main">
     <!-- ── Pane area ── -->
-    <div class="shell-content" bind:this={paneAreaEl}>
+    <div class="shell-content">
       <!-- Connection Manager side panel -->
       {#if app.connectionManagerOpen}
         <ConnectionManager />
       {/if}
 
+      <div class="pane-area" class:pane-area--stacked={app.splitOrientation === "stacked"} bind:this={paneAreaEl}>
       <!-- Primary pane (always shown) -->
       <div class="pane-wrap" style="flex: {app.isSplit ? splitPercent : 100};">
         <Pane
@@ -1255,11 +1430,15 @@
 
       <!-- Pane splitter + secondary pane (only when split) -->
       {#if app.isSplit}
-        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
         <div
           class="pane-splitter"
           role="separator"
-          aria-label="Resize panes"
+          aria-label={t("toolbar.resizePanes")}
+          aria-orientation={app.splitOrientation === "stacked" ? "horizontal" : "vertical"}
+          aria-valuemin="20" aria-valuemax="80" aria-valuenow={Math.round(splitPercent)}
+          tabindex="0"
+          onkeydown={resizePaneWithKeyboard}
           onmousedown={startPaneSplitResize}
         ></div>
 
@@ -1271,18 +1450,14 @@
           />
         </div>
       {/if}
+      </div>
     </div>
 
     <TerminalPanel />
     <JobsPanel onDeaccentOp={handleQueueDeaccent} />
+    <StatusBar />
   </div>
 </div>
-
-{#if !startupReady}
-  <div class="startup-overlay" role="status" aria-live="polite" aria-label={t("contentPanel.loading")}>
-    <span class="startup-spinner"></span>
-  </div>
-{/if}
 
 <!-- ── Dialogs ── -->
 <ConfirmDialog />
@@ -1345,14 +1520,16 @@
     onConvert={(sources, opts) => {
       if (app.queueMode) enqueueOps(buildConvertChdOps(sources, opts));
       else guardChdRun(sources.map((s) => s.sourcePath), (map) => {
-        void buildConvertChdOp(sources.map((s) => remapChdSource(s, map)), opts).execute();
+        const op = buildConvertChdOp(sources.map((s) => remapChdSource(s, map)), opts);
+        void op.execute(undefined, op);
       });
       chdState = null;
     }}
     onRestore={(paths, opts) => {
       if (app.queueMode) enqueueOps(buildRestoreChdOps(paths, opts));
       else guardChdRun(paths, (map) => {
-        void buildRestoreChdOp(paths.map((p) => map.get(p) ?? p), opts).execute();
+        const op = buildRestoreChdOp(paths.map((p) => map.get(p) ?? p), opts);
+        void op.execute(undefined, op);
       });
       chdState = null;
     }}
@@ -1366,7 +1543,10 @@
     onclose={() => (discImageState = null)}
     onConfirm={(sources, opts) => {
       if (app.queueMode) enqueueOps(buildDiscImageOps(discImageState!.mode, sources, opts));
-      else void buildDiscImageOp(discImageState!.mode, sources, opts).execute();
+      else {
+        const op = buildDiscImageOp(discImageState!.mode, sources, opts);
+        void op.execute(undefined, op);
+      }
       discImageState = null;
     }}
   />
@@ -1385,41 +1565,8 @@
     zoom: var(--app-font-scale, 1);
   }
 
-  .shell.startup-loading {
-    filter: blur(4px);
-    pointer-events: none;
-    user-select: none;
-  }
-
-  .startup-overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 900;
-    display: grid;
-    place-items: center;
-    background: color-mix(in srgb, var(--bg) 42%, transparent);
-    backdrop-filter: blur(2px);
-  }
-
-  .startup-spinner {
-    width: 52px;
-    height: 52px;
-    border-radius: 50%;
-    border: 4px solid color-mix(in srgb, var(--line-strong) 45%, transparent);
-    border-top-color: var(--accent);
-    border-right-color: color-mix(in srgb, var(--accent) 62%, var(--line));
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--surface) 50%, transparent);
-    animation: spin 0.75s linear infinite;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .startup-spinner {
-      animation: none;
-    }
-  }
-
   .sidebar-resizer {
-    width: 4px;
+    width: 7px;
     height: 100%;
     cursor: col-resize;
     flex-shrink: 0;
@@ -1428,7 +1575,11 @@
     z-index: 20;
     transition: background 0.15s;
 
-    &:hover { background: color-mix(in srgb, var(--accent) 40%, transparent); }
+    &:hover, &:focus-visible { background: color-mix(in srgb, var(--accent) 40%, transparent); outline: none; }
+    &::after { content: ""; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 2px; height: 34px; border-radius: 2px; background: var(--line-strong); }
+    &:hover::after, &:focus-visible::after { background: var(--accent); }
+    position: relative;
   }
 
   .shell-main {
@@ -1447,11 +1598,17 @@
     position: relative;
   }
 
+  .pane-area {
+    flex: 1; display: flex; min-width: 0; min-height: 0; overflow: hidden;
+  }
+  .pane-area--stacked { flex-direction: column; }
+
   .pane-wrap {
     display: flex;
     flex-direction: column;
     overflow: hidden;
     min-width: 0;
+    min-height: 0;
   }
 
   .pane-splitter {
@@ -1481,5 +1638,9 @@
     }
 
     &:hover::after { background: color-mix(in srgb, var(--accent) 60%, transparent); }
+  }
+  .pane-area--stacked .pane-splitter {
+    width: 100%; height: 5px; cursor: row-resize;
+    &::after { width: 40px; height: 3px; }
   }
 </style>

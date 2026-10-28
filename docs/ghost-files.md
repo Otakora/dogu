@@ -34,9 +34,13 @@ decided at runtime), so its ghosts are flagged **approximate** (`≈ pending`).
 Extraction outputs are predicted by calling `build_extraction_preview_deep` when
 the op is queued — it enumerates the whole archive tree (files and folders at
 every level, synthesising intermediate directories), so ghost folders are
-navigable and you can queue operations on nested files. Remote and ghost
-archives are not previewed, so they produce no ghosts (the extraction still runs
-normally).
+navigable and you can queue operations on nested files. Remote ZIP archives can
+be inspected without a full download over SFTP and Windows SMB; Windows SMB
+also supports 7z/RAR through the authenticated UNC path. Other remote providers
+or archive formats may not expose a seekable index: Dogu reports that the
+contents could not be previewed. An individual output folder remains visible
+as an approximate ghost when its name is known. Archives that are themselves
+ghosts cannot be inspected before their producer runs.
 
 Copying or moving a *folder* predicts the folder immediately and mirrors the
 source tree lazily when you open that ghost folder, so queued work can continue
@@ -47,8 +51,12 @@ it previews the whole archive tree up front, including nested folders and files.
 
 - When you queue an op whose input is another op's ghost, the store links them
   (`dependsOn`) automatically by matching paths.
-- A batch with dependencies **can only run sequentially** — the parallel button
-  is disabled and each chained op shows a `⛓ after step N` badge.
+- Smart execution runs independent steps concurrently up to the configured limit.
+  A consumer waits until its producer succeeds; conflicting reads/writes are
+  ordered. The displayed dependency levels are a preview, not strict waves.
+- If a step fails, its dependent steps are skipped. Failed and skipped steps
+  return to the queue for review and an explicit retry; successful predecessors
+  do not run again. A failed operation may already have changed files.
 - Removing an op also removes everything downstream that depended on it (with a
   notification), since those consumers would be left pointing at a ghost that
   will never appear.
@@ -58,13 +66,25 @@ it previews the whole archive tree up front, including nested folders and files.
 
 - `src/lib/utils/ghosts.ts` — path helpers, predictors, `ghostToEntry`.
 - `src/lib/types/index.ts` — `GhostEntry`, `QueuedOp.produces` / `.dependsOn`.
-- `src/lib/stores/app.svelte.ts` — dependency linking, `ghostsForDir`,
-  cascade removal, ordered execution.
+- `src/lib/utils/queue-plan.ts` and `queue-runner.ts` — dependencies, conflicts,
+  scheduling and failure propagation; `queue-validation.ts` checks outputs.
+- `src/lib/stores/app.svelte.ts` — queue state, job integration and retries.
 - `src/lib/components/shell/Shell.svelte` — op builders populate `produces`;
   `openChdDialog` synthesises a CHD analysis for ghost sources.
 - `src/lib/components/content/ContentPanel.svelte` + `FileRow.svelte` — overlay,
   styling, ghost-aware context menu, ghost-directory navigation.
-- `src/lib/components/dialogs/JobsPanel.svelte` — dependency badges, parallel gating.
+- `src/lib/components/dialogs/JobsPanel.svelte` — dependency badges and plan preview.
+
+The preview is not a transaction. The planner uses real entries currently known
+to the panels when displaying ghost names. Before running a producer with
+dependent steps, Dogu checks whether a rename could change the expected name;
+if so, it stops the chain for review. After the producer finishes, it verifies
+that the expected outputs exist before starting consumers. Unknown remote errors
+also stop the check. These checks cannot prevent external processes changing a
+path between the check and the operation, and approximate outputs are not
+remapped automatically. Review failed or partially completed work before retrying.
+
+The planner and executor have focused tests: `npm run test:queue`.
 
 ## Manual test checklist
 
@@ -76,7 +96,7 @@ Queue mode must be ON (the queue-mode toolbar button) for ghosts to appear.
    - `game.cue` and `game.bin` appear as ghosts (dimmed, `pending`) in the folder.
    - Select the ghost `game.cue` → right-click → *Convert to CHD…*, confirm.
    - A ghost `game.chd` appears; the queue shows the convert op with `⛓ after step 1`.
-   - The parallel button is disabled. Run *sequentially*.
+   - Run with smart or sequential execution; the conversion waits for extraction.
    - Extraction runs, then conversion; `game.chd` becomes real.
 
 2. **Extract to folder.** Right-click an archive → *Extract to "name"*. Navigate
@@ -89,7 +109,7 @@ Queue mode must be ON (the queue-mode toolbar button) for ghosts to appear.
    dependent op is removed too, with a notification.
 
 5. **No false chaining.** Queue two independent operations (different files/dirs).
-   The parallel button stays enabled; no dependency badges.
+   Smart execution can run both at once; no dependency badges appear.
 
 6. **Overwrite dedup.** Queue an op whose output name matches an existing real
    file. The list must not show a duplicate row (no Svelte key error).

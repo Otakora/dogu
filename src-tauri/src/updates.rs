@@ -149,7 +149,7 @@ pub async fn install_pending_update(
         .update
         .lock()
         .map_err(|_| "Could not lock pending update state.".to_string())?
-        .take()
+        .clone()
         .ok_or_else(|| "There is no pending update to install.".to_string())?;
 
     let mut downloaded = 0_u64;

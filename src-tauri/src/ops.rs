@@ -54,6 +54,11 @@ const CD_SOURCE_EXTENSIONS: &[&str] = &[".cue", ".gdi", ".toc"];
 const DVD_SOURCE_EXTENSIONS: &[&str] = &[".iso"];
 const PAIRABLE_BIN_EXTENSIONS: &[&str] = &[".bin"];
 
+fn path_identity(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if cfg!(windows) && !value.starts_with("remote://") { value.to_lowercase() } else { value.into_owned() }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArchiveFormat {
     Zip,
@@ -285,13 +290,24 @@ pub fn create_file(parent: &Path, name: &str) -> Result<String> {
         name.to_string()
     };
     let target = parent.join(file_name);
-    fs::write(&target, b"")
+    fs::OpenOptions::new().write(true).create_new(true).open(&target)
         .with_context(|| format!("No se pudo crear el fichero {}", target.display()))?;
     Ok(target.to_string_lossy().to_string())
 }
 
 pub fn rename_path(path: &Path, new_name: &str) -> Result<String> {
+    if new_name.is_empty() || new_name == "." || new_name == ".." || new_name.contains(['/', '\\']) {
+        return Err(anyhow!("Nombre de destino invalido"));
+    }
     let target = path.with_file_name(new_name);
+    let same_windows_path = cfg!(windows) && path.to_string_lossy().eq_ignore_ascii_case(&target.to_string_lossy());
+    if !same_windows_path {
+        match fs::symlink_metadata(&target) {
+            Ok(_) => return Err(anyhow!("El destino ya existe: {}", target.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+    }
     fs::rename(path, &target).with_context(|| {
         format!(
             "No se pudo renombrar {} a {}",
@@ -306,17 +322,11 @@ pub fn rename_path(path: &Path, new_name: &str) -> Result<String> {
 /// destination picker's inline delete — a direct, synchronous counterpart to
 /// `create_folder`/`rename_path` (the job-based `delete_paths` is for bulk ops).
 pub fn delete_entry(path: &Path) -> Result<()> {
-    if path.is_dir() {
-        fs::remove_dir_all(path)
-            .with_context(|| format!("No se pudo eliminar la carpeta {}", path.display()))?;
-    } else if path.exists() {
-        fs::remove_file(path).with_context(|| format!("No se pudo eliminar {}", path.display()))?;
-    }
-    Ok(())
+    remove_single_path(path).with_context(|| format!("No se pudo eliminar {}", path.display()))
 }
 
 /// Returns `desired` if it doesn't exist, otherwise the first non-existing
-/// "stem (N)" variant (N starting at 2), preserving any extension. Works for
+/// "stem (N)" variant (N starting at 1), preserving any extension. Works for
 /// both files and directories. Used to standardize conflict handling: when an
 /// operation isn't overwriting, the output is renamed instead of failing.
 pub fn unique_path(desired: &Path) -> PathBuf {
@@ -336,7 +346,7 @@ pub fn unique_path(desired: &Path) -> PathBuf {
         }
         _ => (file_name.clone(), None),
     };
-    let mut n: u32 = 2;
+    let mut n: u32 = 1;
     loop {
         let candidate_name = match &ext {
             Some(e) => format!("{stem} ({n}).{e}"),
@@ -363,7 +373,7 @@ fn unique_restore_stem(dir: &Path, stem: &str) -> String {
     if !collides(stem) {
         return stem.to_string();
     }
-    let mut n: u32 = 2;
+    let mut n: u32 = 1;
     loop {
         let candidate = format!("{stem} ({n})");
         if !collides(&candidate) {
@@ -390,11 +400,15 @@ pub fn delete_paths(app: &AppHandle, job_id: &str, paths: Vec<PathBuf>) -> Resul
 fn delete_path_with_log(app: &AppHandle, job_id: &str, path: &Path, depth: usize) -> Result<()> {
     let indent = "  ".repeat(depth);
     emit_log(app, job_id, format!("{indent}{}", path.display()))?;
-    if !path.exists() {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
         emit_log(app, job_id, format!("{indent}  omitido: ya no existe"))?;
         return Ok(());
-    }
-    if path.is_dir() {
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_dir() {
         let mut children = fs::read_dir(path)?
             .filter_map(|entry| entry.ok().map(|item| item.path()))
             .collect::<Vec<_>>();
@@ -417,18 +431,19 @@ pub fn copy_or_move_paths(
     operation: &str,
     overwrite: bool,
     rename_on_conflict: bool,
+    fixed_target_name: Option<&str>,
 ) -> Result<()> {
     let total = paths.len().max(1) as f64;
     for (index, source) in paths.iter().enumerate() {
         let mut target = destination.join(
-            source
+            fixed_target_name.map(std::ffi::OsStr::new).unwrap_or(source
                 .file_name()
-                .ok_or_else(|| anyhow!("Ruta invalida: {}", source.display()))?,
+                .ok_or_else(|| anyhow!("Ruta invalida: {}", source.display()))?),
         );
         if target.exists() {
             if overwrite {
-                remove_single_path(&target)?;
-            } else if rename_on_conflict {
+                // Preserve the previous destination until the new entry is ready.
+            } else if rename_on_conflict && fixed_target_name.is_none() {
                 target = unique_path(&target);
             } else {
                 return Err(anyhow!("El destino ya existe: {}", target.display()));
@@ -449,11 +464,7 @@ pub fn copy_or_move_paths(
             ),
         )?;
 
-        if operation == "cut" {
-            move_path(source, &target)?;
-        } else {
-            copy_path(source, &target)?;
-        }
+        copy_or_move_one_staged(source, &target, operation == "cut", overwrite)?;
 
         emit_progress(
             app,
@@ -507,7 +518,7 @@ pub fn open_with_dialog(path: &Path) -> Result<()> {
     }
 
     let status = Command::new("gio").arg("open").arg(path).status();
-    if status.is_err() {
+    if !matches!(status, Ok(status) if status.success()) {
         Command::new("xdg-open").arg(path).spawn()?;
     }
     Ok(())
@@ -524,13 +535,11 @@ fn extraction_destination_root(archive: &Path, options: &ExtractionOptionsPayloa
         archive.parent().unwrap_or(archive).to_path_buf()
     };
     if options.individual_folders {
-        destination_root.join(
-            archive
+        destination_root.join(options.planned_folder_name.clone().unwrap_or_else(|| archive
                 .file_stem()
                 .unwrap_or_else(|| archive.as_os_str())
                 .to_string_lossy()
-                .to_string(),
-        )
+                .to_string()))
     } else {
         destination_root
     }
@@ -641,7 +650,7 @@ fn insert_with_ancestors(
 /// Lists every entry (files and directories, full relative paths) inside an
 /// archive, synthesising intermediate directories that aren't listed explicitly.
 /// Used to build the deep extraction preview that powers nested ghost trees.
-fn list_all_entries(app: &AppHandle, archive_path: &Path) -> Result<Vec<(String, bool)>> {
+pub fn list_all_entries(app: &AppHandle, archive_path: &Path) -> Result<Vec<(String, bool)>> {
     let format = archive_format(archive_path)?;
     match format {
         ArchiveFormat::Zip => list_all_zip_entries(archive_path),
@@ -655,7 +664,11 @@ fn list_all_entries(app: &AppHandle, archive_path: &Path) -> Result<Vec<(String,
 
 fn list_all_zip_entries(archive_path: &Path) -> Result<Vec<(String, bool)>> {
     let file = fs::File::open(archive_path)?;
-    let mut archive = ZipArchive::new(file)?;
+    list_all_zip_reader(file)
+}
+
+pub fn list_all_zip_reader(reader: impl Read + Seek) -> Result<Vec<(String, bool)>> {
+    let mut archive = ZipArchive::new(reader)?;
     let mut seen: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     for index in 0..archive.len() {
         let item = archive.by_index(index)?;
@@ -742,15 +755,21 @@ pub fn build_extraction_preview_deep(
 ) -> Result<Vec<ExtractionPreviewRow>> {
     let mut rows = Vec::new();
     for archive in archives {
-        let destination_root = extraction_destination_root(archive, options);
         let raw = list_all_entries(app, archive)?;
+        rows.push(extraction_preview_from_entries(archive, options, &raw));
+    }
+    Ok(rows)
+}
+
+pub fn extraction_preview_from_entries(archive: &Path, options: &ExtractionOptionsPayload, raw: &[(String, bool)]) -> ExtractionPreviewRow {
+        let destination_root = extraction_destination_root(archive, options);
 
         // Apply `splitEntries` (each top-level file is moved into a folder named
         // after its stem) and re-synthesise ancestor directories so every level
         // — including any folders split introduces — is represented.
         let mut final_map: std::collections::BTreeMap<String, bool> =
             std::collections::BTreeMap::new();
-        for (rel, is_dir) in &raw {
+        for (rel, is_dir) in raw {
             let final_rel = if options.split_entries && !is_dir && !rel.contains('/') {
                 format!("{}/{}", entry_stem_or_name(rel), rel)
             } else {
@@ -787,13 +806,11 @@ pub fn build_extraction_preview_deep(
             });
         }
 
-        rows.push(ExtractionPreviewRow {
+        ExtractionPreviewRow {
             archive_path: archive.to_string_lossy().to_string(),
             destination_root: destination_root.to_string_lossy().to_string(),
             entries: preview_entries,
-        });
-    }
-    Ok(rows)
+        }
 }
 
 /// Moves each top-level file entry produced by an extraction into a folder named after
@@ -935,6 +952,9 @@ pub fn extract_archives(
     remote_manager: Option<Arc<remote::RemoteManager>>,
     pause_registry: Option<pause::PauseRegistry>,
 ) -> Result<()> {
+    if let Some(name) = options.planned_folder_name.as_deref() {
+        validated_planned_output_name(Some(name), name)?;
+    }
     let total = archives.len().max(1) as f64;
 
     for (index, archive) in archives.iter().enumerate() {
@@ -946,6 +966,21 @@ pub fn extract_archives(
             .to_string_lossy()
             .to_string();
         let archive_is_remote = remote::RemoteManager::is_remote_path(&archive.to_string_lossy());
+
+        // Check the real destination, not just the share root, before a
+        // potentially large download and extraction.
+        let effective_remote_dest: Option<String> = if options.remote_destination.is_some() {
+            options.remote_destination.clone()
+        } else if archive_is_remote && options.destination_mode != "custom" {
+            remote_parent_of(archive)
+        } else {
+            None
+        };
+        if let Some(destination) = &effective_remote_dest {
+            let rm = remote_manager.as_ref().ok_or_else(|| anyhow!("Se necesita el gestor remoto para comprobar el destino"))?;
+            emit_log(app, job_id, format!("Comprobando escritura en {destination}..."))?;
+            rm.check_remote_staging_writable(destination)?;
+        }
 
         // Download remote archive to a temp dir so tools can open it as a local file.
         // TempGuard ensures the dir is removed even if this iteration returns early via `?`.
@@ -968,15 +1003,6 @@ pub fn extract_archives(
             (archive.clone(), None)
         };
 
-        // When source is remote and destination is "same", send output back to the remote parent.
-        let effective_remote_dest: Option<String> = if options.remote_destination.is_some() {
-            options.remote_destination.clone()
-        } else if archive_is_remote && options.destination_mode != "custom" {
-            remote_parent_of(archive)
-        } else {
-            None
-        };
-
         let use_remote =
             remote_manager.is_some() && pause_registry.is_some() && effective_remote_dest.is_some();
 
@@ -993,7 +1019,7 @@ pub fn extract_archives(
                 });
             let options_c = options.clone();
             let effective_archive_c = effective_archive.clone();
-            run_remote_file_cycle(
+            run_remote_file_cycle_with_policy(
                 app,
                 job_id,
                 &rm,
@@ -1001,6 +1027,7 @@ pub fn extract_archives(
                 remote_dest,
                 &policy,
                 &source_name,
+                options.overwrite,
                 |temp_dir| {
                     let extract_target = if options_c.individual_folders {
                         let stem = effective_archive_c
@@ -1008,7 +1035,7 @@ pub fn extract_archives(
                             .unwrap_or(effective_archive_c.as_os_str())
                             .to_string_lossy()
                             .to_string();
-                        let sub = temp_dir.join(&stem);
+                        let sub = temp_dir.join(options_c.planned_folder_name.as_deref().unwrap_or(&stem));
                         fs::create_dir_all(&sub)?;
                         sub
                     } else {
@@ -1023,12 +1050,20 @@ pub fn extract_archives(
                         &extract_target,
                         &options_c,
                     )?;
-                    collect_dir_entries(temp_dir)
+                    if let Some(entries) = &options_c.planned_entries {
+                        let remapped = temp_dir.join("dogu-planned-output");
+                        remap_extraction_tree(temp_dir, &remapped, entries)?;
+                        collect_dir_entries(&remapped)
+                    } else { collect_dir_entries(temp_dir) }
                 },
             )?;
         } else {
             let destination = extraction_destination_root(&effective_archive, &options);
-            fs::create_dir_all(&destination)?;
+            let reserved_new_folder = options.individual_folders && options.planned_folder_name.is_some() && !options.overwrite;
+            if reserved_new_folder {
+                if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+                fs::create_dir(&destination).with_context(|| format!("No se pudo reservar la carpeta de salida '{}'", destination.display()))?;
+            } else { fs::create_dir_all(&destination)?; }
             emit_log(
                 app,
                 job_id,
@@ -1038,15 +1073,29 @@ pub fn extract_archives(
                     destination.display()
                 ),
             )?;
-            do_extract_archive(
-                app,
-                job_id,
-                prog_base,
-                prog_span,
-                &effective_archive,
-                &destination,
-                &options,
-            )?;
+            // Extraction failures are confined to a directory owned by this
+            // attempt; only completed output is published into the destination.
+            let publication = (|| -> Result<()> {
+                let staging = retry_transient_stage(app, job_id, || {
+                    let staging = tempfile::Builder::new().prefix("dogu-extract-").tempdir_in(&destination)?;
+                    do_extract_archive(app, job_id, prog_base, prog_span, &effective_archive, staging.path(), &options)?;
+                    Ok(staging)
+                })?;
+                if let Some(entries) = &options.planned_entries {
+                    let remapped = tempfile::Builder::new().prefix("dogu-mapped-").tempdir_in(&destination)?;
+                    remap_extraction_tree(staging.path(), remapped.path(), entries)?;
+                    publish_extracted_tree(remapped.path(), &destination, &effective_archive, &options)?;
+                } else {
+                    publish_extracted_tree(staging.path(), &destination, &effective_archive, &options)?;
+                }
+                Ok(())
+            })();
+            if publication.is_err() && reserved_new_folder {
+                // Only remove the directory if it is still empty; preserve any
+                // partial publication or files created independently by the user.
+                let _ = fs::remove_dir(&destination);
+            }
+            publication?;
         }
 
         if options.delete_archives {
@@ -1119,7 +1168,7 @@ fn do_extract_archive(
                 .arg("-y")
                 .arg("-bsp1"); // stream progress percentage to stdout
             run_command_streaming(app, job_id, base, span, cmd)
-                .map_err(|e| anyhow!("7-zip fallo al extraer '{}': {}", archive.display(), e))?;
+                .with_context(|| format!("7-zip fallo al extraer '{}'", archive.display()))?;
         }
     }
     if options.split_entries {
@@ -1133,6 +1182,113 @@ fn do_extract_archive(
                 archive.display()
             ),
         )?;
+    }
+    Ok(())
+}
+
+/// Apply the queue's exact relative output names inside an isolated staging tree.
+fn remap_extraction_tree(source: &Path, destination: &Path, plans: &[crate::models::PlannedExtractionEntry]) -> Result<()> {
+    use std::path::Component;
+    let validate = |value: &str| -> Result<PathBuf> {
+        let path = Path::new(value);
+        if value.is_empty() || path.components().any(|component| !matches!(component, Component::Normal(_))) {
+            return Err(anyhow!("Ruta de extraccion planificada invalida: {value}"));
+        }
+        Ok(path.to_path_buf())
+    };
+    let relative_key = |path: &Path| path_identity(path).replace('\\', "/");
+    let mut mapped = std::collections::HashMap::new();
+    let mut targets = std::collections::HashSet::new();
+    for plan in plans {
+        let from = validate(&plan.from)?;
+        let to = validate(&plan.to)?;
+        if !targets.insert(relative_key(&to)) || mapped.insert(relative_key(&from), (to, plan.is_dir)).is_some() {
+            return Err(anyhow!("La previsualizacion contiene rutas duplicadas"));
+        }
+    }
+    let items = WalkDir::new(source).min_depth(1).into_iter().collect::<std::result::Result<Vec<_>, _>>()?;
+    // Renaming a referenced track without rewriting its CUE would create a
+    // broken disc image. Stop instead of publishing a misleading result.
+    for item in &items {
+        if !item.file_type().is_file() || !item.path().extension().and_then(OsStr::to_str).is_some_and(|ext| ext.eq_ignore_ascii_case("cue")) { continue; }
+        let cue_relative = item.path().strip_prefix(source)?;
+        let Some((cue_target, _)) = mapped.get(&relative_key(cue_relative)) else { continue; };
+        for reference in parse_cue_references(item.path())?.into_iter().skip(1) {
+            let Ok(source_relative) = reference.strip_prefix(source) else { return Err(anyhow!("El CUE contiene una referencia fuera del archivo extraido")); };
+            let Some((target, _)) = mapped.get(&relative_key(source_relative)) else { continue; };
+            let cue_dir = item.path().parent().unwrap_or(source);
+            let Ok(reference_relative) = reference.strip_prefix(cue_dir) else { return Err(anyhow!("El CUE contiene una referencia fuera de su carpeta")); };
+            let expected = cue_target.parent().unwrap_or(Path::new("")).join(reference_relative);
+            if relative_key(target) != relative_key(&expected) {
+                return Err(anyhow!("El nombre planificado de '{}' romperia las referencias de '{}'. Renombra el destino o usa una carpeta individual.", source_relative.display(), cue_relative.display()));
+            }
+        }
+    }
+    fs::create_dir_all(destination)?;
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let relative = item.path().strip_prefix(source)?;
+        let key = relative_key(relative);
+        let (to, is_dir) = mapped.get(&key).ok_or_else(|| anyhow!("El archivo contiene una entrada no prevista: {}", relative.display()))?;
+        if item.file_type().is_dir() != *is_dir || (!item.file_type().is_dir() && !item.file_type().is_file()) {
+            return Err(anyhow!("La entrada extraida no coincide con la previsualizacion: {}", relative.display()));
+        }
+        seen.insert(key);
+        let target = destination.join(to);
+        if *is_dir { fs::create_dir_all(&target)?; }
+        else {
+            if let Some(parent) = target.parent() { fs::create_dir_all(parent)?; }
+            fs::rename(item.path(), &target)?;
+        }
+    }
+    if seen.len() != mapped.len() { return Err(anyhow!("El archivo no contiene todas las entradas previstas en la cola")); }
+    Ok(())
+}
+
+/// Merge completed extraction output. Do not auto-retry publishing: a failed
+/// publish can already have moved earlier files into the user's destination.
+fn publish_extracted_tree(staging: &Path, destination: &Path, archive: &Path, options: &ExtractionOptionsPayload) -> Result<()> {
+    let skip_existing = !options.overwrite && !options.rename_on_conflict
+        && options.planned_entries.is_none() && options.planned_folder_name.is_none()
+        && !matches!(archive_format(archive)?, ArchiveFormat::Zip);
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    let mut reserved = std::collections::HashSet::new();
+    for item in WalkDir::new(staging).min_depth(1) {
+        let item = item?;
+        let relative = item.path().strip_prefix(staging)?;
+        let target = destination.join(relative);
+        if item.file_type().is_dir() {
+            directories.push(target);
+        } else if item.file_type().is_file() {
+            let mut target = target;
+            if !options.overwrite && (target.exists() || reserved.contains(&path_identity(&target))) {
+                if options.rename_on_conflict {
+                    let parent = target.parent().ok_or_else(|| anyhow!("Destino invalido"))?;
+                    let name = target.file_stem().unwrap_or_default().to_string_lossy();
+                    let extension = target.extension().map(|ext| format!(".{}", ext.to_string_lossy())).unwrap_or_default();
+                    let mut number = 1;
+                    loop {
+                        let candidate = parent.join(format!("{name} ({number}){extension}"));
+                        if !candidate.exists() && !reserved.contains(&path_identity(&candidate)) {
+                            target = candidate;
+                            break;
+                        }
+                        number += 1;
+                    }
+                } else if skip_existing { continue; }
+                else { return Err(anyhow!("Ya existe un fichero y sobrescritura no esta permitida: {}", target.display())); }
+            }
+            reserved.insert(path_identity(&target));
+            files.push((item.path().to_path_buf(), target));
+        } else {
+            return Err(anyhow!("La extraccion contiene un tipo de entrada no admitido: {}", relative.display()));
+        }
+    }
+    for directory in directories { fs::create_dir_all(directory)?; }
+    for (source, target) in files {
+        if let Some(parent) = target.parent() { fs::create_dir_all(parent)?; }
+        commit_staged_file(&source, &target, options.overwrite)?;
     }
     Ok(())
 }
@@ -1194,7 +1350,7 @@ pub fn scan_selection(
                         if ARCHIVE_EXTENSIONS.contains(&fext.as_str()) {
                             archives.push(file_path);
                         } else if fext == ".chd" {
-                            let key = file_path.to_lowercase();
+                            let key = file_path.clone();
                             if seen_restorable.insert(key) {
                                 restorable_chds.push(file_path);
                             }
@@ -1218,7 +1374,7 @@ pub fn scan_selection(
                 archives.push(path_str.to_string());
             }
             if ext == ".chd" {
-                let key = path_str.to_lowercase();
+                let key = path_str.to_string();
                 if seen_restorable.insert(key) {
                     restorable_chds.push(path_str.to_string());
                 }
@@ -1248,7 +1404,7 @@ pub fn scan_selection(
             {
                 let candidate = item.path().to_path_buf();
                 if is_chd_file(&candidate) {
-                    let key = candidate.to_string_lossy().to_lowercase();
+                    let key = path_identity(&candidate);
                     if seen_restorable.insert(key) {
                         restorable_chds.push(candidate.to_string_lossy().to_string());
                     }
@@ -1286,7 +1442,7 @@ pub fn scan_selection(
             archives.push(path.to_string_lossy().to_string());
         }
         if is_chd_file(path) {
-            let key = path.to_string_lossy().to_lowercase();
+            let key = path_identity(path);
             if seen_restorable.insert(key) {
                 restorable_chds.push(path.to_string_lossy().to_string());
             }
@@ -1377,6 +1533,7 @@ pub fn convert_to_chd(
     let analysis = scan_selection(&scan_inputs, usize::MAX, None)?;
     let selected_root = paths.iter().find(|path| path.is_dir()).cloned();
     let mut touched_directories = BTreeSet::new();
+    let mut touched_remote_directories = BTreeSet::new();
 
     // Separate sources with missing files so they don't affect the progress denominator.
     for source in analysis
@@ -1450,6 +1607,9 @@ pub fn convert_to_chd(
                 required_paths: vec![effective_source_path.to_string_lossy().to_string()],
                 missing_files: vec![],
             });
+        let remote_originals = if source_is_remote && options.delete_originals {
+            remote_original_paths(&source.container_dir, &effective_source_path, &local_source.required_paths)?
+        } else { Vec::new() };
         let original_container_dir = source_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -1506,7 +1666,7 @@ pub fn convert_to_chd(
             let run_source_c = run_source_path.clone();
             let overwrite = options.overwrite;
 
-            run_remote_file_cycle(
+            run_remote_file_cycle_with_policy(
                 app,
                 job_id,
                 &rm,
@@ -1514,6 +1674,7 @@ pub fn convert_to_chd(
                 remote_dest,
                 &policy,
                 &source_name,
+                overwrite,
                 |temp_dir| {
                     let output_path = temp_dir.join(&chd_name);
                     run_chdman_convert(
@@ -1593,33 +1754,35 @@ pub fn convert_to_chd(
         }
 
         if options.delete_originals {
-            for original in &source.required_paths {
+            let originals = if source_is_remote { &remote_originals } else { &source.required_paths };
+            for original in originals {
                 if source_is_remote {
                     if let Some(ref rm) = remote_manager {
                         rm.delete_entry(app, job_id, original)?;
-                        emit_log(
-                            app,
-                            job_id,
-                            format!("Original remoto eliminado: {original}"),
-                        )?;
+                        emit_log(app, job_id, format!("Original remoto eliminado: {original}"))?;
                     }
                 } else {
                     let original_path = PathBuf::from(original);
                     if original_path.exists() {
                         remove_single_path(&original_path)?;
-                        emit_log(
-                            app,
-                            job_id,
-                            format!("Original eliminado: {}", original_path.display()),
-                        )?;
+                        emit_log(app, job_id, format!("Original eliminado: {}", original_path.display()))?;
                     }
                 }
             }
-        }
-
-        // Track local container dirs so we can remove them if they're empty after cleanup.
-        if options.delete_original_subfolders && !source_is_remote {
-            touched_directories.insert(original_container_dir.clone());
+            if options.delete_original_subfolders {
+                if source_is_remote {
+                    touched_remote_directories.insert(source.container_dir.clone());
+                    let root = source.container_dir.trim_end_matches('/');
+                    for original in &remote_originals {
+                        let mut parent = original.rsplit_once('/').map(|(dir, _)| dir);
+                        while let Some(dir) = parent {
+                            if dir == root || !dir.starts_with(&format!("{root}/")) { break; }
+                            touched_remote_directories.insert(dir.to_string());
+                            parent = dir.rsplit_once('/').map(|(next, _)| next);
+                        }
+                    }
+                } else { touched_directories.insert(original_container_dir.clone()); }
+            }
         }
 
         emit_progress(
@@ -1646,7 +1809,35 @@ pub fn convert_to_chd(
         }
     }
 
+    if let Some(ref rm) = remote_manager {
+        let mut directories = touched_remote_directories.into_iter().collect::<Vec<_>>();
+        directories.sort_by_key(|directory| std::cmp::Reverse(directory.matches('/').count()));
+        for directory in directories {
+            if rm.remove_empty_directory(&directory)? {
+                emit_log(app, job_id, format!("Carpeta remota vacia eliminada: {directory}"))?;
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Map only references inside the downloaded container back to its remote path.
+fn remote_original_paths(remote_container: &str, local_source: &Path, required: &[String]) -> Result<Vec<String>> {
+    let local_container = local_source.parent().ok_or_else(|| anyhow!("No se pudo resolver el directorio descargado"))?;
+    required.iter().map(|entry| {
+        let path = Path::new(entry);
+        let relative = path.strip_prefix(local_container).map_err(|_| anyhow!("La referencia '{}' queda fuera de la carpeta descargada", entry))?;
+        let mut parts = Vec::new();
+        for component in relative.components() {
+            match component {
+                std::path::Component::Normal(part) => parts.push(part.to_str().ok_or_else(|| anyhow!("Nombre de pista invalido"))?),
+                _ => return Err(anyhow!("La referencia '{}' queda fuera de la carpeta descargada", entry)),
+            }
+        }
+        if parts.is_empty() { return Err(anyhow!("Referencia de pista vacia")); }
+        Ok(format!("{}/{}", remote_container.trim_end_matches('/'), parts.join("/")))
+    }).collect()
 }
 
 fn should_stage_local_chd_source(source: &ChdSourceDto) -> bool {
@@ -1693,7 +1884,7 @@ fn recover_missing_chd_scan_inputs(paths: &[PathBuf]) -> Vec<PathBuf> {
             }
         };
 
-        let key = recovered.to_string_lossy().to_lowercase();
+        let key = path_identity(&recovered);
         if seen.insert(key) {
             result.push(recovered);
         }
@@ -1730,34 +1921,18 @@ fn run_chdman_convert(
         .file_name()
         .ok_or_else(|| anyhow!("Ruta de origen invalida: {}", source.display()))?;
 
-    let tmp_out_name = format!("__dogu_chd_{}.chd", sanitize_ascii_token(job_id));
-    let tmp_out_path = source_dir.join(&tmp_out_name);
-    // Clear any leftover from a previously aborted run in the same folder.
-    let _ = fs::remove_file(&tmp_out_path);
+    let staging = tempfile::Builder::new().prefix("dogu-chd-").tempdir_in(&source_dir)?;
+    let stage_name = staging.path().file_name().ok_or_else(|| anyhow!("Directorio temporal CHD invalido"))?;
+    let tmp_out_name = Path::new(stage_name).join("output.chd");
+    let tmp_out_path = staging.path().join("output.chd");
 
-    let mut cmd = Command::new(chdman);
-    // -f is always safe here: the temp name is ours; real-output collisions are
-    // resolved on the move below, preserving chdman's non-overwrite semantics.
-    cmd.arg(command)
-        .arg("-i")
-        .arg(source_name)
-        .arg("-o")
-        .arg(&tmp_out_name)
-        .arg("-f")
-        .current_dir(&source_dir);
-
-    // chdman prints "Compressing, NN.N% complete..." to stderr, updated with \r.
-    let run = run_command_streaming(app, job_id, base, span, cmd).map_err(|e| {
-        anyhow!(if e.to_string().is_empty() {
-            "chdman devolvio un error".to_string()
-        } else {
-            e.to_string()
-        })
-    });
-    if let Err(e) = run {
-        let _ = fs::remove_file(&tmp_out_path);
-        return Err(e);
-    }
+    retry_transient_stage(app, job_id, || {
+        if tmp_out_path.exists() { fs::remove_file(&tmp_out_path)?; }
+        let mut cmd = Command::new(chdman);
+        cmd.arg(command).arg("-i").arg(source_name).arg("-o").arg(&tmp_out_name)
+            .arg("-f").current_dir(&source_dir);
+        run_command_streaming(app, job_id, base, span, cmd).context("chdman no pudo completar la conversion")
+    })?;
 
     // Relocate the finished CHD to where the caller wants it.
     if output.exists() {
@@ -1773,20 +1948,6 @@ fn run_chdman_convert(
         anyhow!("No se pudo mover el CHD generado a su destino: {e}")
     })?;
     Ok(())
-}
-
-/// Reduces an identifier to ASCII alphanumerics/`-`/`_` for use inside a temp
-/// filename. Falls back to a constant if nothing usable remains.
-fn sanitize_ascii_token(token: &str) -> String {
-    let cleaned: String = token
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if cleaned.is_empty() {
-        "job".to_string()
-    } else {
-        cleaned
-    }
 }
 
 /// Returns just the filename (not the full path) for a CHD output file.
@@ -1826,46 +1987,7 @@ pub fn load_chdman_metadata(app: &AppHandle) -> serde_json::Value {
 /// On Linux the binary may fail to launch if required shared libraries are missing.
 /// Running with no args makes chdman print its command list and exit — a fast, safe probe.
 pub fn probe_chdman_runtime(app: &AppHandle) -> crate::models::ToolRuntimeDto {
-    use crate::models::ToolRuntimeDto;
-
-    let Some(path) = chdman_path(app) else {
-        return ToolRuntimeDto {
-            available: false,
-            path: None,
-            version: None,
-            error: Some("chdman no encontrado en los recursos de la aplicación".to_string()),
-        };
-    };
-
-    let path_str = path.to_string_lossy().to_string();
-    let mut command = Command::new(&path);
-    match hide_console_window(&mut command).output() {
-        Ok(output) => {
-            // The binary ran (even if exit code != 0 — chdman exits 1 with no args).
-            // Grab the first non-empty line from stdout or stderr as the version hint.
-            let version = [&output.stdout, &output.stderr].iter().find_map(|b| {
-                let s = String::from_utf8_lossy(b);
-                s.lines()
-                    .find(|l| !l.trim().is_empty())
-                    .map(|l| l.trim().to_string())
-            });
-            ToolRuntimeDto {
-                available: true,
-                path: Some(path_str),
-                version,
-                error: None,
-            }
-        }
-        Err(e) => {
-            // OS-level failure — missing shared lib, wrong architecture, etc.
-            ToolRuntimeDto {
-                available: false,
-                path: Some(path_str),
-                version: None,
-                error: Some(e.to_string()),
-            }
-        }
-    }
+    probe_tool_runtime(chdman_path(app), "chdman no encontrado en los recursos de la aplicación")
 }
 
 /// Generic runtime probe: resolves a bundled/PATH binary and confirms it can be
@@ -1882,9 +2004,17 @@ fn probe_tool_runtime(path: Option<PathBuf>, missing_error: &str) -> crate::mode
         };
     };
     let path_str = path.to_string_lossy().to_string();
+    if let Err(error) = ensure_executable(&path) {
+        return ToolRuntimeDto { available: false, path: Some(path_str), version: None, error: Some(error.to_string()) };
+    }
     let mut command = Command::new(&path);
     match hide_console_window(&mut command).output() {
         Ok(output) => {
+            // Missing ELF dependencies terminate in the dynamic loader (127):
+            // chdman and DolphinTool legitimately return 1 for their usage text.
+            if cfg!(target_os = "linux") && (output.status.code() == Some(127) || output.status.code().is_none()) {
+                return ToolRuntimeDto { available: false, path: Some(path_str), version: None, error: Some(command_output_message(&output)) };
+            }
             let version = [&output.stdout, &output.stderr].iter().find_map(|b| {
                 let s = String::from_utf8_lossy(b);
                 s.lines()
@@ -2081,7 +2211,7 @@ pub fn restore_from_chd(
                 .to_string_lossy()
                 .to_string();
 
-            run_remote_file_cycle(
+            run_remote_file_cycle_with_policy(
                 app,
                 job_id,
                 &rm,
@@ -2089,6 +2219,7 @@ pub fn restore_from_chd(
                 remote_dest,
                 &policy,
                 &source_name,
+                overwrite,
                 |temp_dir| {
                     let write_dir = if let Some(ref name) = folder_name_c {
                         let d = temp_dir.join(name);
@@ -2285,33 +2416,6 @@ fn finalize_delete_original(
     Ok(())
 }
 
-/// Recursively uploads a local directory tree to a remote destination,
-/// recreating the folder structure.
-fn upload_dir_recursive(
-    app: &AppHandle,
-    job_id: &str,
-    rm: &remote::RemoteManager,
-    local_dir: &Path,
-    remote_dir: &str,
-) -> Result<()> {
-    rm.ensure_remote_dir(remote_dir)?;
-    for entry in fs::read_dir(local_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            let child = format!(
-                "{}/{}",
-                remote_dir.trim_end_matches('/'),
-                entry.file_name().to_string_lossy()
-            );
-            upload_dir_recursive(app, job_id, rm, &path, &child)?;
-        } else {
-            rm.upload_file_to_remote(app, job_id, &path, remote_dir)?;
-        }
-    }
-    Ok(())
-}
-
 /// Chooses the effective remote destination directory for a disc-image op:
 /// an explicit `remote_destination`, or the remote source's own folder when the
 /// source is remote and the destination mode is not a local "custom" path.
@@ -2331,6 +2435,27 @@ fn effective_disc_remote_dest(source: &Path, options: &DiscImageOptionsPayload) 
 /// to temp → upload → cleanup). `produce(local_source, output_path)` writes the
 /// single output file.
 #[allow(clippy::too_many_arguments)]
+fn unique_remote_output_name(manager: &remote::RemoteManager, destination: &str, desired: &str) -> Result<String> {
+    let exists = |name: &str| manager.queue_path_exists(&format!("{}/{}", destination.trim_end_matches('/'), name));
+    if !exists(desired)? { return Ok(desired.to_string()); }
+    let path = Path::new(desired);
+    let stem = path.file_stem().and_then(OsStr::to_str).unwrap_or(desired);
+    let extension = path.extension().and_then(OsStr::to_str).map(|ext| format!(".{ext}")).unwrap_or_default();
+    for number in 1u32.. {
+        let name = format!("{stem} ({number}){extension}");
+        if !exists(&name)? { return Ok(name); }
+    }
+    Err(anyhow!("No se encontro un nombre remoto disponible"))
+}
+
+fn validated_planned_output_name<'a>(planned: Option<&'a str>, fallback: &'a str) -> Result<&'a str> {
+    let name = planned.unwrap_or(fallback);
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        return Err(anyhow!("Nombre de salida planificado invalido"));
+    }
+    Ok(name)
+}
+
 fn run_disc_file_op(
     app: &AppHandle,
     job_id: &str,
@@ -2339,15 +2464,16 @@ fn run_disc_file_op(
     source: &Path,
     options: &DiscImageOptionsPayload,
     output_name: &str,
-    produce: impl FnOnce(&Path, &Path) -> Result<()>,
+    produce: impl Fn(&Path, &Path) -> Result<()>,
 ) -> Result<()> {
     let source_is_remote = remote::RemoteManager::is_remote_path(&source.to_string_lossy());
+    let output_name = validated_planned_output_name(options.planned_output_name.as_deref(), output_name)?;
 
     // Fast path: nothing remote — write straight to the local destination.
     if !source_is_remote && options.remote_destination.is_none() {
         let dest_dir = disc_destination_dir(source, options)?;
         fs::create_dir_all(&dest_dir)?;
-        let output = prepare_output_path(
+        let output = resolve_output_path(
             dest_dir.join(output_name),
             options.overwrite,
             options.rename_on_conflict,
@@ -2357,7 +2483,7 @@ fn run_disc_file_op(
             job_id,
             format!("{} -> {}", source.display(), output.display()),
         )?;
-        return produce(source, &output);
+        return produce_staged_disc_file(app, job_id, source, &output, options.overwrite, &produce);
     }
 
     let rm = remote_manager
@@ -2376,7 +2502,10 @@ fn run_disc_file_op(
                 on_error: "abort".to_string(),
             });
         let source_name = leaf_name(source);
-        run_remote_file_cycle(
+        let output_name = if !options.overwrite && options.rename_on_conflict {
+            unique_remote_output_name(rm, &dest, output_name)?
+        } else { output_name.to_string() };
+        run_remote_file_cycle_with_policy(
             app,
             job_id,
             rm,
@@ -2384,8 +2513,9 @@ fn run_disc_file_op(
             &dest,
             &policy,
             &source_name,
+            options.overwrite,
             |temp_dir| {
-                let output = temp_dir.join(output_name);
+                let output = temp_dir.join(&output_name);
                 produce(&local_source, &output)?;
                 Ok(vec![output])
             },
@@ -2394,13 +2524,48 @@ fn run_disc_file_op(
         // Remote source → local (custom) destination.
         let dest_dir = disc_destination_dir(source, options)?;
         fs::create_dir_all(&dest_dir)?;
-        let output = prepare_output_path(
+        let output = resolve_output_path(
             dest_dir.join(output_name),
             options.overwrite,
             options.rename_on_conflict,
         )?;
-        produce(&local_source, &output)
+        produce_staged_disc_file(app, job_id, &local_source, &output, options.overwrite, &produce)
     }
+}
+
+fn produce_staged_disc_file(
+    app: &AppHandle,
+    job_id: &str,
+    source: &Path,
+    output: &Path,
+    overwrite: bool,
+    produce: &impl Fn(&Path, &Path) -> Result<()>,
+) -> Result<()> {
+    let parent = output.parent().ok_or_else(|| anyhow!("Destino invalido"))?;
+    let stage_parent = staging_parent_outside_sources(parent, &[source.to_path_buf()])?;
+    let staging = tempfile::Builder::new().prefix("dogu-disc-").tempdir_in(stage_parent)?;
+    let staged = staging.path().join(output.file_name().ok_or_else(|| anyhow!("Destino invalido"))?);
+    retry_transient_stage(app, job_id, || {
+        if staged.exists() { remove_single_path(&staged)?; }
+        produce(source, &staged)
+    })?;
+    commit_staged_file(&staged, output, overwrite)
+}
+
+fn resolve_output_path(path: PathBuf, overwrite: bool, rename_on_conflict: bool) -> Result<PathBuf> {
+    if !path.exists() || overwrite { return Ok(path); }
+    if rename_on_conflict { return Ok(unique_path(&path)); }
+    Err(anyhow!("El destino ya existe: {}. Activa sobreescribir o renombrar en conflicto.", path.display()))
+}
+
+fn staging_parent_outside_sources(destination: &Path, sources: &[PathBuf]) -> Result<PathBuf> {
+    let directories: Vec<PathBuf> = sources.iter().filter(|source| source.is_dir())
+        .map(fs::canonicalize).collect::<io::Result<_>>()?;
+    let mut parent = fs::canonicalize(destination)?;
+    while directories.iter().any(|source| parent.starts_with(source)) {
+        parent = parent.parent().ok_or_else(|| anyhow!("No se puede crear una zona temporal fuera de las carpetas de origen"))?.to_path_buf();
+    }
+    Ok(parent)
 }
 
 /// Like `run_disc_file_op` but the op produces a whole output *folder* (e.g.
@@ -2415,20 +2580,20 @@ fn run_disc_folder_op(
     source: &Path,
     options: &DiscImageOptionsPayload,
     folder_name: &str,
-    produce: impl FnOnce(&Path, &Path) -> Result<()>,
+    produce: impl Fn(&Path, &Path) -> Result<()>,
 ) -> Result<()> {
     let source_is_remote = remote::RemoteManager::is_remote_path(&source.to_string_lossy());
+    let folder_name = validated_planned_output_name(options.planned_output_name.as_deref(), folder_name)?;
 
     if !source_is_remote && options.remote_destination.is_none() {
         let dest_dir = disc_destination_dir(source, options)?;
         fs::create_dir_all(&dest_dir)?;
-        let output_dir = prepare_output_path(
+        let output_dir = resolve_output_path(
             dest_dir.join(folder_name),
             options.overwrite,
             options.rename_on_conflict,
         )?;
-        fs::create_dir_all(&output_dir)?;
-        return produce(source, &output_dir);
+        return produce_staged_disc_folder(app, job_id, source, &output_dir, options.overwrite, &produce);
     }
 
     let rm = remote_manager
@@ -2437,24 +2602,64 @@ fn run_disc_folder_op(
     let (local_source, _guard) = localize_remote_source(app, job_id, rm, source, source_is_remote)?;
 
     if let Some(dest) = effective_disc_remote_dest(source, options) {
-        let staging = temp_download_dir(app, job_id)?.join(format!("out-{folder_name}"));
-        fs::create_dir_all(&staging)?;
-        let _out_guard = TempGuard(staging.clone());
-        produce(&local_source, &staging)?;
-        let remote_target = format!("{}/{}", dest.trim_end_matches('/'), folder_name);
-        upload_dir_recursive(app, job_id, rm, &staging, &remote_target)?;
+        let folder_name = if !options.overwrite && options.rename_on_conflict {
+            unique_remote_output_name(rm, &dest, folder_name)?
+        } else { folder_name.to_string() };
+        let (staging, output) = retry_transient_stage(app, job_id, || {
+            let staging = tempfile::Builder::new().prefix("dogu-xiso-").tempdir()?;
+            let output = staging.path().join(&folder_name);
+            fs::create_dir_all(&output)?;
+            produce(&local_source, &output)?;
+            Ok((staging, output))
+        })?;
+        rm.ensure_remote_dir(&dest)?;
+        if options.overwrite { rm.upload_staged_to_remote(app, job_id, &output, &dest)?; }
+        else { rm.upload_staged_no_overwrite(app, job_id, &output, &dest)?; }
+        drop(staging);
         Ok(())
     } else {
         let dest_dir = disc_destination_dir(source, options)?;
         fs::create_dir_all(&dest_dir)?;
-        let output_dir = prepare_output_path(
+        let output_dir = resolve_output_path(
             dest_dir.join(folder_name),
             options.overwrite,
             options.rename_on_conflict,
         )?;
-        fs::create_dir_all(&output_dir)?;
-        produce(&local_source, &output_dir)
+        produce_staged_disc_folder(app, job_id, &local_source, &output_dir, options.overwrite, &produce)
     }
+}
+
+fn produce_staged_disc_folder(
+    app: &AppHandle, job_id: &str, source: &Path, output: &Path, overwrite: bool,
+    produce: &impl Fn(&Path, &Path) -> Result<()>,
+) -> Result<()> {
+    let parent = output.parent().ok_or_else(|| anyhow!("Destino invalido"))?;
+    let staging = retry_transient_stage(app, job_id, || {
+        let staging = tempfile::Builder::new().prefix("dogu-folder-").tempdir_in(parent)?;
+        produce(source, staging.path())?;
+        Ok(staging)
+    })?;
+    publish_staged_directory(staging.path(), output, overwrite)
+}
+
+fn publish_staged_directory(staged: &Path, target: &Path, overwrite: bool) -> Result<()> {
+    let parent = target.parent().ok_or_else(|| anyhow!("Destino invalido"))?;
+    let backup = if target.exists() {
+        if !overwrite { return Err(anyhow!("El destino ya existe: {}", target.display())); }
+        let backup = tempfile::Builder::new().prefix("dogu-backup-").tempdir_in(parent)?;
+        fs::rename(target, backup.path().join("original"))?;
+        Some(backup)
+    } else { None };
+    if let Err(error) = fs::rename(staged, target) {
+        if let Some(backup) = backup {
+            if let Err(restore_error) = fs::rename(backup.path().join("original"), target) {
+                let saved = backup.keep();
+                return Err(anyhow!("No se pudo publicar {}: {}. No se pudo restaurar el destino anterior: {}. Copia conservada en {}", target.display(), error, restore_error, saved.join("original").display()));
+            }
+        }
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 fn disc_destination_dir(source: &Path, options: &DiscImageOptionsPayload) -> Result<PathBuf> {
@@ -2469,27 +2674,6 @@ fn disc_destination_dir(source: &Path, options: &DiscImageOptionsPayload) -> Res
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow!("No se pudo determinar la carpeta de destino"))
-}
-
-fn prepare_output_path(
-    path: PathBuf,
-    overwrite: bool,
-    rename_on_conflict: bool,
-) -> Result<PathBuf> {
-    if !path.exists() {
-        return Ok(path);
-    }
-    if overwrite {
-        remove_single_path(&path)?;
-        return Ok(path);
-    }
-    if rename_on_conflict {
-        return Ok(unique_path(&path));
-    }
-    Err(anyhow!(
-        "El destino ya existe: {}. Activa sobreescribir o renombrar en conflicto.",
-        path.display()
-    ))
 }
 
 fn source_stem(path: &Path) -> String {
@@ -3448,7 +3632,18 @@ fn compute_directory_stats(
 }
 
 fn copy_path(source: &Path, target: &Path) -> Result<()> {
-    if source.is_dir() {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        #[cfg(unix)]
+        {
+            if let Some(parent) = target.parent() { fs::create_dir_all(parent)?; }
+            std::os::unix::fs::symlink(fs::read_link(source)?, target)?;
+            return Ok(());
+        }
+        #[cfg(not(unix))]
+        return Err(anyhow!("No se puede copiar un enlace simbolico de forma segura: {}", source.display()));
+    }
+    if metadata.is_dir() {
         fs::create_dir_all(target)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
@@ -3462,6 +3657,46 @@ fn copy_path(source: &Path, target: &Path) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::copy(source, target)?;
+    Ok(())
+}
+
+fn copy_or_move_one_staged(source: &Path, target: &Path, is_move: bool, overwrite: bool) -> Result<()> {
+    if source == target {
+        return Err(anyhow!("El origen y el destino son el mismo elemento."));
+    }
+    let parent = target.parent().ok_or_else(|| anyhow!("Destino invalido: {}", target.display()))?;
+    let stage = tempfile::Builder::new().prefix(".dogu-transfer-").tempdir_in(parent)?;
+    let payload = stage.path().join("payload");
+    let backup = stage.path().join("original");
+    let exists = fs::symlink_metadata(target).is_ok();
+    if exists && !overwrite { return Err(anyhow!("El destino ya existe: {}", target.display())); }
+    if is_move {
+        // A same-volume rename avoids copying large files. If it is unavailable,
+        // restore the old destination and fall back to a staged copy.
+        if exists { fs::rename(target, &backup)?; }
+        if fs::rename(source, target).is_ok() { return Ok(()); }
+        if exists {
+            if let Err(error) = fs::rename(&backup, target) {
+                let saved = stage.keep();
+                return Err(anyhow!("[REQUIRES_REVIEW] No se pudo recuperar el destino '{}': {error}. Se conserva en '{}'.", target.display(), saved.join("original").display()));
+            }
+        }
+    }
+    // The fallback also covers cross-volume moves and leaves the original intact.
+    copy_path(source, &payload)?;
+    if exists {
+        fs::rename(target, &backup)?;
+    }
+    if let Err(error) = fs::rename(&payload, target) {
+        if exists && fs::rename(&backup, target).is_err() {
+            let saved = stage.keep();
+            return Err(anyhow!("[REQUIRES_REVIEW] No se pudo publicar '{}': {error}. El destino anterior se conserva en '{}'.", target.display(), saved.join("original").display()));
+        }
+        return Err(anyhow!("No se pudo publicar '{}': {error}", target.display()));
+    }
+    if is_move {
+        remove_single_path(source).map_err(|error| anyhow!("[REQUIRES_REVIEW] El destino '{}' se publico, pero no se pudo eliminar el origen '{}': {error:#}. Revisa ambas rutas.", target.display(), source.display()))?;
+    }
     Ok(())
 }
 
@@ -3479,9 +3714,14 @@ fn move_path(source: &Path, target: &Path) -> Result<()> {
 }
 
 fn remove_single_path(path: &Path) -> Result<()> {
-    if path.is_dir() {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_dir() {
         fs::remove_dir_all(path)?;
-    } else if path.exists() {
+    } else {
         fs::remove_file(path)?;
     }
     Ok(())
@@ -3540,11 +3780,17 @@ fn xdvdfs_kind(path: &Path) -> io::Result<Option<XisoKind>> {
         }
         match file.read_exact(&mut magic) {
             Ok(()) if &magic == XDVDFS_VOLUME_MAGIC => {
-                return Ok(Some(if index == 0 {
-                    XisoKind::Trimmed
-                } else {
-                    XisoKind::Redump
-                }));
+                file.seek(io::SeekFrom::Start(offset + XDVDFS_VOLUME_SECTOR + 2048 - magic.len() as u64))?;
+                match file.read_exact(&mut magic) {
+                    Ok(()) if &magic == XDVDFS_VOLUME_MAGIC => return Ok(Some(if index == 0 {
+                        XisoKind::Trimmed
+                    } else {
+                        XisoKind::Redump
+                    })),
+                    Ok(()) => {},
+                    Err(ref error) if error.kind() == io::ErrorKind::UnexpectedEof => {},
+                    Err(error) => return Err(error),
+                }
             }
             // Wrong signature, or the probe offset is past EOF for this image:
             // keep probing the remaining offsets.
@@ -3562,14 +3808,18 @@ fn is_gc_wii_iso(path: &Path) -> io::Result<bool> {
     let mut file = fs::File::open(path)?;
     let mut word = [0_u8; 4];
     file.seek(io::SeekFrom::Start(0x18))?;
-    if file.read_exact(&mut word).is_ok() && word == [0x5D, 0x1C, 0x9E, 0xA3] {
-        return Ok(true);
+    match file.read_exact(&mut word) {
+        Ok(()) if word == [0x5D, 0x1C, 0x9E, 0xA3] => return Ok(true),
+        Ok(()) => {},
+        Err(ref error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+        Err(error) => return Err(error),
     }
     file.seek(io::SeekFrom::Start(0x1C))?;
-    if file.read_exact(&mut word).is_ok() && word == [0xC2, 0x33, 0x9F, 0x3D] {
-        return Ok(true);
+    match file.read_exact(&mut word) {
+        Ok(()) => Ok(word == [0xC2, 0x33, 0x9F, 0x3D]),
+        Err(ref error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error),
     }
-    Ok(false)
 }
 
 /// Classify local `.iso` selections by content so the UI only offers treatments
@@ -4000,8 +4250,6 @@ fn restore_chd_content(
         .file_name()
         .ok_or_else(|| anyhow!("Ruta CHD invalida: {}", chd.display()))?
         .to_owned();
-    let same_target = same_path(&work_dir, dir);
-
     let order: &[RestoreFormat] = match probe_chd_disc_kind(chdman, chd) {
         ChdDiscKind::GdRom => &[RestoreFormat::Gdi, RestoreFormat::Cd, RestoreFormat::Dvd],
         ChdDiscKind::Cd => &[RestoreFormat::Cd, RestoreFormat::Dvd],
@@ -4009,21 +4257,19 @@ fn restore_chd_content(
     };
 
     let mut errors: Vec<String> = Vec::new();
-    for (attempt, fmt) in order.iter().enumerate() {
-        if attempt > 0 {
-            // Clear any partial output the previous format may have written.
-            let cue = work_dir.join(format!("{stem}.cue"));
-            let bin = work_dir.join(format!("{stem}.bin"));
-            cleanup_restore_outputs(&cue, &bin, &work_dir, stem, chd)?;
-        }
-
+    for fmt in order {
+        // Every format attempt owns an isolated directory. Never clean by
+        // filename prefix in a user's folder: unrelated files may share it.
+        let run = retry_transient_stage(app, job_id, || {
+        let attempt_dir = tempfile::Builder::new().prefix("dogu-restore-").tempdir_in(&work_dir)?;
+        let input_from_attempt = Path::new("..").join(&chd_name);
         let mut command = Command::new(chdman);
         match fmt {
             RestoreFormat::Gdi => {
                 command
                     .arg("extractcd")
                     .arg("-i")
-                    .arg(&chd_name)
+                    .arg(&input_from_attempt)
                     .arg("-o")
                     .arg(format!("{stem}.gdi"));
             }
@@ -4031,7 +4277,7 @@ fn restore_chd_content(
                 command
                     .arg("extractcd")
                     .arg("-i")
-                    .arg(&chd_name)
+                    .arg(&input_from_attempt)
                     .arg("-o")
                     .arg(format!("{stem}.cue"));
                 if split_bin {
@@ -4044,7 +4290,7 @@ fn restore_chd_content(
                 command
                     .arg("extractdvd")
                     .arg("-i")
-                    .arg(&chd_name)
+                    .arg(&input_from_attempt)
                     .arg("-o")
                     .arg(format!("{stem}.iso"));
             }
@@ -4052,33 +4298,30 @@ fn restore_chd_content(
         if overwrite {
             command.arg("-f");
         }
-        command.current_dir(&work_dir);
+        command.current_dir(attempt_dir.path());
 
-        let run = run_command_streaming(app, job_id, base, span, command).map_err(|e| {
-            anyhow!(if e.to_string().is_empty() {
-                format!("chdman ({}) devolvio un error", fmt.label())
-            } else {
-                e.to_string()
-            })
+        run_command_streaming(app, job_id, base, span, command)
+            .with_context(|| format!("chdman ({}) no pudo completar la restauracion", fmt.label()))?;
+        Ok(attempt_dir)
         });
 
         match run {
-            Ok(()) => {
-                // Relocate the produced set to the requested destination if needed.
-                if !same_target {
-                    fs::create_dir_all(dir)?;
-                    for produced in collect_restore_outputs(&work_dir, stem, chd) {
-                        let leaf = produced
-                            .file_name()
-                            .map(|n| n.to_owned())
-                            .unwrap_or_default();
-                        let target = dir.join(&leaf);
-                        if target.exists() && overwrite {
-                            remove_single_path(&target)?;
-                        }
-                        move_path(&produced, &target)?;
+            Ok(attempt_dir) => {
+                let produced = collect_restore_outputs(attempt_dir.path(), stem, chd);
+                if produced.is_empty() {
+                    errors.push(format!("{}: no se produjeron archivos", fmt.label()));
+                    continue;
+                }
+                fs::create_dir_all(dir)?;
+                // Check all destinations before changing any of them.
+                for source in &produced {
+                    let name = source.file_name().ok_or_else(|| anyhow!("Salida CHD invalida"))?;
+                    let target = dir.join(name);
+                    if target.exists() && !overwrite {
+                        return Err(anyhow!("El destino ya existe: {}", target.display()));
                     }
                 }
+                publish_file_set(&produced, dir, overwrite)?;
                 return Ok(*fmt);
             }
             Err(e) => errors.push(format!("{}: {e}", fmt.label())),
@@ -4089,6 +4332,51 @@ fn restore_chd_content(
         chd.display(),
         errors.join("\n")
     ))
+}
+
+/// Prepare all files on the destination filesystem before replacing anything.
+/// On failure, restore prior files; preserve the backup if rollback fails.
+fn publish_file_set(sources: &[PathBuf], destination: &Path, overwrite: bool) -> Result<()> {
+    let staging = tempfile::Builder::new().prefix("dogu-publish-").tempdir_in(destination)?;
+    let backup = tempfile::Builder::new().prefix("dogu-backup-").tempdir_in(destination)?;
+    let mut names = Vec::new();
+    for source in sources {
+        let name = source.file_name().ok_or_else(|| anyhow!("Nombre de salida invalido"))?.to_owned();
+        let target = destination.join(&name);
+        if target.exists() && !overwrite { return Err(anyhow!("El destino ya existe: {}", target.display())); }
+        fs::copy(source, staging.path().join(&name))?;
+        names.push(name);
+    }
+    let mut saved = Vec::new();
+    let mut published = Vec::new();
+    let result = (|| -> Result<()> {
+        for name in &names {
+            let target = destination.join(name);
+            if target.exists() {
+                if !overwrite { return Err(anyhow!("El destino ya existe: {}", target.display())); }
+                fs::rename(&target, backup.path().join(name))?;
+                saved.push(name.clone());
+            }
+            commit_staged_file(&staging.path().join(name), &target, false)?;
+            published.push(name.clone());
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let mut failures = Vec::new();
+        for name in published.iter().rev() {
+            if let Err(e) = fs::remove_file(destination.join(name)) { failures.push(e.to_string()); }
+        }
+        for name in saved.iter().rev() {
+            if let Err(e) = fs::rename(backup.path().join(name), destination.join(name)) { failures.push(e.to_string()); }
+        }
+        if !failures.is_empty() {
+            let saved_path = backup.keep();
+            return Err(anyhow!("Error al publicar: {error:#}. No se pudo completar la recuperacion: {}. Copia conservada en {}", failures.join("; "), saved_path.display()));
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Lists the files a chdman restore produced under `stem` in `dir` (the `.gdi`/
@@ -4122,44 +4410,11 @@ fn collect_restore_outputs(dir: &Path, stem: &str, chd: &Path) -> Vec<PathBuf> {
     produced
 }
 
-fn cleanup_restore_outputs(
-    cue_path: &Path,
-    bin_path: &Path,
-    destination: &Path,
-    stem: &str,
-    source_chd: &Path,
-) -> Result<()> {
-    if cue_path.exists() {
-        let _ = fs::remove_file(cue_path);
-    }
-    if bin_path.exists() {
-        let _ = fs::remove_file(bin_path);
-    }
-    if destination.exists() {
-        for entry in fs::read_dir(destination)? {
-            let entry = entry?;
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .unwrap_or_else(|| path.as_os_str())
-                .to_string_lossy()
-                .to_string();
-            if same_path(&path, source_chd) {
-                continue;
-            }
-            if name.to_lowercase().starts_with(&stem.to_lowercase()) && path.is_file() {
-                let _ = fs::remove_file(path);
-            }
-        }
-    }
-    Ok(())
-}
-
 fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
     let mut deduped = Vec::new();
     for path in paths {
-        let key = path.to_string_lossy().to_lowercase();
+        let key = path_identity(&path);
         if seen.insert(key) {
             deduped.push(path);
         }
@@ -4168,7 +4423,7 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+    path_identity(left) == path_identity(right)
 }
 
 pub fn emit_progress(app: &AppHandle, job_id: &str, progress: f64, message: String) -> Result<()> {
@@ -4401,7 +4656,7 @@ pub fn get_known_folders() -> KnownFoldersDto {
 /// files there, returning their paths. This function then uploads each file
 /// to `remote_dest_dir` and removes the temp dir. If an upload fails the
 /// `policy` governs behaviour: abort / skip / pause-and-ask.
-pub fn run_remote_file_cycle<F>(
+fn run_remote_file_cycle_with_policy<F>(
     app: &AppHandle,
     job_id: &str,
     remote_manager: &remote::RemoteManager,
@@ -4409,10 +4664,11 @@ pub fn run_remote_file_cycle<F>(
     remote_dest_dir: &str,
     policy: &RemoteTransferPolicy,
     source_name: &str,
+    overwrite: bool,
     produce: F,
 ) -> Result<()>
 where
-    F: FnOnce(&Path) -> Result<Vec<PathBuf>>,
+    F: Fn(&Path) -> Result<Vec<PathBuf>>,
 {
     use tauri::Manager;
     let temp_root = app
@@ -4420,15 +4676,12 @@ where
         .app_data_dir()
         .context("No se pudo obtener el directorio de datos de la aplicacion")?
         .join("temp");
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    let temp_dir = temp_root.join(format!("remote-cycle-{}-{}", job_id, nanos));
-    fs::create_dir_all(&temp_dir)?;
-    let _guard = TempGuard(temp_dir.clone()); // cleaned up on any exit path
-
-    let output_files = produce(&temp_dir)?;
+    fs::create_dir_all(&temp_root)?;
+    let (_guard, output_files) = retry_transient_stage(app, job_id, || {
+        let temp_dir = tempfile::Builder::new().prefix("remote-cycle-").tempdir_in(&temp_root)?;
+        let files = produce(temp_dir.path())?;
+        Ok((temp_dir, files))
+    })?;
 
     // Ensure the remote destination directory exists
     remote_manager
@@ -4449,7 +4702,9 @@ where
 
         let _ = emit_log(app, job_id, format!("Subiendo {}...", file_name));
         'retry: loop {
-            match remote_manager.upload_file_to_remote(app, job_id, file, remote_dest_dir) {
+            let upload = if overwrite { remote_manager.upload_staged_to_remote(app, job_id, file, remote_dest_dir) }
+                else { remote_manager.upload_staged_no_overwrite(app, job_id, file, remote_dest_dir) };
+            match upload {
                 Ok(_) => {
                     let _ = emit_log(app, job_id, format!("{} subido correctamente", file_name));
                     break 'retry;
@@ -4461,7 +4716,7 @@ where
                             job_id,
                             format!("Subida omitida ({source_name} → {file_name}): {upload_err}"),
                         );
-                        break 'retry;
+                        return Err(anyhow!("No se publico {file_name}: subida omitida ({upload_err})"));
                     }
                     "pause" => {
                         let decision = pause_registry.pause_for_decision(
@@ -4479,7 +4734,7 @@ where
                                     job_id,
                                     format!("Subida omitida por el usuario: {file_name}"),
                                 );
-                                break 'retry;
+                                return Err(anyhow!("No se publico {file_name}: subida omitida por el usuario ({upload_err})"));
                             }
                             pause::PauseDecision::Abort => {
                                 return Err(anyhow!("Operacion cancelada por el usuario."));
@@ -4503,14 +4758,15 @@ where
 /// Uses sysinfo to enumerate mounted disks and picks the longest-prefix match.
 pub fn free_space_at(path: &Path) -> Result<u64> {
     use sysinfo::Disks;
-    let path_str = path.to_string_lossy().to_lowercase();
+    let existing = path.ancestors().find(|ancestor| ancestor.exists()).unwrap_or(path);
+    let path = fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
     let disks = Disks::new_with_refreshed_list();
     let best = disks
         .iter()
         .filter_map(|d| {
-            let mount = d.mount_point().to_string_lossy().to_lowercase();
-            if path_str.starts_with(mount.as_str()) {
-                Some((mount.len(), d.available_space()))
+            let mount = d.mount_point();
+            if path.starts_with(mount) {
+                Some((mount.components().count(), d.available_space()))
             } else {
                 None
             }
@@ -4728,8 +4984,10 @@ pub fn compress_to_archive(
             });
         let effective_sources_c = effective_sources.clone();
         let options_c = options.clone();
-        let archive_filename_c = archive_filename.clone();
-        run_remote_file_cycle(
+        let archive_filename_c = if !options.overwrite && options.rename_on_conflict {
+            unique_remote_output_name(&rm, remote_dest, &archive_filename)?
+        } else { archive_filename.clone() };
+        run_remote_file_cycle_with_policy(
             app,
             job_id,
             &rm,
@@ -4737,6 +4995,7 @@ pub fn compress_to_archive(
             remote_dest,
             &policy,
             &archive_filename,
+            options.overwrite,
             |temp_dir| {
                 let archive_path = temp_dir.join(&archive_filename_c);
                 do_compress(
@@ -4772,15 +5031,17 @@ pub fn compress_to_archive(
                 archive_path.display()
             ),
         )?;
-        do_compress(
-            app,
-            job_id,
-            0.0,
-            0.9,
-            &effective_sources,
-            &archive_path,
-            &options,
-        )?;
+        fs::create_dir_all(&dest_folder)?;
+        // Build alongside the destination and publish only a complete archive.
+        // A failed compressor cannot truncate an existing user file.
+        let stage_parent = staging_parent_outside_sources(&dest_folder, &effective_sources)?;
+        let staging = tempfile::Builder::new().prefix("dogu-compress-").tempdir_in(stage_parent)?;
+        let staged_path = staging.path().join(&archive_filename);
+        retry_transient_stage(app, job_id, || {
+            if staged_path.exists() { fs::remove_file(&staged_path)?; }
+            do_compress(app, job_id, 0.0, 0.9, &effective_sources, &staged_path, &options)
+        })?;
+        commit_staged_file(&staged_path, &archive_path, options.overwrite)?;
         emit_log(
             app,
             job_id,
@@ -4806,15 +5067,8 @@ pub fn compress_to_archive(
                         format!("Original remoto eliminado: {}", source.display()),
                     )?;
                 }
-            } else if source.is_dir() {
-                fs::remove_dir_all(source)?;
-                emit_log(
-                    app,
-                    job_id,
-                    format!("Original eliminado: {}", source.display()),
-                )?;
             } else {
-                fs::remove_file(source)?;
+                remove_single_path(source)?;
                 emit_log(
                     app,
                     job_id,
@@ -4825,6 +5079,48 @@ pub fn compress_to_archive(
     }
 
     emit_progress(app, job_id, 1.0, "Compresión completada.".to_string())?;
+    Ok(())
+}
+
+/// Only retry errors that are explicitly transient and still retain their IO
+/// type. Permanent, unknown and process-exit errors require user review.
+fn is_transient_io(error: &anyhow::Error) -> bool {
+    error.chain().filter_map(|cause| cause.downcast_ref::<io::Error>()).any(|error| {
+        matches!(error.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+            | io::ErrorKind::TimedOut | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe)
+    })
+}
+
+fn retry_transient<T>(mut attempt: impl FnMut() -> Result<T>, mut wait: impl FnMut(usize, &anyhow::Error) -> Result<()>) -> Result<T> {
+    for retries in 0..=2 {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) if retries < 2 && is_transient_io(&error) => {
+                wait(retries + 1, &error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+fn retry_transient_stage<T>(app: &AppHandle, job_id: &str, attempt: impl FnMut() -> Result<T>) -> Result<T> {
+    retry_transient(attempt, |retry, error| {
+        emit_log(app, job_id, format!("Error temporal; reintento automatico {} de 2: {error:#}", retry))?;
+        std::thread::sleep(std::time::Duration::from_millis(500 * retry as u64));
+        Ok(())
+    })
+}
+
+/// Publish a staged file in the same filesystem without exposing partial output.
+fn commit_staged_file(staged: &Path, target: &Path, overwrite: bool) -> Result<()> {
+    let staged = tempfile::TempPath::try_from_path(staged.to_path_buf())?;
+    if overwrite {
+        staged.persist(target).map_err(|error| anyhow!("No se pudo publicar {}: {}", target.display(), error.error))?;
+    } else {
+        staged.persist_noclobber(target).map_err(|error| anyhow!("No se pudo publicar {}: {}", target.display(), error.error))?;
+    }
     Ok(())
 }
 
@@ -4998,7 +5294,7 @@ fn compress_via_7z(
         .arg("-y")
         .arg("-bsp1"); // stream progress percentage to stdout
     run_command_streaming(app, job_id, base, span, cmd)
-        .map_err(|e| anyhow!("7zz devolvió un error al comprimir: {}", e))
+        .context("7zz devolvió un error al comprimir")
 }
 
 fn compress_via_rar(
@@ -5032,7 +5328,297 @@ fn compress_via_rar(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_7z_slt_entries;
+    #[test]
+    fn local_transfer_preserves_existing_destination_when_source_is_missing() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let source = dir.path().join("missing");
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"original").unwrap();
+        assert!(super::copy_or_move_one_staged(&source, &target, true, true).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+    }
+
+    #[test]
+    fn local_transfer_copies_and_moves_without_losing_the_source_or_destination() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        std::fs::write(&source, b"new").unwrap();
+        std::fs::write(&target, b"old").unwrap();
+        assert!(super::copy_or_move_one_staged(&source, &target, false, false).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        super::copy_or_move_one_staged(&source, &target, false, true).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(super::copy_or_move_one_staged(&source, &source, true, true).is_err());
+        super::copy_or_move_one_staged(&source, &target, true, true).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    }
+    use super::*;
+
+    #[test]
+    fn zip_preview_reads_index_without_streaming_archive_content() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        struct CountingReader { inner: io::Cursor<Vec<u8>>, bytes: Rc<Cell<usize>> }
+        impl Read for CountingReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let n = self.inner.read(buf)?;
+                self.bytes.set(self.bytes.get() + n);
+                Ok(n)
+            }
+        }
+        impl Seek for CountingReader {
+            fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> { self.inner.seek(pos) }
+        }
+        let mut writer = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        writer.start_file("carpeta/disco.bin", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+        writer.write_all(&vec![42; 4 * 1024 * 1024]).unwrap();
+        let data = writer.finish().unwrap().into_inner();
+        let count = Rc::new(Cell::new(0));
+        let entries = list_all_zip_reader(CountingReader { inner: io::Cursor::new(data), bytes: count.clone() }).unwrap();
+        assert!(entries.contains(&("carpeta".to_string(), true)));
+        assert!(entries.contains(&("carpeta/disco.bin".to_string(), false)));
+        assert!(count.get() < 256 * 1024, "preview read {} bytes", count.get());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copying_and_removing_symlinks_never_traverses_the_target() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let outside = root.path().join("outside");
+        let source = root.path().join("source");
+        fs::create_dir(&outside).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::write(outside.join("keep"), b"data").unwrap();
+        std::os::unix::fs::symlink(&outside, source.join("link")).unwrap();
+        std::os::unix::fs::symlink("missing", source.join("broken")).unwrap();
+        let copied = root.path().join("copy");
+        copy_path(&source, &copied).unwrap();
+        assert!(fs::symlink_metadata(copied.join("link")).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(copied.join("broken")).unwrap().file_type().is_symlink());
+        remove_single_path(&copied.join("link")).unwrap();
+        remove_single_path(&copied.join("broken")).unwrap();
+        assert_eq!(fs::read(outside.join("keep")).unwrap(), b"data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_paths_with_different_case_are_distinct() {
+        let a = PathBuf::from("/games/Game.chd");
+        let b = PathBuf::from("/games/game.chd");
+        assert!(!same_path(&a, &b));
+        assert_eq!(dedupe_paths(vec![a, b]).len(), 2);
+    }
+
+    #[test]
+    fn identifies_xiso_by_both_volume_signatures_not_the_filename() {
+        use std::io::{Seek, Write};
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let xiso = root.path().join("game.iso");
+        let mut file = fs::File::create(&xiso).unwrap();
+        file.seek(io::SeekFrom::Start(XDVDFS_VOLUME_SECTOR)).unwrap();
+        file.write_all(XDVDFS_VOLUME_MAGIC).unwrap();
+        assert_eq!(xdvdfs_kind(&xiso).unwrap(), None);
+        file.seek(io::SeekFrom::Start(XDVDFS_VOLUME_SECTOR + 2048 - 20)).unwrap();
+        file.write_all(XDVDFS_VOLUME_MAGIC).unwrap();
+        drop(file);
+        assert_eq!(xdvdfs_kind(&xiso).unwrap(), Some(XisoKind::Trimmed));
+
+        let dump = root.path().join("dump.iso");
+        let mut file = fs::File::create(&dump).unwrap();
+        let sector = XDVDFS_PARTITION_OFFSETS[3] + XDVDFS_VOLUME_SECTOR;
+        file.seek(io::SeekFrom::Start(sector)).unwrap();
+        file.write_all(XDVDFS_VOLUME_MAGIC).unwrap();
+        file.seek(io::SeekFrom::Start(sector + 2048 - 20)).unwrap();
+        file.write_all(XDVDFS_VOLUME_MAGIC).unwrap();
+        drop(file);
+        assert_eq!(xdvdfs_kind(&dump).unwrap(), Some(XisoKind::Redump));
+        assert_eq!(xdvdfs_kind(&root.path().join("missing.iso")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn retries_only_transient_errors_and_caps_attempts() {
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        let result = retry_transient(|| { attempts += 1; if attempts < 3 { Err(io::Error::new(io::ErrorKind::TimedOut, "timeout").into()) } else { Ok(42) } }, |n, _| { waits.push(n); Ok(()) });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, vec![1, 2]);
+        attempts = 0;
+        let result: Result<()> = retry_transient(|| { attempts += 1; Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied").into()) }, |_, _| Ok(()));
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+        attempts = 0;
+        let result: Result<()> = retry_transient(|| { attempts += 1; Err(io::Error::new(io::ErrorKind::TimedOut, "timeout").into()) }, |_, _| Ok(()));
+        assert!(result.is_err());
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn staged_folder_preserves_existing_on_conflict_and_replaces_on_request() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let target = root.path().join("output");
+        let staged = root.path().join("stage");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&staged).unwrap();
+        fs::write(target.join("old"), b"old").unwrap();
+        fs::write(staged.join("new"), b"new").unwrap();
+        assert!(publish_staged_directory(&staged, &target, false).is_err());
+        assert!(target.join("old").exists());
+        publish_staged_directory(&staged, &target, true).unwrap();
+        assert_eq!(fs::read(target.join("new")).unwrap(), b"new");
+        assert!(!target.join("old").exists());
+    }
+
+    #[test]
+    fn publishing_multi_file_set_checks_all_collisions_first() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let source = root.path().join("source");
+        let dest = root.path().join("dest");
+        fs::create_dir(&source).unwrap(); fs::create_dir(&dest).unwrap();
+        fs::write(source.join("disc.cue"), b"new cue").unwrap();
+        fs::write(source.join("disc.bin"), b"new bin").unwrap();
+        fs::write(dest.join("disc.bin"), b"old bin").unwrap();
+        let files = vec![source.join("disc.cue"), source.join("disc.bin")];
+        assert!(publish_file_set(&files, &dest, false).is_err());
+        assert!(!dest.join("disc.cue").exists());
+        assert_eq!(fs::read(dest.join("disc.bin")).unwrap(), b"old bin");
+        publish_file_set(&files, &dest, true).unwrap();
+        assert_eq!(fs::read(dest.join("disc.cue")).unwrap(), b"new cue");
+        assert_eq!(fs::read(dest.join("disc.bin")).unwrap(), b"new bin");
+    }
+
+    fn extraction_options(rename: bool, overwrite: bool) -> ExtractionOptionsPayload {
+        ExtractionOptionsPayload { planned_folder_name: None, planned_entries: None, individual_folders: false, split_entries: false, destination_mode: "custom".into(), destination_path: None, delete_archives: false, overwrite, rename_on_conflict: rename, remote_destination: None, remote_transfer: None }
+    }
+
+    #[test]
+    fn transient_error_classification_is_conservative() {
+        let temporary = anyhow::Error::new(io::Error::new(io::ErrorKind::TimedOut, "timeout")).context("read");
+        assert!(is_transient_io(&temporary));
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::NotFound, io::ErrorKind::InvalidData, io::ErrorKind::WriteZero] {
+            assert!(!is_transient_io(&anyhow::Error::new(io::Error::new(kind, "failure"))));
+        }
+        assert!(!is_transient_io(&anyhow!("archive corrupt")));
+    }
+
+    #[test]
+    fn extraction_conflict_preserves_existing_files() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dest = dir.path().join("dest"); let stage = dir.path().join("stage");
+        fs::create_dir(&dest).unwrap(); fs::create_dir(&stage).unwrap();
+        fs::write(dest.join("a.txt"), "original").unwrap();
+        fs::write(stage.join("a.txt"), "new").unwrap();
+        fs::write(stage.join("z.txt"), "other").unwrap();
+        assert!(publish_extracted_tree(&stage, &dest, Path::new("input.zip"), &extraction_options(false, false)).is_err());
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "original");
+        assert!(!dest.join("z.txt").exists());
+    }
+
+    #[test]
+    fn extraction_rename_reserves_all_generated_names() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dest = dir.path().join("dest"); let stage = dir.path().join("stage");
+        fs::create_dir(&dest).unwrap(); fs::create_dir(&stage).unwrap();
+        fs::write(dest.join("a.txt"), "original").unwrap();
+        fs::write(stage.join("a.txt"), "first").unwrap();
+        fs::write(stage.join("a (2).txt"), "second").unwrap();
+        publish_extracted_tree(&stage, &dest, Path::new("input.zip"), &extraction_options(true, false)).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "original");
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn staged_publication_does_not_overwrite_without_permission() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dest = dir.path().join("existing.zip"); let stage = dir.path().join("staged.zip");
+        fs::write(&dest, "original").unwrap(); fs::write(&stage, "new").unwrap();
+        assert!(commit_staged_file(&stage, &dest, false).is_err());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "original");
+    }
+
+    #[test]
+    fn extraction_refuses_a_track_rename_that_would_break_its_cue() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let source = root.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("game.cue"), b"FILE \"game.bin\" BINARY\n").unwrap();
+        fs::write(source.join("game.bin"), b"track").unwrap();
+        let entries = vec![
+            crate::models::PlannedExtractionEntry { from: "game.cue".into(), to: "game.cue".into(), is_dir: false },
+            crate::models::PlannedExtractionEntry { from: "game.bin".into(), to: "game (1).bin".into(), is_dir: false },
+        ];
+        assert!(remap_extraction_tree(&source, &root.path().join("out"), &entries).is_err());
+        assert!(source.join("game.cue").exists());
+        assert!(source.join("game.bin").exists());
+    }
+
+    #[test]
+    fn planned_7z_extraction_refuses_destination_that_appears_later() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let source = root.path().join("stage");
+        let destination = root.path().join("dest");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("game.bin"), b"new").unwrap();
+        fs::write(destination.join("game.bin"), b"existing").unwrap();
+        let mut options = extraction_options(false, false);
+        options.planned_entries = Some(vec![crate::models::PlannedExtractionEntry { from: "game.bin".into(), to: "game.bin".into(), is_dir: false }]);
+        assert!(publish_extracted_tree(&source, &destination, Path::new("input.7z"), &options).is_err());
+        assert_eq!(fs::read(destination.join("game.bin")).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn extraction_mapping_preserves_planned_names_and_rejects_unknown_entries() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let source = root.path().join("source");
+        let output = root.path().join("output");
+        fs::create_dir_all(source.join("game")).unwrap();
+        fs::write(source.join("game/disc.bin"), b"data").unwrap();
+        let entries = vec![
+            crate::models::PlannedExtractionEntry { from: "game".into(), to: "game (1)".into(), is_dir: true },
+            crate::models::PlannedExtractionEntry { from: "game/disc.bin".into(), to: "game (1)/disc.bin".into(), is_dir: false },
+        ];
+        remap_extraction_tree(&source, &output, &entries).unwrap();
+        assert_eq!(fs::read(output.join("game (1)/disc.bin")).unwrap(), b"data");
+        fs::write(source.join("game/unexpected.bin"), b"other").unwrap();
+        assert!(remap_extraction_tree(&source, &root.path().join("second"), &entries).is_err());
+    }
+
+    #[test]
+    fn planned_disc_names_cannot_escape_the_destination() {
+        assert_eq!(validated_planned_output_name(Some("game (1).iso"), "game.iso").unwrap(), "game (1).iso");
+        assert!(validated_planned_output_name(Some("../escape.iso"), "game.iso").is_err());
+        assert!(validated_planned_output_name(Some("sub\\escape.iso"), "game.iso").is_err());
+    }
+
+    #[test]
+    fn rename_refuses_to_overwrite_existing_destination() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let source = directory.path().join("original.bin");
+        let target = directory.path().join("target.bin");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&target, b"existing").unwrap();
+        assert!(rename_path(&source, "target.bin").is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&target).unwrap(), b"existing");
+        assert!(rename_path(&source, "../target.bin").is_err());
+    }
+
+    #[test]
+    fn remote_chd_cleanup_maps_all_tracks_and_rejects_escape() {
+        let root = PathBuf::from("download");
+        let cue = root.join("Tekken.cue");
+        let tracks = [cue.clone(), root.join("Tekken (Track 1).bin"), root.join("Tekken (Track 2).bin"), root.join("Tekken (Track 3).bin")];
+        let required = tracks.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>();
+        let actual = remote_original_paths("remote://session-1/psx/Tekken", &cue, &required).unwrap();
+        assert_eq!(actual.len(), 4);
+        assert!(actual[3].ends_with("/Tekken (Track 3).bin"));
+        let escape = vec![root.join("..").join("outside.bin").to_string_lossy().to_string()];
+        assert!(remote_original_paths("remote://session-1/psx/Tekken", &cue, &escape).is_err());
+    }
 
     #[test]
     fn parse_7z_slt_entries_skips_archive_header_and_keeps_entries() {

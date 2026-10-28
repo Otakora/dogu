@@ -15,12 +15,14 @@
     onNewFile: () => void;
     onSearch: (q: string) => void;
     onClearSearch?: () => void;
+    onCopy: () => void;
+    onCut: () => void;
+    onPaste: () => void;
+    onDelete: () => void;
   };
 
-  let { onRefresh, onNewFolder, onNewFile, onSearch, onClearSearch }: Props = $props();
+  let { onRefresh, onNewFolder, onNewFile, onSearch, onClearSearch, onCopy, onCut, onPaste, onDelete }: Props = $props();
 
-  // Split view always uses two rows; single pane uses one row.
-  const twoRow = $derived(app.isSplit);
 
   // ── Editable path ─────────────────────────────────────────────
   let editingPath = $state(false);
@@ -124,12 +126,19 @@
   let searchInput = $state("");
   let searchFocused = $state(false);
 
+  // Restore the submitted query only when the active tab, location or search
+  // changes. The editable draft must not be a dependency of this effect.
   $effect(() => {
-    if (!pane.isSearching) searchInput = "";
-    else if (pane.searchQuery && searchInput !== pane.searchQuery) searchInput = pane.searchQuery;
+    pane.activeTabId;
+    pane.currentPath;
+    searchInput = pane.isSearching ? (pane.searchQuery ?? "") : "";
   });
 
-  function submitSearch() { if (searchInput.trim()) onSearch(searchInput.trim()); }
+  function submitSearch() {
+    const query = searchInput.trim();
+    if (query) onSearch(query);
+    else if (pane.isSearching) clearSearch();
+  }
 
   function clearSearch() {
     searchInput = "";
@@ -189,6 +198,7 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 {#snippet pathGroup()}
+  <div class="tb-path-group">
   <div
     class="tb-breadcrumb"
     class:tb-breadcrumb--editing={editingPath}
@@ -230,6 +240,15 @@
         <span class="tb-crumb-placeholder">{t("toolbar.noLocationSelected")}</span>
       {/if}
     {/if}
+  </div>
+  {#if !editingPath}
+    <button class="tb-btn tb-edit-path" onclick={enterPathEdit} disabled={!pane.currentPath}
+      title={t("toolbar.editPathAction")} aria-label={t("toolbar.editPathAction")}>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4z"/>
+      </svg>
+    </button>
+  {/if}
   </div>
 {/snippet}
 
@@ -277,6 +296,22 @@
         <line x1="9" y1="16" x2="15" y2="16"/>
       </svg>
     </button>
+    <span class="tb-divider" aria-hidden="true"></span>
+    <button class="tb-btn" onclick={onCopy} disabled={pane.selectedPaths.size === 0}
+      title="{t('menu.copy')} (Ctrl+C)" aria-label={t("menu.copy")}>{@html ICON_COPY}</button>
+    <button class="tb-btn" onclick={onCut} disabled={pane.selectedPaths.size === 0}
+      title="{t('menu.cut')} (Ctrl+X)" aria-label={t("menu.cut")}>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8.5 8 12 11M8.5 16 20.5 5"/></svg>
+    </button>
+    <button class="tb-btn" onclick={onPaste} disabled={!pane.currentPath || !app.clipboard}
+      title="{t('menu.paste')} (Ctrl+V)" aria-label={t("menu.paste")}>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M8 5H6a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/></svg>
+    </button>
+    <button class="tb-btn tb-btn--delete" onclick={onDelete} disabled={pane.selectedPaths.size === 0}
+      title="{t('menu.delete')} (Del)" aria-label={t("menu.delete")}>
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>
+    </button>
+    <span class="tb-divider" aria-hidden="true"></span>
     <div class="tb-view-toggle" role="group" aria-label={t("toolbar.viewMode")}>
       <button class="tb-btn tb-btn--toggle" class:tb-btn--toggle-active={pane.viewMode === "list"}
         onclick={() => pane.setViewMode("list")}
@@ -295,16 +330,6 @@
         </svg>
       </button>
     </div>
-    <button
-      class="tb-btn"
-      class:tb-btn--active={app.isSplit}
-      onclick={() => app.isSplit ? app.closeSecondPane() : app.addPane()}
-      title={app.isSplit ? t("toolbar.closeSplit") : t("toolbar.splitView")}
-      aria-label={app.isSplit ? t("toolbar.closeSplit") : t("toolbar.splitView")}
-      aria-pressed={app.isSplit}
-    >
-      {@html ICON_SPLIT}
-    </button>
   </div>
 {/snippet}
 
@@ -326,6 +351,7 @@
       onblur={() => (searchFocused = false)}
       onkeydown={handleSearchKey}
       aria-label={t("toolbar.searchFiles")}
+      title={t("toolbar.searchHint")}
     />
     {#if searchInput}
       <button class="tb-search-clear" onclick={clearSearch} aria-label={t("toolbar.clearSearch")}>✕</button>
@@ -334,20 +360,6 @@
 {/snippet}
 
 {#snippet globalButtons()}
-  <button
-    class="tb-btn tb-btn--queue"
-    class:tb-btn--active={app.queueMode}
-    onclick={() => app.toggleQueueMode()}
-    title={t("toolbar.queueMode")}
-    aria-label={t("toolbar.queueMode")}
-    aria-pressed={app.queueMode}
-  >
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <line x1="3" y1="6" x2="15" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="15" y2="18"/>
-      <polyline points="18 9 21 12 18 15"/>
-    </svg>
-    <span class="tb-queue-label">{t("toolbar.queueShort")}</span>
-  </button>
   <button
     class="tb-btn"
     onclick={() => pane.currentPath && openTerminalAt(pane.currentPath)}
@@ -359,45 +371,20 @@
       <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
     </svg>
   </button>
-  <button
-    class="tb-btn"
-    onclick={() => app.openSettings()}
-    title={t("toolbar.settings")}
-    aria-label={t("toolbar.settings")}
-  >
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <circle cx="12" cy="12" r="3"/>
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-    </svg>
-  </button>
 {/snippet}
 
 <!-- ── Layout ────────────────────────────────────────────────────── -->
-<div
-  class="toolbar"
-  class:toolbar--two-row={twoRow}
->
-  {#if twoRow}
-    <div class="tb-row tb-row--top">
-      {@render navGroup()}
-      {@render pathGroup()}
-      {@render starButton()}
-    </div>
-    <div class="tb-row tb-row--bottom">
-      {@render actionGroup()}
-      {@render searchGroup('right')}
-      {@render globalButtons()}
-    </div>
-  {:else}
-    <div class="tb-row">
-      {@render navGroup()}
-      {@render pathGroup()}
-      {@render starButton()}
-      {@render actionGroup()}
-      {@render searchGroup('normal')}
-      {@render globalButtons()}
-    </div>
-  {/if}
+<div class="toolbar toolbar--two-row">
+  <div class="tb-row tb-row--top">
+    {@render navGroup()}
+    {@render pathGroup()}
+    {@render starButton()}
+  </div>
+  <div class="tb-row tb-row--bottom">
+    {@render actionGroup()}
+    {@render searchGroup('right')}
+    {@render globalButtons()}
+  </div>
 </div>
 
 {#if contextMenu}
@@ -432,6 +419,9 @@
   .tb-row--bottom {
     border-top: 1px solid var(--line);
     background: var(--surface-alt);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
   }
 
   /* ── Buttons ── */
@@ -457,64 +447,13 @@
   }
 
   .tb-btn:disabled { opacity: 0.35; cursor: default; }
+  .tb-btn--delete:hover:not(:disabled) { color: var(--danger); background: var(--danger-soft); }
+  .tb-divider { width: 1px; height: 18px; background: var(--line-strong); margin: 0 4px; align-self: center; flex-shrink: 0; }
 
   .tb-btn--starred { color: #f59e0b; }
   .tb-btn--starred:hover:not(:disabled) { color: #d97706; }
 
-  .tb-btn--active {
-    background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
-  }
-  .tb-btn--active:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 38%, transparent);
-    color: var(--accent);
-  }
-
   .tb-btn-placeholder { width: 28px; flex-shrink: 0; }
-
-  .tb-btn--queue {
-    position: relative;
-    width: auto;
-    min-width: 70px;
-    padding: 0 9px;
-    gap: 6px;
-    font-weight: 700;
-  }
-
-  /* OFF — neutral, clearly inactive (looks like a normal labelled button). */
-  .tb-btn--queue:not(.tb-btn--active) {
-    background: transparent;
-    border-color: var(--line-strong);
-    color: var(--text-muted);
-  }
-  .tb-btn--queue:not(.tb-btn--active):hover:not(:disabled) {
-    background: var(--surface-hover);
-    border-color: color-mix(in srgb, var(--accent) 34%, var(--line-strong));
-    color: var(--text);
-  }
-
-  /* ON — filled accent, unmistakable. Overrides the shared .tb-btn--active. */
-  .tb-btn--queue.tb-btn--active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-contrast);
-    box-shadow: 0 1px 7px color-mix(in srgb, var(--accent) 34%, transparent);
-  }
-  .tb-btn--queue.tb-btn--active:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 90%, #000);
-    border-color: color-mix(in srgb, var(--accent) 90%, #000);
-    color: var(--accent-contrast);
-  }
-
-  .tb-queue-label {
-    font-size: 11px;
-    line-height: 1;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-  }
-
 
   /* ── Nav ── */
   .tb-nav {
@@ -524,6 +463,9 @@
   }
 
   /* ── Breadcrumb ── */
+  .tb-path-group { flex: 1; display: flex; align-items: center; gap: 3px; min-width: 0; }
+  .tb-edit-path { flex-shrink: 0; }
+
   .tb-breadcrumb {
     flex: 1;
     display: flex;
@@ -650,6 +592,7 @@
   /* in the second row, search is right-aligned with a generous but bounded width */
   .tb-search--right {
     width: 280px;
+    min-width: 90px;
     flex-shrink: 1;
     margin-left: auto;
   }

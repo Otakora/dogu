@@ -1,5 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { onMount } from "svelte";
   import { untrack } from "svelte";
   import { app } from "../../stores/app.svelte.js";
   import type { EntryDto, ActiveConnectionDto, RemoteDiskUsageDto, VolumeDto } from "../../types/index.js";
@@ -8,9 +10,31 @@
   import type { MenuItem } from "../ui/ContextMenu.svelte";
   import { t, type TranslationKey } from "../../i18n/index.js";
   import { openTerminalAt } from "../../utils/terminal.js";
+  import { connectSavedProfile } from "../../utils/connections.js";
+
+  let appVersion = $state("");
+  onMount(() => { void getVersion().then(version => { appVersion = version; }).catch(() => {}); });
 
   // ── State ────────────────────────────────────────────────
   let disconnectingId = $state<string | null>(null);
+  let connectingIds = $state<Set<string>>(new Set());
+  const disconnectedProfiles = $derived(app.connectionProfiles.filter(profile =>
+    !app.activeConnections.some(connection => connection.profileId === profile.id)));
+
+  async function connectProfile(id: string) {
+    if (connectingIds.has(id)) return;
+    connectingIds = new Set([...connectingIds, id]);
+    try {
+      const connection = await connectSavedProfile(id);
+      if (connection) app.navigate(connection.rootPath);
+    } catch (error) {
+      app.notify("error", error instanceof Error ? error.message : String(error));
+    } finally {
+      const next = new Set(connectingIds);
+      next.delete(id);
+      connectingIds = next;
+    }
+  }
   let contextMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
   let remoteDiskUsage = $state<Record<string, RemoteDiskUsageDto | null>>({});
   let remoteDiskUsageLoading = $state<Record<string, boolean>>({});
@@ -502,7 +526,7 @@
     <!-- CONEXIONES REMOTAS                                     -->
     <!-- ══════════════════════════════════════════════════════ -->
     <div class="sb-section">
-      <div class="sb-section-header" role="button" tabindex="0"
+      <div class="sb-section-header" role="button" tabindex="0" aria-expanded={!collapsed.connections}
         onclick={() => (collapsed.connections = !collapsed.connections)}
         onkeydown={(e) => e.key === "Enter" && (collapsed.connections = !collapsed.connections)}
       >
@@ -515,6 +539,7 @@
           class="sb-section-action"
           class:sb-section-action--active={app.connectionManagerOpen}
           title={t("sidebar.manageConnections")}
+          aria-label={t("sidebar.manageConnections")}
           onclick={(e) => { e.stopPropagation(); app.openConnectionManager(); }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -525,7 +550,13 @@
       </div>
 
       {#if !collapsed.connections}
-        {#if app.activeConnections.length === 0}
+        {#if !app.connectionProfilesLoaded && app.activeConnections.length === 0}
+          <div class="sb-empty-hint">{t("sidebar.loadingConnections")}</div>
+        {:else if app.connectionProfilesError && app.activeConnections.length === 0}
+          <div class="sb-empty-hint">{t("sidebar.connectionsLoadError")}
+            <button class="sb-link" onclick={() => app.openConnectionManager()}>{t("sidebar.manageConnections")}</button>
+          </div>
+        {:else if app.activeConnections.length === 0 && app.connectionProfiles.length === 0}
           <div class="sb-empty-hint">
             {t("sidebar.noConnections")}
             <button class="sb-link" onclick={() => app.openConnectionManager()}>
@@ -533,6 +564,22 @@
             </button>
           </div>
         {:else}
+          {#each disconnectedProfiles as profile (profile.id)}
+            <button class="sb-saved-connection" onclick={() => connectProfile(profile.id)}
+              disabled={connectingIds.has(profile.id)}
+              title={t("sidebar.connectProfile", { label: profile.label })}>
+              <span class="sb-saved-icon" style:--proto-color={PROTO_COLORS[profile.protocol] ?? "var(--accent)"}>
+                {#if connectingIds.has(profile.id)}<span class="spinner-xs"></span>{:else}
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                {/if}
+              </span>
+              <span class="sb-saved-text">
+                <span class="sb-saved-name">{profile.label}</span>
+                <span class="sb-saved-detail">{profile.protocol.toUpperCase()} · {profile.host}</span>
+              </span>
+              <span class="sb-saved-status">{connectingIds.has(profile.id) ? t("connectionManager.connecting") : t("sidebar.disconnected")}</span>
+            </button>
+          {/each}
           {#each app.activeConnections as conn (conn.sessionId)}
             {@const usage = remoteDiskUsage[conn.sessionId] ?? null}
             {@const loadingUsage = remoteDiskUsageLoading[conn.sessionId] ?? false}
@@ -550,15 +597,20 @@
                     {tabHighlights}
                     onNavigate={(p) => app.navigate(p)}
                     onContextMenu={(e, entry) => handleRemoteTreeContextMenu(e, entry, conn)}
-                  />
+                  >
+                    {#snippet rootMeta()}
+                      <div class="sb-remote-meta">
+                        <span class="sb-connected-dot" aria-hidden="true"></span>
+                        <span>{t("sidebar.connected")}</span>
+                        <span aria-hidden="true">·</span>
+                        <span style:color={PROTO_COLORS[conn.protocol] ?? "var(--accent)"}>{conn.protocol.toUpperCase()}</span>
+                        <span aria-hidden="true">·</span>
+                        <span class="sb-remote-host" title={conn.host}>{conn.host}</span>
+                      </div>
+                    {/snippet}
+                  </TreeNode>
                 </div>
                 <div class="sb-remote-actions">
-                  <span
-                    class="sb-proto-badge"
-                    style="background:{PROTO_COLORS[conn.protocol] ?? 'var(--accent)'}20;color:{PROTO_COLORS[conn.protocol] ?? 'var(--accent)'}"
-                  >
-                    {conn.protocol.toUpperCase()}
-                  </span>
                   <button
                     class="sb-disconnect-btn"
                     onclick={() => disconnect(conn)}
@@ -605,6 +657,15 @@
     </div>
 
   </div>
+  <div class="sb-footer">
+    <button class="sb-settings" onclick={() => app.openSettings()} title={t("toolbar.settings")}>
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+      <span>{t("toolbar.settings")}</span>
+    </button>
+    {#if appVersion}<span class="sb-version" title={t("sidebar.version", { version: appVersion })}>v{appVersion}</span>{/if}
+  </div>
 </aside>
 
 {#if contextMenu}
@@ -633,6 +694,15 @@
     overflow-y: auto;
     padding: 4px 4px 12px;
   }
+
+  .sb-footer { flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 8px;
+    border-top: 1px solid var(--line); background: var(--surface); }
+  .sb-settings { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 7px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--surface-alt); color: var(--text);
+    font: inherit; font-size: 12px; cursor: pointer; }
+  .sb-settings:hover, .sb-settings:focus-visible { border-color: var(--accent); color: var(--accent); }
+  .sb-settings span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .sb-version { flex-shrink: 0; margin-left: auto; color: var(--text-subtle); font-size: 10px; }
 
   /* ── Section ─────────────────────────────── */
   .sb-section {
@@ -857,14 +927,28 @@
     text-overflow: ellipsis;
   }
 
+  .sb-saved-connection {
+    width: 100%; display: flex; align-items: center; gap: 8px;
+    padding: 6px 7px; border: 0; border-radius: 5px; background: transparent;
+    color: var(--text); font: inherit; text-align: left; cursor: pointer;
+    &:hover, &:focus-visible { background: var(--surface-hover); }
+    &:disabled { cursor: wait; opacity: .65; }
+  }
+  .sb-saved-icon { display: grid; place-items: center; width: 22px; height: 22px; flex-shrink: 0;
+    color: var(--proto-color); border-radius: 6px; background: color-mix(in srgb, var(--proto-color) 12%, transparent); }
+  .sb-saved-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .sb-saved-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(12px * var(--tree-scale, 1)); font-weight: 600; }
+  .sb-saved-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-subtle); font-size: 10px; }
+  .sb-saved-status { flex-shrink: 0; color: var(--text-subtle); font-size: 9px; }
+  .sb-saved-connection:hover .sb-saved-status { color: var(--accent); }
+
   /* ── Remote connection tree rows ─────────── */
   .sb-remote-tree-row {
     display: flex;
     align-items: flex-start;
     position: relative;
 
-    &:hover .sb-disconnect-btn { opacity: 1; }
-    &:hover .sb-proto-badge { opacity: 0; }
+    &:hover .sb-disconnect-btn, &:focus-within .sb-disconnect-btn { opacity: 1; }
   }
 
   .sb-remote-conn {
@@ -878,22 +962,18 @@
   }
 
   .sb-remote-actions {
-    display: flex;
-    align-items: center;
-    flex-shrink: 0;
-    gap: 2px;
-    padding-top: 4px;
+    position: absolute; top: 1px; right: 1px;
+    display: flex; align-items: center;
   }
 
-  .sb-proto-badge {
-    font-size: 9px;
-    font-weight: 700;
-    padding: 1px 4px;
-    border-radius: 3px;
-    letter-spacing: 0.04em;
-    transition: opacity 0.1s;
-    flex-shrink: 0;
+  .sb-remote-meta {
+    display: flex; align-items: center; gap: 4px;
+    padding: 1px 8px 3px 24px; min-width: 0;
+    color: var(--text-subtle); font-size: 10px;
   }
+  .sb-remote-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .sb-connected-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success, #35a66f); flex-shrink: 0; }
 
   .sb-disconnect-btn {
     flex-shrink: 0;

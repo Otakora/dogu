@@ -7,6 +7,8 @@
   import type { Locale, RvzEngine, UpdateChannel } from "../../types/index.js";
 
   let aboutOpen = $state(false);
+  type SettingsSection = "appearance" | "files" | "queue" | "conversion" | "updates";
+  let section = $state<SettingsSection>("appearance");
 
   async function chooseUpdateChannel(channel: UpdateChannel) {
     if (channel === app.settings.updateChannel) return;
@@ -32,10 +34,21 @@
 </script>
 
 {#if app.settingsOpen}
-  <Modal title={t("settingsDialog.title")} width="520px" onclose={() => app.closeSettings()}>
+  <Modal title={t("settingsDialog.title")} width="940px" onclose={() => { if (!aboutOpen) app.closeSettings(); }}>
     {#snippet children()}
-      <div class="settings-body">
+      <div class="settings-layout">
+        <nav class="settings-nav" aria-label={t("settingsDialog.sections")}>
+          <button class:settings-nav--active={section === "appearance"} aria-current={section === "appearance" ? "page" : undefined} onclick={() => section = "appearance"}>{t("settingsDialog.appearance")}</button>
+          <button class:settings-nav--active={section === "files"} aria-current={section === "files" ? "page" : undefined} onclick={() => section = "files"}>{t("settingsDialog.fileOperations")}</button>
+          <button class:settings-nav--active={section === "queue"} aria-current={section === "queue" ? "page" : undefined} onclick={() => section = "queue"}>{t("settingsDialog.queue")}</button>
+          <button class:settings-nav--active={section === "conversion"} aria-current={section === "conversion" ? "page" : undefined} onclick={() => section = "conversion"}>{t("settingsDialog.conversions")}</button>
+          <button class:settings-nav--active={section === "updates"} aria-current={section === "updates" ? "page" : undefined} onclick={() => section = "updates"}>{t("settingsDialog.updates")}</button>
+        </nav>
+        <div class="settings-body">
+        <p class="settings-saved">{t("settingsDialog.savedAutomatically")}</p>
+        <p class="settings-intro">{section === "appearance" ? t("settingsDialog.appearanceIntro") : section === "files" ? t("settingsDialog.filesIntro") : section === "queue" ? t("settingsDialog.queueIntro") : section === "conversion" ? t("settingsDialog.conversionIntro") : t("settingsDialog.updatesIntro")}</p>
 
+        {#if section === "appearance"}
         <!-- Theme -->
         <div class="setting-group">
           <div class="setting-label">{t("settingsDialog.appearance")}</div>
@@ -105,18 +118,10 @@
             </div>
           </div>
 
-          <div class="setting-row">
-            <span class="setting-name">{t("settingsDialog.compactUi")}</span>
-            <input
-              type="checkbox"
-              checked={app.settings.compactUi}
-              onchange={(e) => app.updateSettings({ compactUi: (e.target as HTMLInputElement).checked })}
-              class="checkbox"
-              aria-label={t("settingsDialog.compactUi")}
-            />
-          </div>
         </div>
 
+        {/if}
+        {#if section === "updates"}
         <!-- Updates -->
         <div class="setting-group">
           <div class="setting-label">{t("settingsDialog.updates")}</div>
@@ -186,6 +191,8 @@
           </div>
         </div>
 
+        {/if}
+        {#if section === "files"}
         <!-- Files -->
         <div class="setting-group">
           <div class="setting-label">{t("settingsDialog.fileOperations")}</div>
@@ -200,7 +207,8 @@
             />
           </div>
           <div class="setting-row">
-            <span class="setting-name">{t("settingsDialog.defaultView")}</span>
+            <div class="setting-name-block"><span class="setting-name">{t("settingsDialog.defaultView")}</span>
+              <span class="setting-hint">{t("settingsDialog.defaultViewHint")}</span></div>
             <select
               class="select-input"
               value={app.settings.defaultViewMode}
@@ -222,9 +230,10 @@
               <span class="setting-hint">{t("settingsDialog.defaultOverwriteHint")}</span>
             </div>
             <input
-              type="checkbox"
+              type="radio"
+              name="file-conflict-policy"
               checked={app.settings.defaultOverwriteOnConflict}
-              onchange={(e) => app.updateSettings({ defaultOverwriteOnConflict: (e.target as HTMLInputElement).checked })}
+              onchange={() => app.updateSettings({ defaultOverwriteOnConflict: true, renameOnConflict: false })}
               class="checkbox"
               aria-label={t("settingsDialog.defaultOverwrite")}
             />
@@ -235,15 +244,18 @@
               <span class="setting-hint">{t("settingsDialog.renameOnConflictHint")}</span>
             </div>
             <input
-              type="checkbox"
-              checked={app.settings.renameOnConflict}
-              onchange={(e) => app.updateSettings({ renameOnConflict: (e.target as HTMLInputElement).checked })}
+              type="radio"
+              name="file-conflict-policy"
+              checked={!app.settings.defaultOverwriteOnConflict}
+              onchange={() => app.updateSettings({ defaultOverwriteOnConflict: false, renameOnConflict: true })}
               class="checkbox"
               aria-label={t("settingsDialog.renameOnConflict")}
             />
           </div>
         </div>
 
+        {/if}
+        {#if section === "queue"}
         <!-- Queue -->
         <div class="setting-group">
           <div class="setting-label">{t("settingsDialog.queue")}</div>
@@ -313,23 +325,8 @@
           </div>
         </div>
 
-        <!-- Weight / summary -->
-        <div class="setting-group">
-          <div class="setting-label">{t("settingsDialog.properties")}</div>
-          <div class="setting-row">
-            <span class="setting-name">{t("settingsDialog.maxDepth")}</span>
-            <input
-              type="number"
-              min="1"
-              max="20"
-              class="number-input"
-              value={app.settings.selectionWeightMaxDepth}
-              oninput={(e) => app.updateSettings({ selectionWeightMaxDepth: parseInt((e.target as HTMLInputElement).value) || 5 })}
-              aria-label={t("settingsDialog.maxDepth")}
-            />
-          </div>
-        </div>
-
+        {/if}
+        {#if section === "conversion"}
         <!-- CHD -->
         <div class="setting-group">
           <div class="setting-label">{t("settingsDialog.chdConversion")}</div>
@@ -411,6 +408,8 @@
             {/if}
           </div>
         </div>
+        {/if}
+        </div>
       </div>
     {/snippet}
 
@@ -428,10 +427,25 @@
 {/if}
 
 <style>
-  .settings-body {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
+  .settings-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 24px; align-items: start; min-height: min(500px, 55vh); }
+  .settings-nav { display: flex; flex-direction: column; gap: 4px; position: sticky; top: 0; }
+  .settings-nav button { border: 1px solid transparent; border-radius: 7px; padding: 10px 12px;
+    background: transparent; color: var(--text-muted); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+  .settings-nav button:hover { background: var(--surface-hover); color: var(--text); }
+  .settings-nav button.settings-nav--active { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 25%, transparent); font-weight: 700; }
+  .settings-body { display: flex; flex-direction: column; gap: 20px; min-width: 0; padding: 2px 4px 12px; }
+  .settings-saved { margin: 0; color: var(--text-subtle); font-size: 11px; }
+  .settings-intro { margin: -10px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; max-width: 55em; }
+  @media (max-width: 700px) {
+    .settings-layout { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+    .settings-nav { position: static; flex-direction: row; max-width: 100%; overflow-x: auto; padding-bottom: 3px; }
+    .settings-nav button { flex-shrink: 0; padding: 8px 10px; }
+    .settings-body { width: 100%; }
+  }
+  @media (max-width: 450px) {
+    .setting-row { flex-wrap: wrap; }
+    .range-input--wide { min-width: 0; }
+    .select-input { max-width: 100%; }
   }
 
   .setting-group {

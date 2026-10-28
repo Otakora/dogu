@@ -57,6 +57,7 @@ Useful checks:
 | `npm run build` | Build the frontend into `dist/`. |
 | `cargo check` | Check the Rust backend from `src-tauri/`. |
 | `cargo test --manifest-path src-tauri/Cargo.toml` | Run Rust tests. |
+| `bash tests/linux-sidecars-smoke.sh` | Exercise bundled Linux 7-Zip and chdman with disposable files. |
 
 `npm run tauri:build` exists, but release artifacts should normally be produced
 through `tools/release.py` so files are renamed, sidecars are validated and
@@ -246,11 +247,13 @@ See [updater-signing.md](updater-signing.md) for key custody and GitHub Secrets.
 
 The Windows Package Manager identifier is `Otakora.Dogu`.
 
-The release tooling generates `Otakora.Dogu.yaml` for stable releases only. Before
-submitting it to `microsoft/winget-pkgs`, validate it:
+The release tooling generates the multi-manifest winget files for stable
+releases only: `Otakora.Dogu.yaml`, `Otakora.Dogu.installer.yaml` and
+`Otakora.Dogu.locale.en-US.yaml`. Before submitting them to
+`microsoft/winget-pkgs`, validate the folder that contains the three files:
 
 ```powershell
-winget validate .\Otakora.Dogu.yaml
+winget validate .\manifests\o\Otakora\Dogu\<version>
 ```
 
 winget improves the install/update path and hash validation, but it is not a code
@@ -376,7 +379,9 @@ Stable usa versiones limpias como `0.2.5`, release `v0.2.5` y `latest.json`.
 Beta usa versiones como `0.2.6-beta.1`, release rolling `beta` y
 `latest-beta.json`.
 
-El identificador winget es `Otakora.Dogu` y solo se genera para stable.
+El identificador winget es `Otakora.Dogu` y solo se genera para stable. El
+formato aceptado por `winget-pkgs` es multi-manifest: version, installer y
+default locale.
 
 Más detalle en [release-channels.md](release-channels.md).
 La custodia de claves y secrets está en [updater-signing.md](updater-signing.md).

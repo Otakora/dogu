@@ -166,7 +166,19 @@ pub struct PreflightCheckResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PlannedExtractionEntry {
+    pub from: String,
+    pub to: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExtractionOptionsPayload {
+    #[serde(default)]
+    pub planned_folder_name: Option<String>,
+    #[serde(default)]
+    pub planned_entries: Option<Vec<PlannedExtractionEntry>>,
     pub individual_folders: bool,
     pub split_entries: bool,
     pub destination_mode: String,
@@ -298,6 +310,9 @@ pub struct ChdRestoreOptionsPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscImageOptionsPayload {
+    /// Exact output file or folder name selected by the queued plan.
+    #[serde(default)]
+    pub planned_output_name: Option<String>,
     pub destination_mode: String,
     pub destination_path: Option<String>,
     pub delete_originals: bool,

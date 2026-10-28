@@ -51,6 +51,23 @@ pub async fn list_children(
 }
 
 #[tauri::command]
+pub async fn queue_path_exists(
+    remote_state: State<'_, remote::RemoteState>,
+    path: String,
+) -> Result<bool, String> {
+    if remote::RemoteManager::is_remote_path(&path) {
+        let rm = remote_state.inner.clone();
+        return tauri::async_runtime::spawn_blocking(move || rm.queue_path_exists(&path).map_err(|e| e.to_string()))
+            .await.map_err(|e| e.to_string())?;
+    }
+    tauri::async_runtime::spawn_blocking(move || match std::fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("No se pudo comprobar '{}': {}", path, error)),
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn inspect_path(
     remote_state: State<'_, remote::RemoteState>,
     path: String,
@@ -253,25 +270,40 @@ pub fn open_with_dialog(
     ops::open_with_dialog(&PathBuf::from(path)).map_err(|error| error.to_string())
 }
 
-/// Deep variant of `build_extraction_preview`: enumerates every file/folder at
-/// all levels of each (local) archive so the frontend can build navigable nested
-/// ghost trees. Remote archives are skipped (contents aren't inspectable without
-/// downloading them).
+/// Read archive indexes in the background; remote access never downloads an
+/// entire archive merely to create a preview.
 #[tauri::command]
-pub fn build_extraction_preview_deep(
+pub async fn build_extraction_preview_deep(
     app: AppHandle,
+    remote_state: State<'_, remote::RemoteState>,
     archives: Vec<String>,
     options: ExtractionOptionsPayload,
 ) -> Result<Vec<ExtractionPreviewRow>, String> {
-    let local: Vec<String> = archives
-        .into_iter()
-        .filter(|p| !remote::RemoteManager::is_remote_path(p))
-        .collect();
-    if local.is_empty() {
-        return Ok(Vec::new());
-    }
-    ops::build_extraction_preview_deep(&app, &parse_paths(local), &options)
-        .map_err(|error| error.to_string())
+    let manager = remote_state.inner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut result = Vec::new();
+        for archive in archives {
+            if !remote::RemoteManager::is_remote_path(&archive) {
+                result.extend(ops::build_extraction_preview_deep(&app, &[PathBuf::from(archive)], &options)?);
+                continue;
+            }
+            let filename = archive.rsplit('/').next().ok_or_else(|| anyhow::anyhow!("Nombre remoto invalido"))?;
+            let extension = filename.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            let entries = if extension == "zip" {
+                manager.list_remote_zip_entries(&archive)?
+            } else {
+                let path = manager.native_smb_archive_path(&archive)?;
+                ops::list_all_entries(&app, &path)?
+            };
+            // This is only a path template. The frontend rebases it onto the
+            // requested virtual or local destination, retaining the original name.
+            let template = std::env::temp_dir().join(filename);
+            let mut row = ops::extraction_preview_from_entries(&template, &options, &entries);
+            row.archive_path = archive;
+            result.push(row);
+        }
+        Ok::<_, anyhow::Error>(result)
+    }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -383,8 +415,14 @@ pub fn start_copy_or_move_paths(
     operation: String,
     overwrite: bool,
     rename_on_conflict: Option<bool>,
+    fixed_target_name: Option<String>,
 ) -> Result<(), String> {
     let rename_on_conflict = rename_on_conflict.unwrap_or(false);
+    if let Some(name) = &fixed_target_name {
+        if paths.len() != 1 || name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+            return Err("Nombre de destino fijado invalido".into());
+        }
+    }
     let app_handle = app.clone();
     let remote_manager = remote_state.inner.clone();
     let parsed_paths = parse_paths(paths.clone());
@@ -408,6 +446,8 @@ pub fn start_copy_or_move_paths(
                 destination_path.to_string_lossy().to_string(),
                 &operation,
                 overwrite,
+                rename_on_conflict,
+                fixed_target_name.as_deref(),
             )
         } else {
             ops::copy_or_move_paths(
@@ -418,6 +458,7 @@ pub fn start_copy_or_move_paths(
                 &operation,
                 overwrite,
                 rename_on_conflict,
+                fixed_target_name.as_deref(),
             )
         };
         let message = match &result {
@@ -592,16 +633,20 @@ pub fn start_restore_from_cso(
 /// GameCube-Wii / generic ISO) so the UI only offers disc treatments that are
 /// actually valid. Cheap: a few small reads per file, remote/non-iso skipped.
 #[tauri::command]
-pub fn detect_disc_kinds(paths: Vec<String>) -> Vec<crate::models::DiscKindDto> {
-    ops::detect_disc_kinds(parse_paths(paths))
+pub async fn detect_disc_kinds(paths: Vec<String>) -> Result<Vec<crate::models::DiscKindDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || ops::detect_disc_kinds(parse_paths(paths)))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Probes every external tool at startup (chdman, 7-Zip, DolphinTool) and reports
 /// availability + the capabilities each unlocks, so the UI can prepare/guide and
 /// disable features whose tool is missing.
 #[tauri::command]
-pub fn check_tools(app: AppHandle) -> Vec<crate::models::ToolStatusDto> {
-    ops::check_tools(&app)
+pub async fn check_tools(app: AppHandle) -> Result<Vec<crate::models::ToolStatusDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || ops::check_tools(&app))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1086,8 +1131,10 @@ pub fn preflight_remote_transfer(
 // ── Compression ───────────────────────────────────────────
 
 #[tauri::command]
-pub fn get_compression_capabilities(app: AppHandle) -> CompressionCapabilitiesDto {
-    ops::get_compression_capabilities(&app)
+pub async fn get_compression_capabilities(app: AppHandle) -> Result<CompressionCapabilitiesDto, String> {
+    tauri::async_runtime::spawn_blocking(move || ops::get_compression_capabilities(&app))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

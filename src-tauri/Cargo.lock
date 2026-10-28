@@ -1066,12 +1066,13 @@ dependencies = [
 
 [[package]]
 name = "dogu"
-version = "0.2.5-beta.5"
+version = "0.2.6-beta.1"
 dependencies = [
  "anyhow",
  "chrono",
  "dirs 5.0.1",
  "flate2",
+ "libc",
  "nod",
  "portable-pty",
  "regex",
@@ -1090,6 +1091,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-updater",
+ "tempfile",
  "walkdir",
  "webpki-roots",
  "xdvdfs",

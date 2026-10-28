@@ -18,9 +18,6 @@ import type {
   KnownFoldersDto,
   TerminalTabInfo,
   QueuedOp,
-  QueueConflict,
-  ConflictKind,
-  ConflictSeverity,
   GhostEntry,
   JobPausedDto,
   ToolStatusDto,
@@ -29,8 +26,12 @@ import type {
   UpdateDownloadProgress,
   UpdateMetadataDto,
 } from "../types/index.js";
-import { normalizePath, uniqueDisplayPath, basenameOf } from "../utils/ghosts.js";
+import { normalizePath, uniqueDisplayPath } from "../utils/ghosts.js";
+import { resolveQueueOutputs, detectConflicts, linkDependencies, collectDependents, orderRespectsDeps, buildQueuePlan, requiredOutputs, hasUnresolvedOutputs } from "../utils/queue-plan.js";
 import { collectAccentIssues, isAccentUnsafeKind } from "../utils/ascii.js";
+import { translations } from "../i18n/translations.js";
+import { runQueue, restoreUnfinished, canRetryFailedJob } from "../utils/queue-runner.js";
+import { executeWithOutputChecks } from "../utils/queue-validation.js";
 
 // Per-tab vertical scroll memory, keyed by `${tabId}::${normalizedPath}`. Kept
 // outside reactive state (a plain Map) so frequent scroll writes cause no churn.
@@ -118,7 +119,7 @@ export type PaneView = {
   setPathScroll(path: string, scrollTop: number): void;
   /** Restores the remembered scroll for a path (0 if never visited). */
   pathScroll(path: string): number;
-  setTabLoadedPath(path: string): void;
+  setTabLoadedPath(path: string | null): void;
   // Navigation
   readonly currentPath: string | null;
   navigate(path: string, pushHistory?: boolean): void;
@@ -200,21 +201,7 @@ type QueueRunStats = {
 
 type QueueExecutionMode = "smart" | "parallel" | "sequential";
 
-type QueuePlan = {
-  total: number;
-  hasDependencies: boolean;
-  hasOrderingConstraints: boolean;
-  dependencyEdges: number;
-  orderingEdges: number;
-  maxParallelWidth: number;
-  maxConcurrent: number;
-  firstWave: number;
-  levels: string[][];
-  blockingConflicts: QueueConflict[];
-  hardPredecessors: Map<string, Set<string>>;
-  hardSuccessors: Map<string, Set<string>>;
-  orderPredecessors: Map<string, Set<string>>;
-};
+
 
 // ─── Default settings ─────────────────────────────────────
 const DEFAULT_COLUMN_WIDTHS: ContentColumnWidths = {
@@ -275,6 +262,8 @@ function loadSettings(): AppSettings {
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
+      defaultOverwriteOnConflict: parsed.defaultOverwriteOnConflict === true,
+      renameOnConflict: parsed.defaultOverwriteOnConflict !== true,
       queueMaxConcurrent: clampQueueMaxConcurrent(parsed.queueMaxConcurrent),
       showQueueRelationMap: parsed.showQueueRelationMap !== false,
       updateChannel: parsed.updateChannel === "beta" ? "beta" : "stable",
@@ -429,165 +418,6 @@ function makeNotification(kind: NotificationKind, text: string): NotificationEnt
   return { id: `n-${++_notifCounter}`, kind, text, createdAt: Date.now() };
 }
 
-// ─── Queue conflict detection ──────────────────────────────
-function pathContainsOther(parent: string, child: string): boolean {
-  const p = parent.replace(/[/\\]+$/, "").toLowerCase();
-  const c = child.replace(/[/\\]+$/, "").toLowerCase();
-  return c === p || c.startsWith(p + "/") || c.startsWith(p + "\\");
-}
-
-function pathsOverlap(a: string, b: string): boolean {
-  return pathContainsOther(a, b) || pathContainsOther(b, a);
-}
-
-function deleteVsSourceSeverity(deletePath: string, sourcePath: string): ConflictSeverity | null {
-  // Deleting the source itself (or one of its ancestors) makes a later consumer
-  // impossible even in sequential order.
-  if (pathContainsOther(deletePath, sourcePath)) return "blocking";
-  // Deleting something *inside* a source directory just changes that tree's
-  // contents; queue order still makes sequential execution safe.
-  if (pathContainsOther(sourcePath, deletePath)) return "parallel-only";
-  return null;
-}
-
-/**
- * Resolves the final output paths of every queued op against the outputs of
- * earlier ops (in queue order), applying the rename-on-conflict policy. This is
- * the single source of truth for "what each op's files will actually be called":
- * when two ops would produce the same name, the later one gets a " (2)" suffix
- * (if it renames), so it no longer collides. Returns opId → resolved outputs.
- */
-function resolveQueueOutputs(ops: QueuedOp[]): Map<string, GhostEntry[]> {
-  const taken = new Set<string>();
-  const map = new Map<string, GhostEntry[]>();
-  for (const op of ops) {
-    const resolved: GhostEntry[] = [];
-    for (const g of op.produces) {
-      let path = g.path;
-      if (taken.has(normalizePath(path)) && !op.overwrite && op.renameOnConflict) {
-        path = uniqueDisplayPath(g.path, taken);
-      }
-      taken.add(normalizePath(path));
-      resolved.push(path === g.path ? g : { ...g, path, name: basenameOf(path) });
-    }
-    map.set(op.id, resolved);
-  }
-  return map;
-}
-
-function detectConflicts(ops: QueuedOp[]): QueueConflict[] {
-  const conflicts: QueueConflict[] = [];
-  // Compare against RESOLVED outputs so two ops that would produce the same name
-  // but rename around it are not reported as colliding.
-  const resolvedOutputs = resolveQueueOutputs(ops);
-
-  function push(opAId: string, opBId: string, kind: ConflictKind, severity: ConflictSeverity, pathA: string, pathB: string) {
-    if (!conflicts.some(c => c.opAId === opAId && c.opBId === opBId && c.kind === kind)) {
-      conflicts.push({ opAId, opBId, kind, severity, pathA, pathB });
-    }
-  }
-
-  // Conflicts are computed against the actual output FILES each op creates
-  // (`produces`), not the destination folders — deleting or writing a different
-  // file inside a shared folder is not a conflict.
-  const outputsOf = (op: QueuedOp): string[] =>
-    (resolvedOutputs.get(op.id) ?? op.produces).map((g) => g.path);
-
-  for (let i = 0; i < ops.length; i++) {
-    for (let j = i + 1; j < ops.length; j++) {
-      const a = ops[i], b = ops[j];
-      const outA = outputsOf(a);
-      const outB = outputsOf(b);
-
-      // Both ops create the exact same output file.
-      for (const pa of outA) {
-        for (const pb of outB) {
-          if (normalizePath(pa) === normalizePath(pb)) push(a.id, b.id, "dest-collision", "parallel-only", pa, pb);
-        }
-      }
-
-      // `a` deletes something `b` needs as input, or is going to create.
-      for (const d of a.deletes) {
-        for (const s of b.sources) {
-          const severity = deleteVsSourceSeverity(d, s);
-          if (severity) push(a.id, b.id, "source-deleted", severity, d, s);
-        }
-        for (const p of outB)      { if (pathsOverlap(d, p)) push(a.id, b.id, "dest-deleted",   "blocking", d, p); }
-      }
-
-      for (const d of b.deletes) {
-        for (const s of a.sources) {
-          if (deleteVsSourceSeverity(d, s)) push(b.id, a.id, "source-deleted", "parallel-only", d, s);
-        }
-        for (const p of outA)      { if (pathsOverlap(d, p)) push(b.id, a.id, "dest-deleted",   "parallel-only", d, p); }
-      }
-    }
-  }
-
-  return conflicts;
-}
-
-// ─── Ghost dependency helpers ──────────────────────────────
-/** Returns the id of the queued op that produces `path` (or contains it), if any. */
-function ghostProducerOf(path: string, ops: QueuedOp[]): string | null {
-  const np = normalizePath(path);
-  const resolvedOutputs = resolveQueueOutputs(ops);
-  for (const op of ops) {
-    for (const g of resolvedOutputs.get(op.id) ?? op.produces) {
-      const gp = normalizePath(g.path);
-      if (np === gp || np.startsWith(gp + "/")) return op.id;
-    }
-  }
-  return null;
-}
-
-function ghostProducersTouchingPath(path: string, ops: QueuedOp[], includeDescendantGhosts: boolean): string[] {
-  const np = normalizePath(path);
-  const producers = new Set<string>();
-  const resolvedOutputs = resolveQueueOutputs(ops);
-  for (const op of ops) {
-    for (const g of resolvedOutputs.get(op.id) ?? op.produces) {
-      const gp = normalizePath(g.path);
-      const pathConsumesGhost = np === gp || np.startsWith(gp + "/");
-      const pathContainsGhost = includeDescendantGhosts && gp.startsWith(np + "/");
-      if (pathConsumesGhost || pathContainsGhost) producers.add(op.id);
-    }
-  }
-  return [...producers];
-}
-
-/** Computes which already-queued ops an op depends on (consumes their outputs). */
-function linkDependencies(op: QueuedOp, existing: QueuedOp[]): string[] {
-  const deps = new Set<string>();
-  for (const input of [...op.sources, ...op.deletes]) {
-    for (const producer of ghostProducersTouchingPath(input, existing, true)) {
-      if (producer !== op.id) deps.add(producer);
-    }
-  }
-  for (const input of op.destinations) {
-    const producer = ghostProducerOf(input, existing);
-    if (producer && producer !== op.id) deps.add(producer);
-  }
-  return [...deps];
-}
-
-/** Transitive closure of ops that (directly or indirectly) depend on any of `ids`. */
-function collectDependents(ids: string[], ops: QueuedOp[]): Set<string> {
-  const result = new Set(ids);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const op of ops) {
-      if (result.has(op.id)) continue;
-      if (op.dependsOn.some((d) => result.has(d))) {
-        result.add(op.id);
-        changed = true;
-      }
-    }
-  }
-  return result;
-}
-
 function cloneQueuedOpForRetry(op: QueuedOp): QueuedOp {
   const retryId = newRetryQueueOpId();
   return {
@@ -598,103 +428,6 @@ function cloneQueuedOpForRetry(op: QueuedOp): QueuedOp {
   };
 }
 
-/** True when every op appears after all the ops it depends on. */
-function orderRespectsDeps(ops: QueuedOp[]): boolean {
-  const indexOf = new Map(ops.map((o, i) => [o.id, i]));
-  return ops.every((op, i) => op.dependsOn.every((d) => (indexOf.get(d) ?? -1) < i));
-}
-
-function buildQueuePlan(ops: QueuedOp[], conflicts: QueueConflict[], maxConcurrent: number): QueuePlan {
-  const ids = new Set(ops.map((o) => o.id));
-  const indexOf = new Map(ops.map((o, i) => [o.id, i]));
-  const hardPredecessors = new Map<string, Set<string>>();
-  const hardSuccessors = new Map<string, Set<string>>();
-  const orderPredecessors = new Map<string, Set<string>>();
-  const allSuccessors = new Map<string, Set<string>>();
-
-  for (const op of ops) {
-    hardPredecessors.set(op.id, new Set());
-    hardSuccessors.set(op.id, new Set());
-    orderPredecessors.set(op.id, new Set());
-    allSuccessors.set(op.id, new Set());
-  }
-
-  let dependencyEdges = 0;
-  let orderingEdges = 0;
-
-  const addEdge = (from: string, to: string, hard: boolean) => {
-    if (from === to || !ids.has(from) || !ids.has(to)) return;
-    const predecessors = hard ? hardPredecessors : orderPredecessors;
-    const predSet = predecessors.get(to);
-    const succSet = allSuccessors.get(from);
-    if (!predSet || !succSet || predSet.has(from)) return;
-    predSet.add(from);
-    succSet.add(to);
-    if (hard) {
-      hardSuccessors.get(from)?.add(to);
-      dependencyEdges += 1;
-    } else {
-      orderingEdges += 1;
-    }
-  };
-
-  for (const op of ops) {
-    for (const dep of op.dependsOn) addEdge(dep, op.id, true);
-  }
-
-  for (const conflict of conflicts) {
-    if (conflict.severity !== "parallel-only") continue;
-    const aIndex = indexOf.get(conflict.opAId);
-    const bIndex = indexOf.get(conflict.opBId);
-    if (aIndex === undefined || bIndex === undefined) continue;
-    const earlier = ops[Math.min(aIndex, bIndex)];
-    const later = ops[Math.max(aIndex, bIndex)];
-    addEdge(earlier.id, later.id, false);
-  }
-
-  const remainingPreds = new Map<string, Set<string>>();
-  for (const op of ops) {
-    remainingPreds.set(op.id, new Set([
-      ...(hardPredecessors.get(op.id) ?? []),
-      ...(orderPredecessors.get(op.id) ?? []),
-    ]));
-  }
-
-  const pending = new Set(ops.map((o) => o.id));
-  const levels: string[][] = [];
-  while (pending.size > 0) {
-    const ready = ops
-      .filter((op) => pending.has(op.id) && (remainingPreds.get(op.id)?.size ?? 0) === 0)
-      .map((op) => op.id);
-    if (ready.length === 0) {
-      levels.push([...pending]);
-      break;
-    }
-    levels.push(ready);
-    for (const id of ready) {
-      pending.delete(id);
-      for (const child of allSuccessors.get(id) ?? []) {
-        remainingPreds.get(child)?.delete(id);
-      }
-    }
-  }
-
-  return {
-    total: ops.length,
-    hasDependencies: dependencyEdges > 0,
-    hasOrderingConstraints: orderingEdges > 0,
-    dependencyEdges,
-    orderingEdges,
-    maxParallelWidth: Math.max(0, ...levels.map((level) => level.length)),
-    maxConcurrent: Math.min(maxConcurrent, Math.max(0, ...levels.map((level) => level.length))),
-    firstWave: levels[0]?.length ?? 0,
-    levels,
-    blockingConflicts: conflicts.filter((c) => c.severity === "blocking"),
-    hardPredecessors,
-    hardSuccessors,
-    orderPredecessors,
-  };
-}
 
 // ─── App state (Svelte 5 runes) ────────────────────────────
 function createAppState() {
@@ -705,13 +438,20 @@ function createAppState() {
   const { initialPanes, initialFocusedIdx } = untrack(() => loadSavedPanes(loadSettings()));
   let panes = $state<PaneState[]>(initialPanes);
   let focusedPaneIdx = $state(initialFocusedIdx);
+  let splitOrientation = $state<"side-by-side" | "stacked">(
+    untrack(() => localStorage.getItem("dogu-split-orientation") === "stacked" ? "stacked" : "side-by-side")
+  );
 
   // Global display pref: tree zoom (sidebar only, one sidebar)
   let treeZoom = $state(untrack(() => settings.defaultTreeZoom));
 
   // Connections
   let connectionProfiles = $state<ConnectionProfileDto[]>([]);
+  let connectionProfilesLoaded = $state(false);
+  let connectionProfilesError = $state(false);
   let activeConnections = $state<ActiveConnectionDto[]>([]);
+  let profilesRevision = 0;
+  let sessionsRevision = 0;
 
   // System volumes and known folders
   let volumes = $state<VolumeDto[]>([]);
@@ -737,11 +477,14 @@ function createAppState() {
   let opQueue = $state<QueuedOp[]>([]);
   let queueRunning = $state(false);
   let queueRunStats = $state<QueueRunStats | null>(null);
-  const queueConflicts = $derived(detectConflicts(opQueue));
+  let queueExecutionSteps = $state<Array<{ op: QueuedOp; state: import("../utils/queue-runner.js").QueueStepStatus }>>([]);
+  let queueStepErrors = $state<Record<string, string>>({});
+  const queueKnownPaths = $derived(panes.flatMap(pane => pane.tabs.flatMap(tab => tab.entries.filter(entry => !entry.isGhost).map(entry => entry.path))));
+  const queueConflicts = $derived(detectConflicts(opQueue, queueKnownPaths));
   const queueMaxConcurrent = $derived(clampQueueMaxConcurrent(settings.queueMaxConcurrent));
   const queuePlan = $derived(buildQueuePlan(opQueue, queueConflicts, queueMaxConcurrent));
   // Final output names per op after applying rename-on-conflict across the queue.
-  const resolvedOutputs = $derived(resolveQueueOutputs(opQueue));
+  const resolvedOutputs = $derived(resolveQueueOutputs(opQueue, queueKnownPaths));
   // Any op consuming another op's ghost output forces ordered (sequential) execution.
   const queueHasDependencies = $derived(opQueue.some((o) => o.dependsOn.length > 0));
   // Ids of chd ops whose source *file names* carry accents chdman can't process.
@@ -764,6 +507,7 @@ function createAppState() {
   // Updates
   let updateChecking = $state(false);
   let updateInstalling = $state(false);
+  let updateDownloadFinished = $state(false);
   let updateNoticeOpen = $state(false);
   let availableUpdate = $state<UpdateMetadataDto | null>(null);
   let updateDownloadProgress = $state<UpdateDownloadProgress | null>(null);
@@ -792,6 +536,7 @@ function createAppState() {
     profileLabel: string;
     resolve: (trusted: boolean) => void;
   } | null>(null);
+  const pendingFingerprints: Array<{ fingerprint: string; profileLabel: string; resolve: (trusted: boolean) => void }> = [];
 
   // Derived
   const theme = $derived(settings.theme);
@@ -898,7 +643,7 @@ function createAppState() {
         return id ? (scrollMemory.get(`${id}::${normalizePath(path)}`) ?? 0) : 0;
       },
 
-      setTabLoadedPath(path: string) {
+      setTabLoadedPath(path: string | null) {
         const tab = t();
         if (tab) tab.loadedPath = path;
       },
@@ -1116,6 +861,7 @@ function createAppState() {
   async function installAvailableUpdate() {
     if (!availableUpdate || updateInstalling) return;
     updateInstalling = true;
+    updateDownloadFinished = false;
     updateError = null;
     updateDownloadProgress = { downloaded: 0, contentLength: null, percent: null };
     const onEvent = new Channel<UpdateDownloadEvent>((event) => {
@@ -1132,6 +878,8 @@ function createAppState() {
           contentLength: total,
           percent: total && total > 0 ? Math.min(100, Math.round(event.data.downloaded / total * 100)) : null,
         };
+      } else if (event.event === "finished") {
+        updateDownloadFinished = true;
       }
     });
 
@@ -1161,6 +909,7 @@ function createAppState() {
     // ── Updates ─────────────────────────────────────────────
     get updateChecking() { return updateChecking; },
     get updateInstalling() { return updateInstalling; },
+    get updateDownloadFinished() { return updateDownloadFinished; },
     get updateNoticeOpen() { return updateNoticeOpen; },
     get availableUpdate() { return availableUpdate; },
     get updateDownloadProgress() { return updateDownloadProgress; },
@@ -1177,6 +926,7 @@ function createAppState() {
       await installAvailableUpdate();
     },
     dismissUpdateNotice() {
+      if (updateInstalling) return;
       updateNoticeOpen = false;
     },
     clearUpdateError() {
@@ -1199,6 +949,11 @@ function createAppState() {
     get panes() { return panes; },
     get focusedPaneIdx() { return focusedPaneIdx; },
     get isSplit() { return panes.length > 1; },
+    get splitOrientation() { return splitOrientation; },
+    toggleSplitOrientation() {
+      splitOrientation = splitOrientation === "stacked" ? "side-by-side" : "stacked";
+      localStorage.setItem("dogu-split-orientation", splitOrientation);
+    },
 
     focusPane(idx: number) {
       if (idx >= 0 && idx < panes.length) focusedPaneIdx = idx;
@@ -1266,7 +1021,7 @@ function createAppState() {
     duplicateTab() { getPaneView(focusedPaneIdx).duplicateTab(); },
     reorderTabs(fromIdx: number, insertIdx: number) { getPaneView(focusedPaneIdx).reorderTabs(fromIdx, insertIdx); },
     setTabScrollTop(tabIdx: number, scrollTop: number) { getPaneView(focusedPaneIdx).setTabScrollTop(tabIdx, scrollTop); },
-    setTabLoadedPath(path: string) { getPaneView(focusedPaneIdx).setTabLoadedPath(path); },
+    setTabLoadedPath(path: string | null) { getPaneView(focusedPaneIdx).setTabLoadedPath(path); },
 
     // ── Navigation (focused pane) ────────────────────────────
     get currentPath() { return ft()?.currentPath ?? null; },
@@ -1368,11 +1123,17 @@ function createAppState() {
 
     // ── Connections ──────────────────────────────────────────
     get connectionProfiles() { return connectionProfiles; },
-    setConnectionProfiles(p: ConnectionProfileDto[]) { connectionProfiles = p; },
+    get profilesRevision() { return profilesRevision; },
+    get connectionProfilesLoaded() { return connectionProfilesLoaded; },
+    get connectionProfilesError() { return connectionProfilesError; },
+    setConnectionProfiles(p: ConnectionProfileDto[]) { connectionProfiles = p; connectionProfilesLoaded = true; connectionProfilesError = false; profilesRevision++; },
+    setConnectionProfilesError() { connectionProfilesLoaded = true; connectionProfilesError = true; },
     get activeConnections() { return activeConnections; },
-    setActiveConnections(c: ActiveConnectionDto[]) { activeConnections = c; },
+    get sessionsRevision() { return sessionsRevision; },
+    setActiveConnections(c: ActiveConnectionDto[]) { activeConnections = c; sessionsRevision++; },
     removeActiveConnection(sessionId: string) {
       activeConnections = activeConnections.filter(c => c.sessionId !== sessionId);
+      sessionsRevision++;
     },
 
     // ── Connection manager ───────────────────────────────────
@@ -1394,12 +1155,15 @@ function createAppState() {
     get fingerprintPrompt() { return fingerprintPrompt; },
     promptFingerprint(fingerprint: string, profileLabel: string): Promise<boolean> {
       return new Promise((resolve) => {
-        fingerprintPrompt = { fingerprint, profileLabel, resolve };
+        const request = { fingerprint, profileLabel, resolve };
+        if (fingerprintPrompt) pendingFingerprints.push(request);
+        else fingerprintPrompt = request;
       });
     },
     resolveFingerprint(trusted: boolean) {
-      fingerprintPrompt?.resolve(trusted);
-      fingerprintPrompt = null;
+      const current = fingerprintPrompt;
+      fingerprintPrompt = pendingFingerprints.shift() ?? null;
+      current?.resolve(trusted);
     },
 
     // ── Clipboard ────────────────────────────────────────────
@@ -1435,7 +1199,7 @@ function createAppState() {
         retried: false,
       };
       jobs = [job, ...jobs];
-      jobsPanelOpen = true;
+      if (queueRunning) jobsPanelOpen = true;
     },
 
     updateJobProgress(jobId: string, pct: number, message: string) {
@@ -1456,7 +1220,10 @@ function createAppState() {
       const job = jobs[idx];
       const resultMessage = message
         || (success ? (job.statusMessageOnSuccess ?? "") : (job.statusMessageOnFailure ?? ""));
-      jobs[idx] = { ...job, progress: 100, done: true, success, resultMessage };
+      if (!success && resultMessage.startsWith("[REQUIRES_REVIEW]") && job.retryQueuedOp) {
+        job.retryQueuedOp.requiresReview = resultMessage.replace("[REQUIRES_REVIEW] ", "");
+      }
+      jobs[idx] = { ...job, progress: success ? 100 : job.progress, done: true, success, resultMessage };
       if (success && !queueRunning) {
         setTimeout(() => { jobs = jobs.filter(j => j.id !== jobId); }, 5000);
       }
@@ -1466,6 +1233,7 @@ function createAppState() {
     },
 
     pauseJob(dto: JobPausedDto) {
+      if (queueMode || queueRunning) jobsPanelOpen = true;
       const idx = jobs.findIndex(j => j.id === dto.jobId);
       if (idx === -1) return;
       jobs[idx] = {
@@ -1488,10 +1256,16 @@ function createAppState() {
       const idx = jobs.findIndex(j => j.id === jobId);
       if (idx === -1) return false;
       const job = jobs[idx];
-      if (!job.done || job.success || job.retried || !job.retryQueuedOp) return false;
+      if (!canRetryFailedJob(job, opQueue) || !job.retryQueuedOp) return false;
       jobs[idx] = { ...job, retried: true };
       const retryOp = cloneQueuedOpForRetry(job.retryQueuedOp);
-      void retryOp.execute(undefined, retryOp);
+      failedQueueRetryRunning = true;
+      void retryOp.execute(undefined, retryOp).catch((error) => {
+        pushNotification("error", String(error));
+        if (!jobs.some(j => j.retryQueuedOp?.id === retryOp.id)) {
+          jobs = jobs.map(j => j.id === jobId ? { ...j, retried: false } : j);
+        }
+      }).finally(() => { failedQueueRetryRunning = false; });
       jobsPanelOpen = true;
       return true;
     },
@@ -1500,20 +1274,24 @@ function createAppState() {
       if (queueRunning || failedQueueRetryRunning) return 0;
       const retryable = jobs
         .map((job, index) => ({ job, index }))
-        .filter(({ job }) => job.done && !job.success && !job.retried && !!job.retryQueuedOp);
+        .filter(({ job }) => canRetryFailedJob(job, opQueue));
       if (retryable.length === 0) return 0;
 
       failedQueueRetryRunning = true;
-      jobs = jobs.map((job, index) => {
-        const shouldMark = retryable.some((entry) => entry.index === index);
-        return shouldMark ? { ...job, retried: true } : job;
-      });
       jobsPanelOpen = true;
 
       try {
         for (const { job } of retryable) {
           const retryOp = cloneQueuedOpForRetry(job.retryQueuedOp!);
-          await retryOp.execute(undefined, retryOp);
+          jobs = jobs.map(j => j.id === job.id ? { ...j, retried: true } : j);
+          try {
+            await retryOp.execute(undefined, retryOp);
+          } catch (error) {
+            pushNotification("error", String(error));
+            if (!jobs.some(j => j.retryQueuedOp?.id === retryOp.id)) {
+              jobs = jobs.map(j => j.id === job.id ? { ...j, retried: false } : j);
+            }
+          }
         }
       } finally {
         failedQueueRetryRunning = false;
@@ -1558,6 +1336,9 @@ function createAppState() {
     get queueMaxConcurrent() { return queueMaxConcurrent; },
     get queueRunning()   { return queueRunning; },
     get queueRunStats()  { return queueRunStats; },
+    get queueExecutionSteps() { return queueExecutionSteps; },
+    get queueStepErrors() { return queueStepErrors; },
+    dismissQueueRunStats() { if (!queueRunning) queueRunStats = null; },
     get queueHasDependencies() { return queueHasDependencies; },
     get queueAccentBlocked() { return queueAccentBlocked; },
 
@@ -1567,7 +1348,7 @@ function createAppState() {
      * their own derived — reading through a store method does not register
      * opQueue as a dependency. This getter is for one-shot, non-reactive checks.
      */
-    get queueGhosts(): GhostEntry[] { return opQueue.flatMap((o) => o.produces); },
+    get queueGhosts(): GhostEntry[] { return opQueue.flatMap((o) => resolvedOutputs.get(o.id) ?? o.produces); },
 
     /** Final (rename-resolved) output files for a queued op — what its files
      *  will actually be called after the queue's cross-op conflict resolution. */
@@ -1614,9 +1395,18 @@ function createAppState() {
 
     addToQueue(op: QueuedOp) {
       // Link the op to any already-queued ops whose ghost outputs it consumes.
-      op.dependsOn = linkDependencies(op, opQueue);
+      op.dependsOn = linkDependencies(op, opQueue, queueKnownPaths);
+      // CHD conversion can pass a concrete name to the backend. Preserve the
+      // visible choice even when earlier steps later free the original name.
+      if (op.fixedExtractionFolder || op.fixedExtractionEntries || ["copy", "move", "chd-convert", "chd-restore", "compress", "cso-convert", "cso-restore", "xiso-pack", "xiso-unpack", "rvz-convert", "rvz-restore"].includes(op.kind)) {
+        op.fixedOutputs = resolveQueueOutputs([...opQueue, op], queueKnownPaths).get(op.id);
+      }
       opQueue = [...opQueue, op];
-      jobsPanelOpen = true;
+      if (queueMode) jobsPanelOpen = true;
+    },
+
+    acknowledgeQueueReview(id: string) {
+      opQueue = opQueue.map(op => op.id === id ? { ...op, requiresReview: undefined } : op);
     },
 
     /**
@@ -1651,17 +1441,24 @@ function createAppState() {
     },
 
     async executeQueue(mode: QueueExecutionMode) {
-      const ops = [...opQueue];
-      if (ops.length === 0) return;
+      const ops = opQueue.map((op, index) => ({ ...op, originalStep: op.originalStep ?? index + 1 }));
+      if (ops.length === 0 || queueRunning || failedQueueRetryRunning || ops.some(op => op.requiresReview)) return;
       const effectiveMode: QueueExecutionMode = mode === "parallel" ? "smart" : mode;
       const maxConcurrent = clampQueueMaxConcurrent(settings.queueMaxConcurrent);
-      const plan = buildQueuePlan(ops, detectConflicts(ops), maxConcurrent);
-      if (plan.blockingConflicts.length > 0) return;
+      const knownPaths = [...queueKnownPaths];
+      const plan = buildQueuePlan(ops, detectConflicts(ops, knownPaths), maxConcurrent);
+      const required = requiredOutputs(ops, knownPaths);
+      if (plan.blockingConflicts.length > 0 || plan.invalidDependencies) return;
+      if (hasUnresolvedOutputs(ops, knownPaths)) {
+        pushNotification("error", translations[settings.locale]["queue.outputChanged"]);
+        return;
+      }
       // Refuse to run while any op is blocked by accented file names (integrity guard).
       if (ops.some((o) => isAccentUnsafeKind(o.kind) && collectAccentIssues(o.sources).length > 0)) return;
 
       opQueue = [];
       queueRunning = true;
+      queueStepErrors = {};
       const preExistingIds = new Set(jobs.map(j => j.id));
       queueRunStats = {
         total: ops.length,
@@ -1673,114 +1470,55 @@ function createAppState() {
         mode: effectiveMode,
       };
 
-      const terminal = new Set<string>();
-      const succeeded = new Set<string>();
-      const failed = new Set<string>();
-      const skipped = new Set<string>();
-      const running = new Set<string>();
-
-      const updateStats = (patch: Partial<QueueRunStats>) => {
-        if (!queueRunStats) return;
-        queueRunStats = { ...queueRunStats, ...patch };
-      };
-
-      const markSkipped = (id: string) => {
-        if (terminal.has(id) || running.has(id)) return;
-        terminal.add(id);
-        skipped.add(id);
-        updateStats({
-          completed: queueRunStats!.completed + 1,
-          skipped: queueRunStats!.skipped + 1,
-        });
-      };
-
-      const skipHardDependents = (id: string) => {
-        for (const child of plan.hardSuccessors.get(id) ?? []) {
-          if (terminal.has(child) || running.has(child)) continue;
-          markSkipped(child);
-          skipHardDependents(child);
-        }
-      };
-
-      const runOp = async (op: QueuedOp): Promise<boolean> => {
-        running.add(op.id);
-        updateStats({ running: queueRunStats!.running + 1 });
-        let ok = false;
-        try {
-          ok = await op.execute(undefined, op);
-        } catch {
-          ok = false;
-        }
-        running.delete(op.id);
-        terminal.add(op.id);
-        if (ok) succeeded.add(op.id);
-        else {
-          failed.add(op.id);
-          skipHardDependents(op.id);
-        }
-        updateStats({
-          running: queueRunStats!.running - 1,
-          completed: queueRunStats!.completed + 1,
-          succeeded: queueRunStats!.succeeded + (ok ? 1 : 0),
-          failed: queueRunStats!.failed + (ok ? 0 : 1),
-        });
-        return ok;
-      };
-
-      const hardDepsSucceeded = (op: QueuedOp) =>
-        [...(plan.hardPredecessors.get(op.id) ?? [])].every((dep) => succeeded.has(dep));
-
-      const orderDepsTerminal = (op: QueuedOp) =>
-        [...(plan.orderPredecessors.get(op.id) ?? [])].every((dep) => terminal.has(dep));
-
-      const runSequential = async () => {
-        for (const op of ops) {
-          if (terminal.has(op.id)) continue;
-          if (!hardDepsSucceeded(op)) {
-            markSkipped(op.id);
-            skipHardDependents(op.id);
-            continue;
-          }
-          await runOp(op);
-        }
-      };
-
-      const runSmart = async () => {
-        const pending = new Set(ops.map((op) => op.id));
-        await new Promise<void>((resolve) => {
-          const pump = () => {
-            if (terminal.size >= ops.length) {
-              resolve();
-              return;
-            }
-
-            let launched = false;
-            while (running.size < maxConcurrent) {
-              const ready = ops.find((op) =>
-                pending.has(op.id) && hardDepsSucceeded(op) && orderDepsTerminal(op)
-              );
-              if (!ready) break;
-              pending.delete(ready.id);
-              launched = true;
-              void runOp(ready).then(pump);
-            }
-
-            if (!launched && running.size === 0 && pending.size > 0) {
-              for (const id of [...pending]) {
-                pending.delete(id);
-                markSkipped(id);
-              }
-              resolve();
-            }
-          };
-          pump();
-        });
-      };
-
+      let states = new Map(ops.map(op => [op.id, "pending" as import("../utils/queue-runner.js").QueueStepStatus]));
       try {
-        if (effectiveMode === "sequential") await runSequential();
-        else await runSmart();
+        states = await runQueue(ops, plan, effectiveMode === "sequential" ? 1 : maxConcurrent,
+          async op => {
+            jobs = jobs.map(job => job.done && !job.success && job.retryQueuedOp?.id === op.id
+              ? { ...job, retried: true } : job);
+            return executeWithOutputChecks(op, required.get(op.id) ?? [],
+              path => invoke<boolean>("queue_path_exists", { path }),
+              {
+                uncertain: path => translations[settings.locale]["queue.outputUncertain"].replace("{path}", path),
+                missing: path => translations[settings.locale]["queue.outputMissing"].replace("{path}", path),
+              },
+              () => op.execute(undefined, op),
+            );
+          },
+          current => {
+            states = new Map(current);
+            queueExecutionSteps = ops.map(op => ({ op, state: current.get(op.id) ?? "pending" }));
+            const values = [...states.values()];
+            const succeeded = values.filter(value => value === "succeeded").length;
+            const failed = values.filter(value => value === "failed").length;
+            const skipped = values.filter(value => value === "skipped").length;
+            queueRunStats = {
+              total: ops.length, completed: succeeded + failed + skipped,
+              succeeded, failed, skipped,
+              running: values.filter(value => value === "running").length, mode: effectiveMode,
+            };
+          },
+          (op, error) => {
+            queueStepErrors = { ...queueStepErrors, [op.id]: String(error) };
+            pushNotification("error", String(error));
+          },
+        );
       } finally {
+        const failed = new Set([...states].filter(([, state]) => state === "failed").map(([id]) => id));
+        const skipped = new Set([...states].filter(([, state]) => state === "skipped").map(([id]) => id));
+        const succeeded = new Set([...states].filter(([, state]) => state === "succeeded").map(([id]) => id));
+        // Preserve all remaining work if the scheduler itself fails unexpectedly.
+        for (const [id, state] of states) if (state === "pending" || state === "running") skipped.add(id);
+        // Keep failed and dependent skipped steps reviewable in their original
+        // order. Successful predecessors no longer need to be run again.
+        const unfinished = restoreUnfinished(ops, states);
+        if (unfinished.length) {
+          opQueue = [
+            ...unfinished,
+            ...opQueue,
+          ];
+          pushNotification("info", translations[settings.locale]["queue.unfinishedRestored"].replace("{count}", String(unfinished.length)));
+        }
         queueRunning = false;
         const queueJobs = jobs.filter(j => !preExistingIds.has(j.id) && j.done);
         for (const j of queueJobs.filter(j => j.success)) {
@@ -1789,14 +1527,13 @@ function createAppState() {
         }
         queueRunStats = {
           total: ops.length,
-          completed: terminal.size,
+          completed: succeeded.size + failed.size + skipped.size,
           succeeded: succeeded.size,
           failed: failed.size,
           skipped: skipped.size,
           running: 0,
           mode: effectiveMode,
         };
-        setTimeout(() => { queueRunStats = null; }, 8000);
       }
     },
 

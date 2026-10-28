@@ -48,6 +48,7 @@
   export function createFile()         { contentPanel?.createFile(); }
   export function search(q: string)    { contentPanel?.search(q); }
   export function clearSearch()        { contentPanel?.clearSearch(); }
+  export function openQuickFind()      { contentPanel?.openQuickFind(); }
 
   const isFocused = $derived(app.focusedPaneIdx === paneIdx);
 </script>
@@ -63,6 +64,7 @@
   role="region"
   aria-label="Pane {paneIdx + 1}"
   onmousedown={() => app.focusPane(paneIdx)}
+  onfocusin={() => app.focusPane(paneIdx)}
 >
   <TabBar />
 
@@ -72,6 +74,10 @@
     onNewFile={() => createFile()}
     onSearch={(q) => search(q)}
     onClearSearch={() => clearSearch()}
+    onCopy={() => { app.focusPane(paneIdx); onCopy([...paneView.selectedPaths]); }}
+    onCut={() => { app.focusPane(paneIdx); onCut([...paneView.selectedPaths]); }}
+    onPaste={() => { app.focusPane(paneIdx); onPaste(); }}
+    onDelete={() => { app.focusPane(paneIdx); onDelete([...paneView.selectedPaths]); }}
   />
 
   <div class="pane-content">

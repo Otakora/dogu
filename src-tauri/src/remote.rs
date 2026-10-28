@@ -41,7 +41,7 @@ use suppaftp::{
     list::{File as FtpListFile, PosixPexQuery},
     RustlsConnector, RustlsFtpStream,
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use webpki_roots::TLS_SERVER_ROOTS;
 
 use crate::{
@@ -85,6 +85,8 @@ pub struct RemoteManager {
     profiles: Mutex<Vec<ConnectionProfileDto>>,
     sessions: Mutex<HashMap<String, RemoteSession>>,
     disk_usage_cache: Mutex<HashMap<String, CachedDiskUsage>>,
+    directory_cache: Mutex<HashMap<String, Vec<EntryDto>>>,
+    editing_files: Mutex<HashMap<String, PathBuf>>,
     next_id: AtomicU64,
 }
 
@@ -155,6 +157,19 @@ impl ByteTransferProgress {
             || state.completed_bytes >= self.total_bytes
         {
             self.emit_locked(&mut state, message, now);
+        }
+    }
+
+    fn completed_bytes(&self) -> u64 {
+        self.state.lock().map(|state| state.completed_bytes).unwrap_or(0)
+    }
+
+    fn reset_to(&self, completed: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.completed_bytes = completed;
+            state.last_emit_bytes = completed;
+            state.last_emit_at = None;
+            self.emit_locked(&mut state, "Reintentando transferencia", Instant::now());
         }
     }
 
@@ -241,6 +256,8 @@ impl RemoteState {
                 profiles: Mutex::new(load_profiles(&profiles_path)?),
                 sessions: Mutex::new(HashMap::new()),
                 disk_usage_cache: Mutex::new(HashMap::new()),
+                directory_cache: Mutex::new(HashMap::new()),
+                editing_files: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 profiles_path,
                 temp_root,
@@ -250,6 +267,38 @@ impl RemoteState {
 }
 
 impl RemoteManager {
+    /// Inspect ZIP directory records without downloading the full archive.
+    /// Only providers known to expose a real seekable stream are attempted.
+    pub fn list_remote_zip_entries(&self, virtual_path: &str) -> Result<Vec<(String, bool)>> {
+        let (session_id, logical_path) = parse_remote_virtual_path(virtual_path)
+            .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
+        let mut session = self.get_session_mut(&session_id)?;
+        let supported = (cfg!(windows) && session.profile.protocol == "smb")
+            || (session.profile.protocol == "ssh" && session.profile.ssh_mode != "scp");
+        if !supported { return Err(anyhow!("La conexion no permite consultar el indice ZIP sin descargar el archivo.")); }
+        let provider = session.resolve_provider_path(&logical_path);
+        let mut stream = session.fs.open(Path::new(&provider)).map_err(|e| anyhow!("No se pudo abrir el archivo remoto: {e}"))?;
+        if !stream.seekable() { return Err(anyhow!("La conexion no permite buscar dentro del archivo remoto.")); }
+        let result = ops::list_all_zip_reader(&mut stream);
+        let close = session.fs.on_read(stream).map_err(|e| anyhow!("No se pudo cerrar la lectura remota: {e}"));
+        let entries = result?;
+        close?;
+        Ok(entries)
+    }
+
+    /// Windows SMB sessions are authenticated by the OS and can be inspected
+    /// by 7-Zip through the same UNC share without staging the archive locally.
+    pub fn native_smb_archive_path(&self, virtual_path: &str) -> Result<PathBuf> {
+        let (session_id, logical_path) = parse_remote_virtual_path(virtual_path)
+            .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
+        let session = self.get_session_mut(&session_id)?;
+        if !cfg!(windows) || session.profile.protocol != "smb" {
+            return Err(anyhow!("Este proveedor no ofrece una ruta accesible para 7-Zip sin descarga."));
+        }
+        let provider = session.resolve_provider_path(&logical_path);
+        let path = format!("\\\\{}\\{}\\{}", session.profile.host, session.profile.share, provider.trim_start_matches(['/', '\\']).replace('/', "\\"));
+        Ok(PathBuf::from(path))
+    }
     pub fn is_remote_path(path: &str) -> bool {
         path.starts_with(REMOTE_PREFIX)
     }
@@ -261,30 +310,46 @@ impl RemoteManager {
     pub fn save_profile(&self, payload: ConnectionProfilePayload) -> Result<ConnectionProfileDto> {
         validate_connection_profile_payload(&payload)?;
         let mut profiles = self.lock_profiles()?;
-        let profile_id = payload
-            .id
-            .clone()
-            .unwrap_or_else(|| format!("profile-{}", self.next_id.fetch_add(1, Ordering::Relaxed)));
+        let profile_id = match payload.id.clone() {
+            Some(id) => {
+                if !profiles.iter().any(|profile| profile.id == id) {
+                    return Err(anyhow!(
+                        "No se encontro el perfil que se quiere actualizar."
+                    ));
+                }
+                id
+            }
+            None => loop {
+                let candidate = format!("profile-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+                if !profiles.iter().any(|profile| profile.id == candidate) {
+                    break candidate;
+                }
+            },
+        };
         let trusted_fingerprints = profiles
             .iter()
-            .find(|profile| profile.id == profile_id)
-            .map(|profile| profile.trusted_fingerprints.clone())
+            .find(|p| p.id == profile_id)
+            .map(|p| p.trusted_fingerprints.clone())
             .unwrap_or_default();
         let profile =
             build_profile_from_payload(payload, profile_id.clone(), trusted_fingerprints)?;
-        if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile_id) {
+        let mut updated = profiles.clone();
+        if let Some(existing) = updated.iter_mut().find(|item| item.id == profile_id) {
             *existing = profile.clone();
         } else {
-            profiles.push(profile.clone());
+            updated.push(profile.clone());
         }
-        save_profiles(&self.profiles_path, &profiles)?;
+        save_profiles(&self.profiles_path, &updated)?;
+        *profiles = updated;
         Ok(profile)
     }
 
     pub fn delete_profile(&self, profile_id: &str) -> Result<()> {
         let mut profiles = self.lock_profiles()?;
-        profiles.retain(|profile| profile.id != profile_id);
-        save_profiles(&self.profiles_path, &profiles)?;
+        let mut updated = profiles.clone();
+        updated.retain(|profile| profile.id != profile_id);
+        save_profiles(&self.profiles_path, &updated)?;
+        *profiles = updated;
         Ok(())
     }
 
@@ -446,15 +511,15 @@ impl RemoteManager {
             ))
         })?;
         validate_remote_root(&profile, &mut *remote_fs, &provider_root)?;
-        let write_access = check_write_access(&mut *remote_fs, &provider_root);
+        let (write_access, write_message) = check_write_access(&mut *remote_fs, &provider_root);
         let _ = remote_fs.disconnect();
         Ok(ConnectionOpenResultDto {
             connected: true,
             requires_trust: false,
             fingerprint: None,
-            message: Some("Conexion verificada correctamente.".to_string()),
+            message: Some(write_message),
             connection: None,
-            write_access: Some(write_access),
+            write_access,
         })
     }
 
@@ -516,15 +581,15 @@ impl RemoteManager {
             ))
         })?;
         validate_remote_root(&profile, &mut *remote_fs, &provider_root)?;
-        let write_access = check_write_access(&mut *remote_fs, &provider_root);
+        let (write_access, write_message) = check_write_access(&mut *remote_fs, &provider_root);
         let _ = remote_fs.disconnect();
         Ok(ConnectionOpenResultDto {
             connected: true,
             requires_trust: false,
             fingerprint: None,
-            message: Some("Conexion verificada correctamente.".to_string()),
+            message: Some(write_message),
             connection: None,
-            write_access: Some(write_access),
+            write_access,
         })
     }
 
@@ -602,18 +667,37 @@ impl RemoteManager {
             let _ = session.fs.disconnect();
         }
         self.clear_cached_disk_usage_for_session(session_id)?;
+        if let Ok(mut cache) = self.directory_cache.lock() {
+            cache.retain(|key, _| parse_remote_virtual_path(key).map(|(id, _)| id != session_id).unwrap_or(false));
+        }
         Ok(())
     }
 
     pub fn list_children(&self, path: &str) -> Result<Vec<EntryDto>> {
         let (session_id, logical_path) = parse_remote_virtual_path(path)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
-        let mut session = self.get_session_mut(&session_id)?;
+        let guard = match self.sessions.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return self.directory_cache.lock().map_err(|_| anyhow!("No se pudo acceder a la cache de directorios"))?
+                    .get(path).cloned().ok_or_else(|| anyhow!("La conexion esta ocupada y esta carpeta aun no se ha visitado. Vuelve a intentarlo cuando termine la transferencia."));
+            }
+            Err(_) => return Err(anyhow!("No se pudieron bloquear las sesiones remotas")),
+        };
+        if !guard.contains_key(&session_id) { return Err(anyhow!("La sesion remota ya no esta activa.")); }
+        let mut session = SessionAccess { guard, session_id: session_id.clone() };
         let provider_path = session.resolve_provider_path(&logical_path);
         let children = session
             .fs
             .list_dir(Path::new(&provider_path))
-            .map_err(|error| anyhow!(error.to_string()))?;
+            .map_err(|error| {
+                anyhow!(
+                    "Error al listar la ruta remota '{}' (ruta del proveedor '{}'): {}",
+                    path,
+                    session.display_provider_path(&provider_path),
+                    error
+                )
+            })?;
         let mut entries = Vec::new();
         for child in children {
             let child_logical = session.provider_child_to_logical(child.path())?;
@@ -625,6 +709,7 @@ impl RemoteManager {
                 .reverse()
                 .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
         });
+        if let Ok(mut cache) = self.directory_cache.lock() { cache.insert(path.to_string(), entries.clone()); }
         Ok(entries)
     }
 
@@ -646,6 +731,24 @@ impl RemoteManager {
             &mut results,
         )?;
         Ok(results)
+    }
+
+    /// Distinguishes a missing path from a remote access or connection error.
+    pub fn queue_path_exists(&self, path: &str) -> Result<bool> {
+        let (session_id, logical_path) = parse_remote_virtual_path(path)
+            .ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
+        if logical_path == "/" { return Ok(true); }
+        let mut session = self.get_session_mut(&session_id)?;
+        let provider_path = session.resolve_provider_path(&logical_path);
+        match session.fs.stat(Path::new(&provider_path)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind == RemoteErrorType::NoSuchFileOrDirectory => Ok(false),
+            Err(error) if error.msg.as_deref().is_some_and(|message| {
+                let m = message.to_ascii_lowercase();
+                m.contains("os error 2") || m.contains("os error 3") || m.contains("no such file or directory")
+            }) => Ok(false),
+            Err(error) => Err(anyhow!("No se pudo comprobar la ruta remota '{}': {}", path, error)),
+        }
     }
 
     pub fn inspect_path(&self, path: &str) -> Result<EntryDto> {
@@ -791,6 +894,19 @@ impl RemoteManager {
         remove_remote_target(&mut *session.fs, Path::new(&provider_path))
     }
 
+    /// Remove only an empty directory; never recursively remove unrelated files.
+    pub fn remove_empty_directory(&self, virtual_path: &str) -> Result<bool> {
+        let (session_id, logical) = parse_remote_virtual_path(virtual_path)
+            .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
+        if logical == "/" { return Ok(false); }
+        let mut session = self.get_session_mut(&session_id)?;
+        let provider = session.resolve_provider_path(&logical);
+        let children = session.fs.list_dir(Path::new(&provider)).map_err(|e| anyhow!("No se pudo comprobar la carpeta remota '{}': {e}", virtual_path))?;
+        if !children.is_empty() { return Ok(false); }
+        session.fs.remove_dir(Path::new(&provider)).map_err(|e| anyhow!("No se pudo eliminar la carpeta remota vacia '{}': {e}", virtual_path))?;
+        Ok(true)
+    }
+
     pub fn create_file(&self, parent: &str, name: &str) -> Result<String> {
         let (session_id, parent_logical) = parse_remote_virtual_path(parent)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {parent}"))?;
@@ -845,33 +961,129 @@ impl RemoteManager {
         Ok(results)
     }
 
-    /// Upload a local file or directory into a remote directory.
-    /// `remote_dest_dir` is a virtual path (remote://session-id/...) pointing to a directory.
-    /// Returns the virtual path of the uploaded entry.
-    pub fn upload_file_to_remote(
-        &self,
-        app: &AppHandle,
-        job_id: &str,
-        local: &Path,
-        remote_dest_dir: &str,
-    ) -> Result<String> {
+    /// Upload into an owned remote directory before replacing the destination.
+    /// Keep the backup on the server if recovery fails.
+    pub fn upload_staged_to_remote(&self, app: &AppHandle, job_id: &str, local: &Path, remote_dest_dir: &str) -> Result<String> {
+        self.upload_staged_checked(app, job_id, local, remote_dest_dir, None, true, None, None)
+    }
+
+    pub fn upload_staged_no_overwrite(&self, app: &AppHandle, job_id: &str, local: &Path, remote_dest_dir: &str) -> Result<String> {
+        self.upload_staged_checked(app, job_id, local, remote_dest_dir, None, false, None, None)
+    }
+
+    fn upload_staged_checked(&self, app: &AppHandle, job_id: &str, local: &Path, remote_dest_dir: &str, baseline: Option<&Path>, overwrite: bool, target_name: Option<&str>, progress: Option<&ByteTransferProgress>) -> Result<String> {
         let (session_id, dest_logical) = parse_remote_virtual_path(remote_dest_dir)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {remote_dest_dir}"))?;
-        let name = local
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("No se pudo obtener el nombre del fichero local."))?;
-        let entry_logical = join_logical_path(&dest_logical, name);
-        self.copy_local_entry_to_remote_path(
-            app,
-            job_id,
-            local,
-            &session_id,
-            &entry_logical,
-            true,
-            None,
-        )?;
-        Ok(build_remote_virtual_path(&session_id, &entry_logical))
+        let name = match target_name {
+            Some(name) => name,
+            None => local.file_name().and_then(|n| n.to_str()).ok_or_else(|| anyhow!("Nombre local invalido"))?,
+        };
+        let initial = fs::metadata(local)?;
+        let initial_tree = if initial.is_dir() { Some(local_tree_snapshot(local)?) } else { None };
+        // A random local tempfile supplies a collision-resistant name. The server's
+        // mkdir must succeed exclusively before anything inside it is touched.
+        let token = tempfile::Builder::new().prefix("dogu-upload-").tempdir()?;
+        let stage_name = token.path().file_name().ok_or_else(|| anyhow!("Nombre temporal invalido"))?.to_string_lossy().to_string();
+        let stage_virtual = self.create_folder(remote_dest_dir, &stage_name).map_err(|error| anyhow!(
+            "No se pudo crear una carpeta temporal para subir '{}' en el destino remoto '{}': {error:#}. Comprueba los permisos de escritura de esta carpeta concreta.", name, remote_dest_dir
+        ))?;
+        let stage_logical = join_logical_path(&dest_logical, &stage_name);
+        let payload = join_logical_path(&stage_logical, "payload");
+        let backup = join_logical_path(&stage_logical, "original");
+        let target = join_logical_path(&dest_logical, name);
+        let checkpoint = progress.map(ByteTransferProgress::completed_bytes).unwrap_or(0);
+        for attempt in 0..=2 {
+            match self.copy_local_entry_to_remote_path(app, job_id, local, &session_id, &payload, false, progress) {
+                Ok(()) => break,
+                Err(error) => {
+                    // A retry is safe only after the entire owned staging tree
+                    // was removed and a fresh exclusive directory was created.
+                    if let Err(cleanup) = self.remove_entry(&stage_virtual) {
+                        return Err(anyhow!("No se pudo subir '{}' a '{}': {error:#}. Tampoco se pudo limpiar la carpeta temporal: {cleanup:#}", name, stage_virtual));
+                    }
+                    if attempt == 2 || !transient_transfer_error(&error) {
+                        return Err(error.context(format!("No se pudo subir '{}' a '{}'", name, remote_dest_dir)));
+                    }
+                    ops::emit_log(app, job_id, format!("Error temporal; reintento automatico {} de 2: {error:#}", attempt + 1))?;
+                    std::thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
+                    self.create_folder(remote_dest_dir, &stage_name)?;
+                    if let Some(progress) = progress { progress.reset_to(checkpoint); }
+                }
+            }
+        }
+        let unchanged = fs::metadata(local).map(|current| {
+            initial.len() == current.len() && initial.modified().ok().zip(current.modified().ok()).map(|(a, b)| a == b).unwrap_or(false)
+        }).unwrap_or(false);
+        let tree_changed = initial_tree.as_ref().map(|tree| local_tree_snapshot(local).map(|current| current != *tree).unwrap_or(true)).unwrap_or(false);
+        if (initial.is_file() && !unchanged) || tree_changed {
+            let cleanup = self.remove_entry(&stage_virtual).err();
+            return Err(anyhow!("El origen '{}' cambio durante la subida; no se publico el resultado.{}", local.display(), cleanup.map(|e| format!(" No se pudo limpiar {stage_virtual}: {e:#}")).unwrap_or_default()));
+        }
+        let mut session = self.get_session_mut(&session_id)?;
+        let target_path = session.resolve_provider_path(&target);
+        let payload_path = session.resolve_provider_path(&payload);
+        let backup_path = session.resolve_provider_path(&backup);
+        if initial.is_file() {
+            let uploaded = session.fs.stat(Path::new(&payload_path))
+                .map_err(|error| anyhow!("No se pudo comprobar la subida temporal '{}': {error}. Se conserva en {}", name, stage_virtual))?;
+            if uploaded.metadata().size != initial.len() {
+                return Err(anyhow!("El tamaño de la subida temporal de '{}' no coincide con el origen; no se ha publicado. Se conserva en {}", name, stage_virtual));
+            }
+        }
+        let exists = match session.fs.exists(Path::new(&target_path)) {
+            Ok(exists) => exists,
+            Err(error) => {
+                drop(session);
+                let cleanup = self.remove_entry(&stage_virtual).err();
+                return Err(anyhow!("No se pudo comprobar el destino remoto '{}': {}{}", target, error, cleanup.map(|e| format!(". No se pudo limpiar {}: {e:#}", stage_virtual)).unwrap_or_default()));
+            }
+        };
+        if exists && !overwrite {
+            drop(session);
+            let _ = self.remove_entry(&stage_virtual);
+            return Err(anyhow!("El destino remoto ya existe: {}", target));
+        }
+        if let Some(original) = baseline {
+            let comparison = if exists { remote_content_matches(&mut *session.fs, Path::new(&target_path), original) } else { Ok(false) };
+            match comparison {
+                Ok(true) => {},
+                result => {
+                    drop(session);
+                    let _ = self.remove_entry(&stage_virtual);
+                    return Err(match result {
+                        Ok(false) => anyhow!("El archivo remoto ha cambiado o ya no existe; no se han sobrescrito los cambios del servidor."),
+                        Err(error) => anyhow!("No se pudo comprobar el archivo remoto antes de guardar: {error:#}"),
+                        Ok(true) => unreachable!(),
+                    });
+                }
+            }
+        }
+        if exists {
+            if let Err(error) = session.fs.mov(Path::new(&target_path), Path::new(&backup_path)) {
+                return Err(anyhow!("[REQUIRES_REVIEW] No se pudo confirmar la conservacion del destino remoto anterior '{}': {}. Revisa el destino y {} antes de reintentar; el archivo anterior podria estar en original dentro de esa carpeta.", target, error, stage_virtual));
+            }
+        }
+        if let Err(error) = session.fs.mov(Path::new(&payload_path), Path::new(&target_path)) {
+            return Err(anyhow!("[REQUIRES_REVIEW] No se pudo confirmar la publicacion de '{}' en '{}': {error}. El resultado es incierto; revisa el destino y la carpeta temporal {} antes de reintentar.{}", name, remote_dest_dir, stage_virtual, if exists { " El destino anterior puede estar en original dentro de esa carpeta." } else { "" }));
+        }
+        drop(session);
+        if let Err(error) = self.remove_entry(&stage_virtual) {
+            let _ = ops::emit_log(app, job_id, format!("No se pudo eliminar el directorio temporal remoto {stage_virtual}: {error}"));
+        }
+        Ok(build_remote_virtual_path(&session_id, &target))
+    }
+
+    /// Check the actual destination before downloading or transforming large
+    /// files. The upload itself requires creating a temporary directory there.
+    pub fn check_remote_staging_writable(&self, remote_dest_dir: &str) -> Result<()> {
+        self.ensure_remote_dir(remote_dest_dir)?;
+        let token = tempfile::Builder::new().prefix("dogu-write-check-").tempdir()?;
+        let name = token.path().file_name().ok_or_else(|| anyhow!("Nombre temporal invalido"))?.to_string_lossy();
+        let path = self.create_folder(remote_dest_dir, &name).map_err(|error| anyhow!(
+            "No se puede crear la carpeta temporal necesaria para escribir en '{}': {error:#}. Comprueba los permisos efectivos de esta carpeta concreta.", remote_dest_dir
+        ))?;
+        self.remove_entry(&path).map_err(|error| anyhow!("Se creo la carpeta de prueba '{}', pero no se pudo eliminar: {error:#}", path))?;
+        Ok(())
     }
 
     /// Create a directory (and all its parents) on the remote if it doesn't already exist.
@@ -907,11 +1119,16 @@ impl RemoteManager {
     }
 
     pub fn rename_path(&self, path: &str, new_name: &str) -> Result<String> {
+        if new_name.is_empty() || new_name == "." || new_name == ".." || new_name.contains(['/', '\\']) {
+            return Err(anyhow!("Nombre de destino invalido"));
+        }
         let (session_id, logical_path) = parse_remote_virtual_path(path)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
-        let mut session = self.get_session_mut(&session_id)?;
         let parent = logical_parent_path(&logical_path).unwrap_or_else(|| "/".to_string());
         let target_logical = join_logical_path(&parent, new_name);
+        let target_virtual = build_remote_virtual_path(&session_id, &target_logical);
+        if self.queue_path_exists(&target_virtual)? { return Err(anyhow!("El destino remoto ya existe: {target_virtual}")); }
+        let mut session = self.get_session_mut(&session_id)?;
         let source_provider = session.resolve_provider_path(&logical_path);
         let target_provider = session.resolve_provider_path(&target_logical);
         session
@@ -921,13 +1138,71 @@ impl RemoteManager {
         Ok(build_remote_virtual_path(&session_id, &target_logical))
     }
 
-    pub fn open_path(&self, _app: &AppHandle, path: &str, with_dialog: bool) -> Result<()> {
-        let local_temp = self.download_remote_file(path)?;
-        if with_dialog {
-            crate::ops::open_with_dialog(&local_temp)?;
-        } else {
-            crate::ops::open_path(&local_temp)?;
+    pub fn open_path(self: &Arc<Self>, app: &AppHandle, path: &str, with_dialog: bool) -> Result<()> {
+        if cfg!(windows) {
+            if let Ok(native_path) = self.native_smb_archive_path(path) {
+                if with_dialog { crate::ops::open_with_dialog(&native_path)?; }
+                else { crate::ops::open_path(&native_path)?; }
+                return Ok(());
+            }
         }
+        let mut editing = self.editing_files.lock().map_err(|_| anyhow!("No se pudo acceder a las ediciones remotas"))?;
+        if let Some(local) = editing.get(path) {
+            return if with_dialog { crate::ops::open_with_dialog(local) } else { crate::ops::open_path(local) };
+        }
+        let (session_id, logical) = parse_remote_virtual_path(path).ok_or_else(|| anyhow!("Ruta remota invalida"))?;
+        fs::create_dir_all(&self.temp_root)?;
+        let workspace = tempfile::Builder::new().prefix("edit-").tempdir_in(&self.temp_root)?.keep();
+        let name = logical_leaf_name(&logical);
+        let editing_dir = workspace.join("file");
+        fs::create_dir_all(&editing_dir)?;
+        let local = editing_dir.join(&name);
+        self.copy_remote_entry_to_local_path(&session_id, &logical, &local, false, None)?;
+        let baseline = workspace.join("baseline");
+        fs::copy(&local, &baseline)?;
+        let initial_signature = local_edit_signature(&local)?;
+        if with_dialog { crate::ops::open_with_dialog(&local)?; }
+        else { crate::ops::open_path(&local)?; }
+        editing.insert(path.to_string(), local.clone());
+        drop(editing);
+        let manager = Arc::clone(self);
+        let app = app.clone();
+        let remote_path = path.to_string();
+        let parent = logical.rsplit_once('/').map(|(parent, _)| if parent.is_empty() { "/" } else { parent }).unwrap_or("/");
+        let remote_dir = build_remote_virtual_path(&session_id, parent);
+        let _ = app.emit("remote-edit-started", path.to_string());
+        std::thread::spawn(move || {
+            let mut observed = Some(initial_signature);
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                let signature = match local_edit_signature(&local) { Ok(value) => value, Err(_) => continue };
+                if Some(signature) == observed { continue; }
+                std::thread::sleep(Duration::from_secs(2));
+                if local_edit_signature(&local).ok() != Some(signature) { continue; }
+                let snapshot_dir = workspace.join("snapshot");
+                let snapshot = snapshot_dir.join(&name);
+                if fs::create_dir_all(&snapshot_dir).is_err() || fs::copy(&local, &snapshot).is_err() {
+                    continue;
+                }
+                if local_edit_signature(&local).ok() != Some(signature) { continue; }
+                let result = (|| -> Result<()> {
+                    manager.upload_staged_checked(&app, "remote-edit", &snapshot, &remote_dir, Some(&baseline), true, None, None)?;
+                    fs::copy(&snapshot, &baseline)?;
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => {
+                        observed = Some(signature);
+                        let _ = app.emit("remote-edit-saved", remote_dir.clone());
+                    },
+                    Err(error) => {
+                        let _ = app.emit("remote-edit-error", format!("No se pudo guardar '{}': {error:#}. La copia editada se conserva en {}", remote_path, local.display()));
+                        if let Ok(mut editing) = manager.editing_files.lock() { editing.remove(&remote_path); }
+                        break;
+                    }
+                }
+            }
+        });
         Ok(())
     }
 
@@ -953,6 +1228,8 @@ impl RemoteManager {
         destination: String,
         operation: &str,
         overwrite: bool,
+        rename_on_conflict: bool,
+        fixed_target_name: Option<&str>,
     ) -> Result<()> {
         let total = paths.len().max(1) as f64;
         let source_estimates = paths
@@ -981,17 +1258,33 @@ impl RemoteManager {
             )?;
             let source_is_remote = Self::is_remote_path(source);
             let destination_is_remote = Self::is_remote_path(&destination);
+            let source_name = if source_is_remote {
+                let (_, logical) = parse_remote_virtual_path(source).ok_or_else(|| anyhow!("Ruta remota invalida: {source}"))?;
+                logical_leaf_name(&logical)
+            } else {
+                Path::new(source).file_name().ok_or_else(|| anyhow!("Nombre de origen invalido"))?.to_string_lossy().to_string()
+            };
+            let target_name = match fixed_target_name {
+                Some(name) => name.to_string(),
+                None => self.transfer_target_name(&destination, &source_name, rename_on_conflict && !overwrite)?,
+            };
             match (source_is_remote, destination_is_remote) {
                 (true, true) => self.transfer_remote_to_remote(
+                    app,
+                    job_id,
                     source,
                     &destination,
+                    &target_name,
                     operation == "cut",
                     overwrite,
                     byte_progress.as_ref(),
                 )?,
                 (true, false) => self.transfer_remote_to_local(
+                    app,
+                    job_id,
                     source,
                     &destination,
+                    &target_name,
                     operation == "cut",
                     overwrite,
                     byte_progress.as_ref(),
@@ -1001,6 +1294,7 @@ impl RemoteManager {
                     job_id,
                     source,
                     &destination,
+                    &target_name,
                     operation == "cut",
                     overwrite,
                     byte_progress.as_ref(),
@@ -1057,32 +1351,157 @@ impl RemoteManager {
         remote_logical_transfer_size(&mut session, &logical_path)
     }
 
+    fn transfer_target_name(&self, destination: &str, name: &str, rename: bool) -> Result<String> {
+        if !rename { return Ok(name.to_string()); }
+        let exists = |candidate: &str| -> Result<bool> {
+            if Self::is_remote_path(destination) {
+                let (id, logical) = parse_remote_virtual_path(destination).ok_or_else(|| anyhow!("Destino remoto invalido"))?;
+                self.queue_path_exists(&build_remote_virtual_path(&id, &join_logical_path(&logical, candidate)))
+            } else {
+                match fs::symlink_metadata(Path::new(destination).join(candidate)) {
+                    Ok(_) => Ok(true),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(error) => Err(error.into()),
+                }
+            }
+        };
+        if !exists(name)? { return Ok(name.to_string()); }
+        let dot = name.rfind('.').filter(|index| *index > 0);
+        let (stem, extension) = dot.map(|index| name.split_at(index)).unwrap_or((name, ""));
+        for number in 1u32.. {
+            let candidate = format!("{stem} ({number}){extension}");
+            if !exists(&candidate)? { return Ok(candidate); }
+        }
+        Err(anyhow!("No se encontro un nombre disponible"))
+    }
+
     fn transfer_remote_to_local(
         &self,
+        app: &AppHandle,
+        job_id: &str,
         source: &str,
         destination: &str,
+        target_name: &str,
         move_after: bool,
         overwrite: bool,
         progress: Option<&ByteTransferProgress>,
     ) -> Result<()> {
         let (session_id, source_logical) = parse_remote_virtual_path(source)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {source}"))?;
-        let source_name = logical_leaf_name(&source_logical);
         let target_root = PathBuf::from(destination);
-        let target_path = target_root.join(&source_name);
-        self.copy_remote_entry_to_local_path(
-            &session_id,
-            &source_logical,
-            &target_path,
-            overwrite,
-            progress,
-        )?;
-        if move_after {
+        let target_path = target_root.join(target_name);
+        let source_info = {
             let mut session = self.get_session_mut(&session_id)?;
-            let source_provider = session.resolve_provider_path(&source_logical);
-            remove_remote_target(&mut *session.fs, Path::new(&source_provider))?;
+            let provider = session.resolve_provider_path(&source_logical);
+            let entry = session.fs.stat(Path::new(&provider)).map_err(|error| anyhow!(error.to_string()))?;
+            if entry.metadata().file_type.is_symlink() {
+                return Err(anyhow!("No se puede transferir este enlace simbolico remoto de forma segura: {source_logical}"));
+            }
+            (!entry.is_dir(), entry.metadata().size, entry.metadata().modified)
+        };
+        if source_info.0 {
+            let stage = tempfile::Builder::new().prefix(".dogu-download-").tempdir_in(&target_root)?;
+            let payload = stage.path().join("payload");
+            self.download_to_stage(app, job_id, &session_id, &source_logical, &payload, progress)?;
+            if fs::metadata(&payload)?.len() != source_info.1 {
+                return Err(anyhow!("El tamaño de la descarga no coincide con el origen remoto; no se ha publicado el resultado."));
+            }
+            let current = {
+                let mut session = self.get_session_mut(&session_id)?;
+                let provider = session.resolve_provider_path(&source_logical);
+                let entry = session.fs.stat(Path::new(&provider)).map_err(|error| anyhow!(error.to_string()))?;
+                (entry.metadata().size, entry.metadata().modified)
+            };
+            if source_info.1 != current.0 || source_info.2 != current.1 {
+                return Err(anyhow!("No se pudo confirmar que el origen remoto permaneciera intacto durante la descarga; no se ha publicado el resultado."));
+            }
+            let backup = stage.path().join("original");
+            let existed = match fs::symlink_metadata(&target_path) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
+            };
+            if existed {
+                if !overwrite { return Err(anyhow!("El destino local ya existe: {}", target_path.display())); }
+                fs::rename(&target_path, &backup)?;
+            }
+            if let Err(error) = rename_local_no_replace(&payload, &target_path) {
+                if existed {
+                    let stage_path = stage.keep();
+                    return Err(anyhow!("[REQUIRES_REVIEW] No se pudo publicar '{}': {error}. El destino anterior se conserva en '{}'; revisa ambos antes de reintentar.", target_path.display(), stage_path.join("original").display()));
+                }
+                return Err(anyhow!("No se pudo publicar '{}' sin reemplazar otro archivo: {error}", target_path.display()));
+            }
+            if move_after {
+                let deletion = (|| -> Result<()> {
+                    let mut session = self.get_session_mut(&session_id)?;
+                    let source_provider = session.resolve_provider_path(&source_logical);
+                    let entry = session.fs.stat(Path::new(&source_provider)).map_err(|error| anyhow!(error.to_string()))?;
+                    if entry.metadata().size != source_info.1 || entry.metadata().modified != source_info.2 {
+                        return Err(anyhow!("El origen remoto cambio despues de la descarga"));
+                    }
+                    remove_remote_target(&mut *session.fs, Path::new(&source_provider))
+                })();
+                if let Err(error) = deletion {
+                    return Err(anyhow!("[REQUIRES_REVIEW] El archivo se descargo en '{}', pero no se pudo confirmar la eliminacion del origen remoto: {error:#}. Revisa ambas copias.", target_path.display()));
+                }
+            }
+            return Ok(());
+        }
+        let snapshot = self.remote_tree_snapshot(&session_id, &source_logical)?;
+        let stage = tempfile::Builder::new().prefix(".dogu-download-").tempdir_in(&target_root)?;
+        let payload = stage.path().join("payload");
+        self.download_to_stage(app, job_id, &session_id, &source_logical, &payload, progress)?;
+        if self.remote_tree_snapshot(&session_id, &source_logical)? != snapshot {
+            return Err(anyhow!("El contenido del origen remoto cambio durante la descarga; no se publico la carpeta."));
+        }
+        let existed = match fs::symlink_metadata(&target_path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        if existed {
+            if !overwrite { return Err(anyhow!("El destino local ya existe: {}", target_path.display())); }
+            fs::rename(&target_path, stage.path().join("original"))?;
+        }
+        if let Err(error) = rename_local_no_replace(&payload, &target_path) {
+            if existed {
+                let stage_path = stage.keep();
+                return Err(anyhow!("[REQUIRES_REVIEW] No se pudo publicar '{}': {error}. El destino anterior se conserva en '{}'; revisa ambas rutas.", target_path.display(), stage_path.join("original").display()));
+            }
+            return Err(anyhow!("No se pudo publicar la carpeta '{}' sin reemplazar otro elemento: {error}", target_path.display()));
+        }
+        if move_after {
+            let deletion = (|| -> Result<()> {
+                if self.remote_tree_snapshot(&session_id, &source_logical)? != snapshot {
+                    return Err(anyhow!("El origen remoto cambio despues de la descarga"));
+                }
+                let mut session = self.get_session_mut(&session_id)?;
+                let source_provider = session.resolve_provider_path(&source_logical);
+                remove_remote_target(&mut *session.fs, Path::new(&source_provider))
+            })();
+            if let Err(error) = deletion {
+                return Err(anyhow!("[REQUIRES_REVIEW] La carpeta se publico en '{}', pero no se pudo confirmar la eliminacion del origen: {error:#}. Revisa ambas copias.", target_path.display()));
+            }
         }
         Ok(())
+    }
+
+    fn download_to_stage(&self, app: &AppHandle, job_id: &str, session_id: &str, source: &str, payload: &Path, progress: Option<&ByteTransferProgress>) -> Result<()> {
+        let checkpoint = progress.map(ByteTransferProgress::completed_bytes).unwrap_or(0);
+        for attempt in 0..=2 {
+            match self.copy_remote_entry_to_local_path(session_id, source, payload, false, progress) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if payload.exists() { remove_local_target(payload).context("No se pudo limpiar la descarga temporal")?; }
+                    if attempt == 2 || !transient_transfer_error(&error) { return Err(error); }
+                    ops::emit_log(app, job_id, format!("Error temporal; reintento automatico {} de 2: {error:#}", attempt + 1))?;
+                    std::thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
+                    if let Some(progress) = progress { progress.reset_to(checkpoint); }
+                }
+            }
+        }
+        unreachable!()
     }
 
     fn transfer_local_to_remote(
@@ -1091,6 +1510,7 @@ impl RemoteManager {
         job_id: &str,
         source: &str,
         destination: &str,
+        target_name: &str,
         move_after: bool,
         overwrite: bool,
         progress: Option<&ByteTransferProgress>,
@@ -1102,13 +1522,32 @@ impl RemoteManager {
                 source_path.display()
             ));
         }
+        let before = fs::metadata(&source_path)?;
+        if before.is_dir() {
+            let snapshot = local_tree_snapshot(&source_path)?;
+            self.upload_staged_checked(app, job_id, &source_path, destination, None, overwrite, Some(target_name), progress)?;
+            if move_after {
+                if local_tree_snapshot(&source_path).map(|current| current != snapshot).unwrap_or(true) {
+                    return Err(anyhow!("[REQUIRES_REVIEW] La carpeta se ha publicado, pero el origen cambio o no se puede verificar; se conserva '{}'. Revisa ambas copias.", source_path.display()));
+                }
+                remove_local_target(&source_path).map_err(|error| anyhow!("[REQUIRES_REVIEW] La carpeta se publico, pero no se pudo eliminar el origen '{}': {error:#}. Revisa ambas copias.", source_path.display()))?;
+            }
+            return Ok(());
+        }
+        if before.is_file() {
+            self.upload_staged_checked(app, job_id, &source_path, destination, None, overwrite, Some(target_name), progress)?;
+            if move_after {
+                let after = fs::metadata(&source_path).map_err(|error| anyhow!("[REQUIRES_REVIEW] El archivo se publico, pero no se pudo comprobar el origen '{}': {error}. Revisa ambas rutas antes de reintentar.", source_path.display()))?;
+                if before.len() != after.len() || before.modified().ok().zip(after.modified().ok()).map(|(a, b)| a != b).unwrap_or(true) {
+                    return Err(anyhow!("[REQUIRES_REVIEW] El archivo se ha publicado, pero el origen cambio durante la transferencia y se conserva: {}. Revisa ambas copias antes de reintentar.", source_path.display()));
+                }
+                remove_local_target(&source_path).map_err(|error| anyhow!("[REQUIRES_REVIEW] El archivo se ha publicado, pero no se pudo eliminar el origen '{}': {error:#}. Revisa ambas copias antes de reintentar.", source_path.display()))?;
+            }
+            return Ok(());
+        }
         let (session_id, destination_logical) = parse_remote_virtual_path(destination)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {destination}"))?;
-        let source_name = source_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| anyhow!("No se pudo resolver el nombre del elemento local."))?;
-        let target_logical = join_logical_path(&destination_logical, source_name);
+        let target_logical = join_logical_path(&destination_logical, target_name);
         self.copy_local_entry_to_remote_path(
             app,
             job_id,
@@ -1204,8 +1643,11 @@ impl RemoteManager {
 
     fn transfer_remote_to_remote(
         &self,
+        app: &AppHandle,
+        job_id: &str,
         source: &str,
         destination: &str,
+        target_name: &str,
         move_after: bool,
         overwrite: bool,
         progress: Option<&ByteTransferProgress>,
@@ -1214,31 +1656,39 @@ impl RemoteManager {
             .ok_or_else(|| anyhow!("Ruta remota invalida: {source}"))?;
         let (destination_session_id, destination_logical) = parse_remote_virtual_path(destination)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {destination}"))?;
-        let source_name = logical_leaf_name(&source_logical);
-        let target_logical = join_logical_path(&destination_logical, &source_name);
+        let target_logical = join_logical_path(&destination_logical, target_name);
+        if source_session_id == destination_session_id && source_logical == target_logical {
+            return Err(anyhow!("El origen y el destino son el mismo elemento."));
+        }
 
         if source_session_id == destination_session_id {
+            if !move_after {
+                // Server-side copy may expose a partial destination on failure;
+                // use the same staged path even when both ends share a session.
+                return self.copy_within_remote_session_staged(app, job_id, &source_session_id, &source_logical, &destination_logical, destination, target_name, overwrite, progress);
+            }
+            let token = tempfile::Builder::new().prefix("dogu-move-").tempdir()?;
+            let stage_name = token.path().file_name().ok_or_else(|| anyhow!("Nombre temporal invalido"))?.to_string_lossy().to_string();
+            let stage_virtual = self.create_folder(destination, &stage_name)?;
+            let backup = join_logical_path(&join_logical_path(&destination_logical, &stage_name), "original");
             let mut session = self.get_session_mut(&source_session_id)?;
             let source_provider = session.resolve_provider_path(&source_logical);
             let target_provider = session.resolve_provider_path(&target_logical);
-            if overwrite
-                && session
-                    .fs
-                    .exists(Path::new(&target_provider))
-                    .unwrap_or(false)
-            {
-                remove_remote_target(&mut *session.fs, Path::new(&target_provider))?;
+            let backup_provider = session.resolve_provider_path(&backup);
+            if session.fs.exists(Path::new(&target_provider)).map_err(|e| anyhow!("No se pudo comprobar el destino remoto: {e}"))? {
+                if !overwrite {
+                    drop(session);
+                    let _ = self.remove_entry(&stage_virtual);
+                    return Err(anyhow!("El destino remoto ya existe: {target_logical}"));
+                }
+                session.fs.mov(Path::new(&target_provider), Path::new(&backup_provider))
+                    .map_err(|e| anyhow!("[REQUIRES_REVIEW] No se pudo confirmar la conservacion de {target_logical}: {e}. Revisa {stage_virtual}/original."))?;
             }
-            if move_after {
-                session
-                    .fs
-                    .mov(Path::new(&source_provider), Path::new(&target_provider))
-                    .map_err(|error| anyhow!(error.to_string()))?;
-            } else {
-                session
-                    .fs
-                    .copy(Path::new(&source_provider), Path::new(&target_provider))
-                    .map_err(|error| anyhow!(error.to_string()))?;
+            session.fs.mov(Path::new(&source_provider), Path::new(&target_provider))
+                .map_err(|e| anyhow!("[REQUIRES_REVIEW] No se pudo confirmar el movimiento de {source_logical} a {target_logical}: {e}. Revisa ambas rutas y {stage_virtual} antes de reintentar."))?;
+            drop(session);
+            if let Err(error) = self.remove_entry(&stage_virtual) {
+                return Err(anyhow!("[REQUIRES_REVIEW] El movimiento se completo, pero no se pudo limpiar {stage_virtual}: {error:#}. Revisa antes de reintentar."));
             }
             return Ok(());
         }
@@ -1246,35 +1696,188 @@ impl RemoteManager {
         let is_directory = {
             let mut session = self.get_session_mut(&source_session_id)?;
             let source_provider = session.resolve_provider_path(&source_logical);
-            session
+            let entry = session
                 .fs
                 .stat(Path::new(&source_provider))
-                .map_err(|error| anyhow!(error.to_string()))?
-                .is_dir()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            if entry.metadata().file_type.is_symlink() {
+                return Err(anyhow!("No se puede transferir este enlace simbolico remoto de forma segura: {source_logical}"));
+            }
+            entry.is_dir()
         };
-        if is_directory {
-            self.copy_remote_dir_between_sessions(
-                &source_session_id,
-                &source_logical,
-                &destination_session_id,
-                &target_logical,
-                overwrite,
-                progress,
-            )?;
-        } else {
-            self.copy_remote_file_between_sessions(
-                &source_session_id,
-                &source_logical,
-                &destination_session_id,
-                &target_logical,
-                overwrite,
-                progress,
-            )?;
+        return self.transfer_remote_entry_staged(
+                app, job_id,
+                &source_session_id, &source_logical, &destination_session_id,
+                &destination_logical, destination, target_name, move_after, overwrite, progress, is_directory,
+            );
+    }
+
+    fn remote_tree_snapshot(&self, session_id: &str, logical: &str) -> Result<Vec<(String, bool, u64, Option<SystemTime>)>> {
+        fn visit(session: &mut RemoteSession, logical: &str, out: &mut Vec<(String, bool, u64, Option<SystemTime>)>) -> Result<()> {
+            let provider = session.resolve_provider_path(logical);
+            let entry = session.fs.stat(Path::new(&provider)).map_err(|error| anyhow!(error.to_string()))?;
+            if entry.metadata().file_type.is_symlink() {
+                return Err(anyhow!("No se puede verificar de forma segura el enlace simbolico remoto {logical}"));
+            }
+            let directory = entry.is_dir();
+            let modified = entry.metadata().modified;
+            out.push((logical.to_string(), directory, entry.metadata().size, modified));
+            if directory {
+                let children = session.fs.list_dir(Path::new(&provider)).map_err(|error| anyhow!(error.to_string()))?;
+                for child in children {
+                    let child_path = session.provider_child_to_logical(child.path())?;
+                    visit(session, &child_path, out)?;
+                }
+            }
+            Ok(())
+        }
+        let mut session = self.get_session_mut(session_id)?;
+        let mut entries = Vec::new();
+        visit(&mut session, logical, &mut entries)?;
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
+    }
+
+    fn copy_within_remote_session_staged(&self, app: &AppHandle, job_id: &str, session_id: &str, source: &str, destination: &str, destination_virtual: &str, name: &str, overwrite: bool, progress: Option<&ByteTransferProgress>) -> Result<()> {
+        let token = tempfile::Builder::new().prefix("dogu-copy-").tempdir()?;
+        let stage_name = token.path().file_name().ok_or_else(|| anyhow!("Nombre temporal invalido"))?.to_string_lossy().to_string();
+        let stage_virtual = self.create_folder(destination_virtual, &stage_name)?;
+        let stage = join_logical_path(destination, &stage_name);
+        let mut session = self.get_session_mut(session_id)?;
+        let source_path = session.resolve_provider_path(source);
+        let payload_path = session.resolve_provider_path(&join_logical_path(&stage, "payload"));
+        let backup_path = session.resolve_provider_path(&join_logical_path(&stage, "original"));
+        let target = join_logical_path(destination, name);
+        let target_path = session.resolve_provider_path(&target);
+        if let Err(error) = session.fs.copy(Path::new(&source_path), Path::new(&payload_path)) {
+            let unsupported = error.kind == RemoteErrorType::UnsupportedFeature;
+            drop(session);
+            if let Err(cleanup) = self.remove_entry(&stage_virtual) {
+                return Err(anyhow!("No se pudo copiar a la carpeta temporal: {error}. No se pudo limpiar {stage_virtual}: {cleanup:#}"));
+            }
+            if unsupported {
+                let local_stage = tempfile::Builder::new().prefix("dogu-remote-copy-").tempdir_in(&self.temp_root)?;
+                let local_payload = local_stage.path().join("payload");
+                self.download_to_stage(app, job_id, session_id, source, &local_payload, None)?;
+                self.upload_staged_checked(app, job_id, &local_payload, destination_virtual, None, overwrite, Some(name), progress)?;
+                return Ok(());
+            }
+            return Err(anyhow!("No se pudo copiar a la carpeta temporal: {error}"));
+        }
+        let exists = session.fs.exists(Path::new(&target_path)).map_err(|e| anyhow!("No se pudo comprobar el destino: {e}. Temporal: {stage_virtual}"))?;
+        if exists && !overwrite {
+            drop(session);
+            let _ = self.remove_entry(&stage_virtual);
+            return Err(anyhow!("El destino remoto ya existe: {target}"));
+        }
+        if exists {
+            session.fs.mov(Path::new(&target_path), Path::new(&backup_path))
+                .map_err(|e| anyhow!("[REQUIRES_REVIEW] No se pudo confirmar la conservacion del destino: {e}. Revisa {target} y {stage_virtual}/original."))?;
+        }
+        session.fs.mov(Path::new(&payload_path), Path::new(&target_path))
+            .map_err(|e| anyhow!("[REQUIRES_REVIEW] No se pudo confirmar la publicacion de {target}: {e}. Revisa el destino y {stage_virtual}."))?;
+        drop(session);
+        self.remove_entry(&stage_virtual).map_err(|e| anyhow!("[REQUIRES_REVIEW] La copia se publico, pero no se pudo limpiar {stage_virtual}: {e:#}. Revisa antes de reintentar."))?;
+        Ok(())
+    }
+
+    fn transfer_remote_entry_staged(
+        &self, app: &AppHandle, job_id: &str, source_id: &str, source: &str, destination_id: &str, destination: &str,
+        destination_virtual: &str, name: &str, move_after: bool, overwrite: bool,
+        progress: Option<&ByteTransferProgress>, is_directory: bool,
+    ) -> Result<()> {
+        let tree_snapshot = if is_directory { Some(self.remote_tree_snapshot(source_id, source)?) } else { None };
+        let source_info = {
+            let mut session = self.get_session_mut(source_id)?;
+            let path = session.resolve_provider_path(source);
+            let entry = session.fs.stat(Path::new(&path)).map_err(|e| anyhow!(e.to_string()))?;
+            (entry.metadata().size, entry.metadata().modified)
+        };
+        let token = tempfile::Builder::new().prefix("dogu-transfer-").tempdir()?;
+        let stage_name = token.path().file_name().ok_or_else(|| anyhow!("Nombre temporal invalido"))?.to_string_lossy().to_string();
+        let stage_virtual = self.create_folder(destination_virtual, &stage_name)?;
+        let stage = join_logical_path(destination, &stage_name);
+        let payload = join_logical_path(&stage, "payload");
+        let backup = join_logical_path(&stage, "original");
+        let target = join_logical_path(destination, name);
+        let checkpoint = progress.map(ByteTransferProgress::completed_bytes).unwrap_or(0);
+        for attempt in 0..=2 {
+            let copy_result = if is_directory {
+                self.copy_remote_dir_between_sessions(source_id, source, destination_id, &payload, false, progress)
+            } else {
+                self.copy_remote_file_between_sessions(source_id, source, destination_id, &payload, false, progress)
+            };
+            match copy_result {
+                Ok(()) => break,
+                Err(error) => {
+                    if let Err(cleanup) = self.remove_entry(&stage_virtual) {
+                        return Err(anyhow!("No se pudo copiar a {stage_virtual}: {error:#}. Tampoco se pudo limpiar: {cleanup:#}"));
+                    }
+                    if attempt == 2 || !transient_transfer_error(&error) { return Err(error.context("No se pudo preparar la transferencia remota")); }
+                    ops::emit_log(app, job_id, format!("Error temporal; reintento automatico {} de 2: {error:#}", attempt + 1))?;
+                    std::thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
+                    self.create_folder(destination_virtual, &stage_name)?;
+                    if let Some(progress) = progress { progress.reset_to(checkpoint); }
+                }
+            }
+        }
+        {
+            let mut session = self.get_session_mut(source_id)?;
+            let path = session.resolve_provider_path(source);
+            let entry = session.fs.stat(Path::new(&path)).map_err(|e| anyhow!("No se pudo comprobar el origen: {e}. Temporal: {stage_virtual}"))?;
+            if !is_directory && (source_info.0 != entry.metadata().size || source_info.1 != entry.metadata().modified) {
+                drop(session);
+                let _ = self.remove_entry(&stage_virtual);
+                return Err(anyhow!("No se pudo confirmar que el origen remoto permaneciera intacto; no se publico el resultado."));
+            }
+        }
+        if let Some(before) = &tree_snapshot {
+            if self.remote_tree_snapshot(source_id, source)? != *before {
+                let _ = self.remove_entry(&stage_virtual);
+                return Err(anyhow!("El contenido del origen remoto cambio durante la copia; no se publico el resultado."));
+            }
+        }
+        {
+            let mut session = self.get_session_mut(destination_id)?;
+            let payload_path = session.resolve_provider_path(&payload);
+            let backup_path = session.resolve_provider_path(&backup);
+            let target_path = session.resolve_provider_path(&target);
+            let uploaded = session.fs.stat(Path::new(&payload_path)).map_err(|e| anyhow!("No se pudo comprobar la copia temporal: {e}. Temporal: {stage_virtual}"))?;
+            if !is_directory && uploaded.metadata().size != source_info.0 {
+                return Err(anyhow!("El tamaño de la copia temporal no coincide; no se publico. Temporal: {stage_virtual}"));
+            }
+            let exists = session.fs.exists(Path::new(&target_path)).map_err(|e| anyhow!("No se pudo comprobar el destino: {e}. Temporal: {stage_virtual}"))?;
+            if exists && !overwrite {
+                drop(session);
+                let _ = self.remove_entry(&stage_virtual);
+                return Err(anyhow!("El destino remoto ya existe: {target}"));
+            }
+            if exists {
+                session.fs.mov(Path::new(&target_path), Path::new(&backup_path)).map_err(|e| anyhow!("[REQUIRES_REVIEW] No se pudo confirmar la conservacion del destino anterior: {e}. Revisa {target} y {stage_virtual}/original."))?;
+            }
+            session.fs.mov(Path::new(&payload_path), Path::new(&target_path)).map_err(|e| anyhow!("[REQUIRES_REVIEW] No se pudo confirmar la publicacion de {target}: {e}. Revisa el destino y {stage_virtual} antes de reintentar."))?;
         }
         if move_after {
-            let mut session = self.get_session_mut(&source_session_id)?;
-            let source_provider = session.resolve_provider_path(&source_logical);
-            remove_remote_target(&mut *session.fs, Path::new(&source_provider))?;
+            let deletion = (|| -> Result<()> {
+                if let Some(before) = &tree_snapshot {
+                    if self.remote_tree_snapshot(source_id, source)? != *before {
+                        return Err(anyhow!("El contenido del origen cambio despues de copiarse"));
+                    }
+                }
+                let mut session = self.get_session_mut(source_id)?;
+                let path = session.resolve_provider_path(source);
+                let entry = session.fs.stat(Path::new(&path)).map_err(|e| anyhow!(e.to_string()))?;
+                if !is_directory && (entry.metadata().size != source_info.0 || entry.metadata().modified != source_info.1) {
+                    return Err(anyhow!("El origen cambio despues de copiarse"));
+                }
+                remove_remote_target(&mut *session.fs, Path::new(&path))
+            })();
+            if let Err(error) = deletion {
+                return Err(anyhow!("[REQUIRES_REVIEW] El archivo se publico en {target}, pero no se pudo confirmar la eliminacion del origen: {error:#}. Revisa ambas copias y {stage_virtual}."));
+            }
+        }
+        if let Err(error) = self.remove_entry(&stage_virtual) {
+            return Err(anyhow!("[REQUIRES_REVIEW] La transferencia se publico, pero no se pudo limpiar {stage_virtual}: {error:#}. Revisa el resultado antes de reintentar."));
         }
         Ok(())
     }
@@ -1294,12 +1897,12 @@ impl RemoteManager {
             if !session
                 .fs
                 .exists(Path::new(&target_provider))
-                .unwrap_or(false)
+                .map_err(anyhow::Error::new)?
             {
                 session
                     .fs
                     .create_dir(Path::new(&target_provider), UnixPex::from(0o755))
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
             }
         }
         let children = self.list_children(&build_remote_virtual_path(
@@ -1358,7 +1961,7 @@ impl RemoteManager {
             let source_meta = source_session
                 .fs
                 .stat(Path::new(&source_provider))
-                .map_err(|error| anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
             let file_size = source_meta.metadata().size;
 
             if overwrite
@@ -1376,28 +1979,27 @@ impl RemoteManager {
             let mut read_stream = source_session
                 .fs
                 .open(Path::new(&source_provider))
-                .map_err(|error| anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
             let mut write_stream = destination_session
                 .fs
                 .create(Path::new(&destination_provider), &file_metadata(file_size))
-                .map_err(|error| anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
             {
                 let mut reader = ProgressReader::new(
                     &mut read_stream,
                     progress.cloned(),
                     format!("Transfiriendo {}", logical_leaf_name(source_logical)),
                 );
-                std::io::copy(&mut reader, &mut write_stream)
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                std::io::copy(&mut reader, &mut write_stream)?;
             }
             source_session
                 .fs
                 .on_read(read_stream)
-                .map_err(|error| anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
             destination_session
                 .fs
                 .on_written(write_stream)
-                .map_err(|error| anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
             Ok(())
         })();
 
@@ -1457,11 +2059,21 @@ impl RemoteManager {
         if let Some(parent) = local_target.parent() {
             fs::create_dir_all(parent)?;
         }
+        if cfg!(windows) {
+            let virtual_path = build_remote_virtual_path(session_id, source_logical);
+            if let Ok(native) = self.native_smb_archive_path(&virtual_path) {
+                let source = fs::File::open(native)?;
+                let mut file = fs::OpenOptions::new().write(true).create_new(true).open(local_target)?;
+                let mut reader = ProgressReader::new(source, progress.cloned(), format!("Descargando {}", source_name));
+                std::io::copy(&mut reader, &mut file)?;
+                return Ok(());
+            }
+        }
         let mut session = self.get_session_mut(session_id)?;
         let mut stream = session
             .fs
             .open(Path::new(&source_provider))
-            .map_err(|error| anyhow!(error.to_string()))?;
+            .map_err(anyhow::Error::new)?;
         let mut file = fs::File::create(local_target).map_err(|error| {
             anyhow!(
                 "No se pudo crear el archivo local '{}': {}",
@@ -1475,7 +2087,7 @@ impl RemoteManager {
                 progress.cloned(),
                 format!("Descargando {}", source_name),
             );
-            std::io::copy(&mut reader, &mut file).map_err(|error| anyhow!(error.to_string()))?;
+            std::io::copy(&mut reader, &mut file)?;
         }
         session
             .fs
@@ -1495,6 +2107,22 @@ impl RemoteManager {
         overwrite: bool,
         progress: Option<&ByteTransferProgress>,
     ) -> Result<()> {
+        // Windows SMB is already authenticated through the native network
+        // session. Stream files directly through the UNC path so a long upload
+        // does not hold the manager-wide sessions lock.
+        if cfg!(windows) && local_source.is_file() && !overwrite {
+            let virtual_path = build_remote_virtual_path(session_id, destination_logical);
+            if let Ok(native) = self.native_smb_archive_path(&virtual_path) {
+                let file = fs::File::open(local_source)?;
+                let mut target = fs::OpenOptions::new().write(true).create_new(true).open(&native)?;
+                let name = local_source.file_name().unwrap_or_default().to_string_lossy();
+                let mut reader = ProgressReader::new(file, progress.cloned(), format!("Subiendo {}", name));
+                let size = std::io::copy(&mut reader, &mut target)?;
+                drop(target);
+                let _ = ops::emit_log(app, job_id, format!("{name} subido ({size} bytes)"));
+                return Ok(());
+            }
+        }
         let mut session = self.get_session_mut(session_id)?;
         let destination_provider = session.resolve_provider_path(destination_logical);
         let destination_exists = session
@@ -1577,10 +2205,8 @@ impl RemoteManager {
                 )),
             )
             .map_err(|error| {
-                sftp_permission_error(
-                    &error.to_string(),
-                    &format!("No se pudo subir '{file_name}' al servidor"),
-                )
+                let message = sftp_permission_error(&error.to_string(), &format!("No se pudo subir '{file_name}' al servidor")).to_string();
+                anyhow::Error::new(error).context(message)
             })?;
         let _ = ops::emit_log(
             app,
@@ -1678,14 +2304,16 @@ impl RemoteManager {
 
     fn persist_fingerprint(&self, profile_id: &str, fingerprint: &str) -> Result<()> {
         let mut profiles = self.lock_profiles()?;
-        if let Some(profile) = profiles.iter_mut().find(|profile| profile.id == profile_id) {
+        let mut updated = profiles.clone();
+        if let Some(profile) = updated.iter_mut().find(|profile| profile.id == profile_id) {
             if !profile
                 .trusted_fingerprints
                 .iter()
                 .any(|item| item == fingerprint)
             {
                 profile.trusted_fingerprints.push(fingerprint.to_string());
-                save_profiles(&self.profiles_path, &profiles)?;
+                save_profiles(&self.profiles_path, &updated)?;
+                *profiles = updated;
             }
         }
         Ok(())
@@ -1923,6 +2551,17 @@ impl RemoteManager {
 }
 
 impl RemoteSession {
+    fn display_provider_path(&self, provider_path: &str) -> String {
+        if self.profile.protocol == "smb" && cfg!(target_family = "windows") {
+            format!(
+                "\\\\{}\\{}{}",
+                self.profile.host, self.profile.share, provider_path
+            )
+        } else {
+            provider_path.to_string()
+        }
+    }
+
     fn resolve_provider_path(&self, logical_path: &str) -> String {
         if logical_path == "/" {
             return self.root_provider_path.clone();
@@ -1943,7 +2582,21 @@ impl RemoteSession {
     }
 
     fn provider_child_to_logical(&self, child_provider_path: &Path) -> Result<String> {
-        provider_child_to_logical(&self.root_provider_path, child_provider_path)
+        let root = if self.profile.protocol == "smb" && cfg!(target_family = "windows") {
+            format!(
+                "\\\\{}\\{}{}",
+                self.profile.host,
+                self.profile.share,
+                if self.root_provider_path == "\\" {
+                    ""
+                } else {
+                    &self.root_provider_path
+                }
+            )
+        } else {
+            self.root_provider_path.clone()
+        };
+        provider_child_to_logical(&root, child_provider_path)
     }
 
     fn entry_from_remote_file(&mut self, file: RemoteFile, logical_path: &str) -> Result<EntryDto> {
@@ -2386,11 +3039,13 @@ fn load_profiles(path: &Path) -> Result<Vec<ConnectionProfileDto>> {
         return Ok(Vec::new());
     }
     let content = fs::read_to_string(path)?;
-    let parsed: ProfileFile = serde_json::from_str(&content).unwrap_or(ProfileFile {
-        profiles: Vec::new(),
-    });
+    let parsed: ProfileFile = serde_json::from_str(&content)
+        .with_context(|| format!("No se pudo leer el archivo de perfiles {}", path.display()))?;
     let mut profiles = parsed.profiles;
-    let migrated = profiles.iter_mut().any(normalize_loaded_connection_profile);
+    let mut migrated = false;
+    for profile in &mut profiles {
+        migrated |= normalize_loaded_connection_profile(profile);
+    }
     if migrated {
         save_profiles(path, &profiles)?;
     }
@@ -2401,7 +3056,14 @@ fn save_profiles(path: &Path, profiles: &[ConnectionProfileDto]) -> Result<()> {
     let payload = serde_json::to_string_pretty(&ProfileFile {
         profiles: profiles.to_vec(),
     })?;
-    fs::write(path, payload)?;
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("Ruta de perfiles invalida"))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(payload.as_bytes())?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -2426,8 +3088,12 @@ fn validate_connection_profile_payload(payload: &ConnectionProfilePayload) -> Re
                     "Debes indicar el servidor o IP para la conexion SMB."
                 ));
             }
-            if payload.share.trim().is_empty() {
+            let share = payload.share.trim();
+            if share.is_empty() {
                 return Err(anyhow!("Debes indicar el recurso compartido SMB."));
+            }
+            if share.contains(['/', '\\']) || share == "." || share == ".." {
+                return Err(anyhow!("Indica solo el nombre del recurso SMB, por ejemplo Almacen, sin barras ni servidor."));
             }
         }
         "ssh" | "sftp" | "scp" => {
@@ -2493,7 +3159,7 @@ fn normalize_loaded_connection_profile(profile: &mut ConnectionProfileDto) -> bo
 }
 
 fn normalize_logical_path(path: &str) -> String {
-    let normalized = path.trim().replace('\\', "/");
+    let normalized = path.replace('\\', "/");
     if normalized.is_empty() || normalized == "/" {
         "/".to_string()
     } else {
@@ -2519,6 +3185,37 @@ fn build_remote_virtual_path(session_id: &str, logical_path: &str) -> String {
             normalize_logical_path(logical_path)
         )
     }
+}
+
+fn local_edit_signature(path: &Path) -> Result<(u64, SystemTime)> {
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.len(), metadata.modified()?))
+}
+
+fn readers_match(left: &mut dyn Read, right: &mut dyn Read) -> Result<bool> {
+    let mut left_buffer = [0u8; 65536];
+    let mut right_buffer = [0u8; 65536];
+    loop {
+        let read = left.read(&mut left_buffer)?;
+        if read == 0 { return Ok(right.read(&mut right_buffer)? == 0); }
+        let mut offset = 0;
+        while offset < read {
+            let count = right.read(&mut right_buffer[offset..read])?;
+            if count == 0 { return Ok(false); }
+            offset += count;
+        }
+        if left_buffer[..read] != right_buffer[..read] { return Ok(false); }
+    }
+}
+
+fn remote_content_matches(fs: &mut dyn RemoteFs, remote: &Path, baseline: &Path) -> Result<bool> {
+    let mut local = fs::File::open(baseline)?;
+    let mut remote_stream = fs.open(remote).map_err(|e| anyhow!(e.to_string()))?;
+    let comparison = readers_match(&mut remote_stream, &mut local);
+    let close = fs.on_read(remote_stream).map_err(|e| anyhow!(e.to_string()));
+    let equal = comparison?;
+    close?;
+    Ok(equal)
 }
 
 pub fn parse_remote_virtual_path(path: &str) -> Option<(String, String)> {
@@ -2572,9 +3269,24 @@ fn provider_child_to_logical(
 ) -> Result<String> {
     let parent = parent_provider_path.replace('\\', "/");
     let child = child_provider_path.to_string_lossy().replace('\\', "/");
-    let suffix = child
-        .strip_prefix(parent.trim_end_matches('/'))
-        .ok_or_else(|| anyhow!("No se pudo reconstruir la ruta logica remota."))?;
+    let root = parent.trim_end_matches('/');
+    let suffix = if root.is_empty() {
+        child.as_str()
+    } else {
+        let prefix = child
+            .get(..root.len())
+            .ok_or_else(|| anyhow!("Ruta remota fuera de la raiz: {}", child))?;
+        if !(prefix == root
+            || (cfg!(target_family = "windows") && prefix.eq_ignore_ascii_case(root)))
+        {
+            return Err(anyhow!("Ruta remota fuera de la raiz: {}", child));
+        }
+        let suffix = &child[root.len()..];
+        if !suffix.is_empty() && !suffix.starts_with('/') {
+            return Err(anyhow!("Ruta remota fuera de la raiz: {}", child));
+        }
+        suffix
+    };
     Ok(normalize_logical_path(suffix))
 }
 
@@ -3017,27 +3729,56 @@ fn empty_file_metadata() -> RemoteMetadata {
     file_metadata(0)
 }
 
-fn check_write_access(remote_fs: &mut dyn RemoteFs, provider_root: &str) -> bool {
+fn check_write_access(remote_fs: &mut dyn RemoteFs, provider_root: &str) -> (Option<bool>, String) {
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
+        .as_nanos();
+    let separator = if cfg!(target_family = "windows") && provider_root.contains('\\') {
+        "\\"
+    } else {
+        "/"
+    };
     let test_path_str = format!(
-        "{}/.dogu_write_test_{}",
-        provider_root.trim_end_matches('/'),
+        "{}{}.dogu_write_test_{}_{}",
+        provider_root.trim_end_matches(['/', '\\']),
+        separator,
+        std::process::id(),
         ts
     );
     let test_path = Path::new(&test_path_str);
-    let empty: Box<dyn std::io::Read + Send> = Box::new(std::io::Cursor::new(Vec::<u8>::new()));
-    if remote_fs
-        .create_file(test_path, &file_metadata(0), empty)
-        .is_ok()
-    {
-        let _ = remote_fs.remove_file(test_path);
-        true
-    } else {
-        false
+    // Do not overwrite an existing entry if a generated name happens to collide.
+    match remote_fs.exists(test_path) {
+        Ok(false) => {}
+        Ok(true) => {
+            return (
+                None,
+                "No se pudo comprobar la escritura: el archivo de prueba ya existe.".into(),
+            )
+        }
+        Err(error) => return (None, format!("No se pudo comprobar la escritura: {error}")),
     }
+    let empty: Box<dyn std::io::Read + Send> = Box::new(Cursor::new(Vec::<u8>::new()));
+    let created = remote_fs.create_file(test_path, &file_metadata(0), empty);
+    if let Err(error) = created {
+        return (None, format!("No se pudo completar la comprobacion de escritura: {error}. Puede quedar un archivo de prueba en {test_path_str}"));
+    }
+    let cleanup = match remote_fs.exists(test_path) {
+        Ok(true) => remote_fs.remove_file(test_path).err(),
+        Ok(false) => None,
+        Err(error) => Some(error),
+    };
+    match cleanup {
+        None => (Some(true), "Conexion verificada correctamente.".into()),
+        Some(error) => (None, format!("Se creo el archivo de prueba, pero no se pudo verificar su limpieza ({test_path_str}): {error}")),
+    }
+}
+
+fn transient_transfer_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<RemoteError>().map(|remote| matches!(remote.kind, RemoteErrorType::ConnectionError | RemoteErrorType::NotConnected)).unwrap_or(false)
+            || cause.downcast_ref::<std::io::Error>().map(|io| matches!(io.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe)).unwrap_or(false)
+    })
 }
 
 fn sftp_permission_error(raw: &str, context: &str) -> anyhow::Error {
@@ -3125,6 +3866,51 @@ fn remove_local_target(path: &Path) -> Result<()> {
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+/// Publish a staged local directory without replacing a concurrent creator.
+#[cfg(target_os = "linux")]
+fn rename_local_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ruta invalida"))?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes()).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ruta invalida"))?;
+    // RENAME_NOREPLACE is atomic and cannot overwrite a concurrent creator.
+    let result = unsafe { libc::renameat2(libc::AT_FDCWD, source.as_ptr(), libc::AT_FDCWD, target.as_ptr(), libc::RENAME_NOREPLACE) };
+    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+#[cfg(target_os = "windows")]
+fn rename_local_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" { fn MoveFileW(source: *const u16, target: *const u16) -> i32; }
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let result = unsafe { MoveFileW(source.as_ptr(), target.as_ptr()) };
+    if result != 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn rename_local_no_replace(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "publicacion segura de carpetas no disponible en esta plataforma"))
+}
+
+/// Record every member before removing a moved directory, refusing symlinks.
+fn local_tree_snapshot(root: &Path) -> Result<Vec<(PathBuf, bool, u64, SystemTime)>> {
+    let mut entries = Vec::new();
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow!("La carpeta contiene un enlace simbolico que no se puede trasladar de forma segura: {}", entry.path().display()));
+        }
+        if !metadata.is_file() && !metadata.is_dir() {
+            return Err(anyhow!("La carpeta contiene un elemento no compatible: {}", entry.path().display()));
+        }
+        entries.push((entry.path().strip_prefix(root)?.to_path_buf(), metadata.is_dir(), metadata.len(), metadata.modified()?));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
 }
 
 fn local_entry_transfer_size(path: &Path) -> Result<u64> {
@@ -3277,10 +4063,179 @@ fn summarize_remote_dir(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_disk_usage_bytes, normalize_loaded_connection_profile, parse_df_pk_output,
-        statvfs_fragment_size, ConnectionProfileDto,
-    };
+    use super::*;
+
+    #[test]
+    fn transfer_retry_classification_rejects_ambiguous_and_permanent_errors() {
+        assert!(transient_transfer_error(&anyhow::Error::new(RemoteError::new(RemoteErrorType::ConnectionError))));
+        assert!(transient_transfer_error(&std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout").into()));
+        assert!(!transient_transfer_error(&anyhow::Error::new(RemoteError::new(RemoteErrorType::PexError))));
+        assert!(!transient_transfer_error(&anyhow::Error::new(RemoteError::new(RemoteErrorType::ProtocolError))));
+        assert!(!transient_transfer_error(&anyhow!("unknown")));
+    }
+
+    #[test]
+    fn local_tree_snapshot_detects_nested_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("nested");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("a.txt"), b"one").unwrap();
+        let before = local_tree_snapshot(root.path()).unwrap();
+        fs::write(folder.join("b.txt"), b"two").unwrap();
+        assert_ne!(before, local_tree_snapshot(root.path()).unwrap());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn directory_publication_does_not_replace_a_concurrent_destination() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("new"), b"new").unwrap();
+        fs::create_dir(&target).unwrap();
+        assert!(rename_local_no_replace(&source, &target).is_err());
+        assert!(source.join("new").exists());
+        assert!(target.is_dir());
+        fs::remove_dir(&target).unwrap();
+        rename_local_no_replace(&source, &target).unwrap();
+        assert_eq!(fs::read(target.join("new")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn provider_paths_use_root_components_and_preserve_names() {
+        assert_eq!(
+            provider_child_to_logical(
+                r"\\192.168.30.2\Almacen",
+                Path::new(r"\\192.168.30.2\Almacen\Carpeta\niño ")
+            )
+            .unwrap(),
+            "/Carpeta/niño "
+        );
+        assert_eq!(
+            provider_child_to_logical(
+                r"\\192.168.30.2\Almacen\Inicio",
+                Path::new(r"\\192.168.30.2\Almacen\Inicio\uno\dos")
+            )
+            .unwrap(),
+            "/uno/dos"
+        );
+        assert!(provider_child_to_logical(
+            r"\\192.168.30.2\Almacen\Inicio",
+            Path::new(r"\\192.168.30.2\Almacen\Inicio2\x")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn edit_comparison_detects_same_size_changes_and_length_changes() {
+        assert!(readers_match(&mut &b"same"[..], &mut &b"same"[..]).unwrap());
+        assert!(!readers_match(&mut &b"same"[..], &mut &b"diff"[..]).unwrap());
+        assert!(!readers_match(&mut &b"same"[..], &mut &b"same plus"[..]).unwrap());
+    }
+
+    #[test]
+    fn busy_remote_uses_only_previously_cached_directories() {
+        let manager = RemoteManager {
+            profiles_path: PathBuf::new(), temp_root: PathBuf::new(),
+            profiles: Mutex::new(Vec::new()), sessions: Mutex::new(HashMap::new()),
+            disk_usage_cache: Mutex::new(HashMap::new()), directory_cache: Mutex::new(HashMap::new()),
+            editing_files: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1),
+        };
+        let path = "remote://session-1/known";
+        manager.directory_cache.lock().unwrap().insert(path.to_string(), Vec::new());
+        let _busy = manager.sessions.lock().unwrap();
+        assert!(manager.list_children(path).unwrap().is_empty());
+        assert!(manager.list_children("remote://session-1/unknown").is_err());
+    }
+
+    #[test]
+    fn transfer_suffix_starts_at_one_and_skips_existing_names() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let manager = RemoteManager {
+            profiles_path: PathBuf::new(), temp_root: PathBuf::new(),
+            profiles: Mutex::new(Vec::new()), sessions: Mutex::new(HashMap::new()),
+            disk_usage_cache: Mutex::new(HashMap::new()), directory_cache: Mutex::new(HashMap::new()),
+            editing_files: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1),
+        };
+        fs::write(dir.path().join("game.iso"), b"x").unwrap();
+        fs::write(dir.path().join("game (1).iso"), b"x").unwrap();
+        assert_eq!(manager.transfer_target_name(dir.path().to_str().unwrap(), "game.iso", true).unwrap(), "game (2).iso");
+    }
+
+    #[test]
+    fn profile_creation_does_not_replace_loaded_ids() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let path = dir.path().join("profiles.json");
+        let manager = RemoteManager {
+            profiles_path: path.clone(),
+            temp_root: dir.path().to_owned(),
+            profiles: Mutex::new(Vec::new()),
+            sessions: Mutex::new(HashMap::new()),
+            disk_usage_cache: Mutex::new(HashMap::new()),
+                directory_cache: Mutex::new(HashMap::new()),
+                editing_files: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+        };
+        let payload = ConnectionProfilePayload {
+            id: None,
+            label: "first".into(),
+            protocol: "smb".into(),
+            host: "host".into(),
+            port: None,
+            username: "".into(),
+            password: "".into(),
+            share: "Almacen".into(),
+            workgroup: "".into(),
+            start_path: "/".into(),
+            ssh_mode: "".into(),
+            ftp_mode: "".into(),
+            ftp_secure_implicit: false,
+            ftp_accept_invalid_certificates: false,
+            ftp_accept_invalid_hostnames: false,
+        };
+        manager.save_profile(payload.clone()).unwrap();
+        manager.next_id.store(1, Ordering::Relaxed);
+        let second = manager
+            .save_profile(ConnectionProfilePayload {
+                label: "second".into(),
+                ..payload
+            })
+            .unwrap();
+        assert_eq!(second.id, "profile-2");
+        assert_eq!(load_profiles(&path).unwrap().len(), 2);
+        fs::write(&path, "invalid json").unwrap();
+        assert!(load_profiles(&path).is_err());
+    }
+
+    #[test]
+    fn invalid_smb_shares_are_rejected() {
+        let payload = ConnectionProfilePayload {
+            id: None,
+            label: "test".into(),
+            protocol: "smb".into(),
+            host: "host".into(),
+            port: None,
+            username: "".into(),
+            password: "".into(),
+            share: "//almacen".into(),
+            workgroup: "".into(),
+            start_path: "/".into(),
+            ssh_mode: "".into(),
+            ftp_mode: "".into(),
+            ftp_secure_implicit: false,
+            ftp_accept_invalid_certificates: false,
+            ftp_accept_invalid_hostnames: false,
+        };
+        assert!(validate_connection_profile_payload(&payload).is_err());
+        assert!(
+            validate_connection_profile_payload(&ConnectionProfilePayload {
+                share: "Almacen".into(),
+                ..payload
+            })
+            .is_ok()
+        );
+    }
 
     #[test]
     fn parse_df_pk_output_reads_posix_layout() {

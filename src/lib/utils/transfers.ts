@@ -1,4 +1,4 @@
-import { dirnameOf, normalizePath } from "./ghosts.js";
+import { dirnameOf, normalizePath, pathContains } from "./ghosts.js";
 
 export type FileTransferItem = {
   path: string;
@@ -50,7 +50,7 @@ export function canDropFileItemsToPath(items: FileTransferItem[], dest: string):
   const destKey = normalizePath(dest);
   return !items.some((item) => {
     const itemKey = normalizePath(item.path);
-    return itemKey === destKey || (item.isDir && destKey.startsWith(itemKey + "/"));
+    return itemKey === destKey || (item.isDir && pathContains(item.path, dest));
   });
 }
 
@@ -67,6 +67,6 @@ export function isRecursiveFileTransfer(items: FileTransferItem[], dest: string)
   return items.some((item) => {
     if (!item.isDir) return false;
     const itemKey = normalizePath(item.path);
-    return destKey === itemKey || destKey.startsWith(itemKey + "/");
+    return destKey === itemKey || pathContains(item.path, dest);
   });
 }

@@ -175,7 +175,6 @@ pub fn dolphin_tool_path(app: &AppHandle) -> Option<PathBuf> {
 
 fn seven_zip_supports_rar(path: &Path) -> bool {
     match tool_stem(path).as_deref() {
-        Some("7z") | Some("7zz") => true,
         Some("7za") | Some("7zr") => false,
         _ => probe_seven_zip_for_rar_support(path),
     }
@@ -223,15 +222,15 @@ mod tests {
     #[test]
     fn tool_stem_handles_common_executables() {
         assert_eq!(
-            tool_stem(Path::new("C:\\tools\\7z.exe")).as_deref(),
+            tool_stem(Path::new("7z.exe")).as_deref(),
             Some("7z")
         );
         assert_eq!(
-            tool_stem(Path::new("C:\\tools\\7zz.exe")).as_deref(),
+            tool_stem(Path::new("7zz.exe")).as_deref(),
             Some("7zz")
         );
         assert_eq!(
-            tool_stem(Path::new("C:\\tools\\7za.exe")).as_deref(),
+            tool_stem(Path::new("7za.exe")).as_deref(),
             Some("7za")
         );
     }

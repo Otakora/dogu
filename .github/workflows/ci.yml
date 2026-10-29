@@ -40,6 +40,8 @@ jobs:
         run: npm run build
       - name: Test queue and path handling
         run: npm run test:queue
+      - name: Test beta asset cleanup
+        run: python -m unittest discover -s tests -p 'test_prune_beta_assets.py'
 
   rust-windows:
     runs-on: windows-latest

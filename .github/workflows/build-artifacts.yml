@@ -301,6 +301,9 @@ jobs:
       - verify-release
       - package-release
     if: needs.verify-release.outputs.publish == 'true'
+    concurrency:
+      group: publish-release-${{ needs.verify-release.outputs.channel }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -335,3 +338,8 @@ jobs:
             release-artifacts/${{ needs.verify-release.outputs.manifest_name }}
             release-artifacts/SHA256SUMS.txt
             release-artifacts/Otakora.Dogu*.yaml
+      - name: Remove obsolete rolling beta assets
+        if: needs.verify-release.outputs.channel == 'beta'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/prune_beta_assets.py "${{ github.repository }}" "${{ needs.verify-release.outputs.version }}"

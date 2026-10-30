@@ -252,7 +252,7 @@ pub struct SelectionAnalysisDto {
     /// True when one or more selected remote paths are directories and no remote_manager was
     /// available to scan them. The frontend uses this to show the CHD option for remote folders.
     pub has_remote_directories: bool,
-    /// .bin files found during scanning that have no matching .cue file anywhere in the same folder.
+    /// Selected .bin/.raw tracks not referenced by any identified CUE or GDI.
     pub orphan_bins: Vec<String>,
 }
 

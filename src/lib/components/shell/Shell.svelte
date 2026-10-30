@@ -1087,11 +1087,22 @@
     const ghostPaths = paths.filter(isGhostPath);
     const realPaths = paths.filter(p => !isGhostPath(p));
     try {
+      const expandedGhosts = expandGhostSelections(ghostPaths);
+      const pendingGdis = expandedGhosts.filter(p => p.toLowerCase().endsWith(".gdi"));
+      const selectedIsos = [...realPaths, ...expandedGhosts].filter(p => p.toLowerCase().endsWith(".iso"));
+      if (pendingGdis.some(gdi => selectedIsos.some(iso => normalizePath(dirnameOf(iso)) === normalizePath(dirnameOf(gdi))))) {
+        app.notify("error", t("chdDialog.pendingGdiIso"));
+        return;
+      }
       let analysis = realPaths.length > 0
         ? await invoke<SelectionAnalysisDto>("scan_selection", { paths: realPaths, maxDepth: app.settings.chdScanDepth })
         : emptyAnalysis();
 
       if (ghostPaths.length > 0) {
+        if (analysis.chdSources.some(source => source.sourcePath.startsWith("remote://") && source.sourcePath.toLowerCase().endsWith(".gdi") && source.requiredPaths.length === 1 && selectedIsos.some(iso => isGhostPath(iso) && normalizePath(dirnameOf(iso)) === normalizePath(source.containerDir)))) {
+          app.notify("error", t("chdDialog.pendingGdiIso"));
+          return;
+        }
         const synth = synthesizeGhostChdAnalysis(ghostPaths);
         analysis = {
           ...analysis,
@@ -1099,6 +1110,10 @@
           restorableChds: [...analysis.restorableChds, ...synth.restorableChds],
         };
       }
+
+      const gdiTracks = new Set(analysis.chdSources.filter(source => source.sourcePath.toLowerCase().endsWith(".gdi"))
+        .flatMap(source => source.requiredPaths.map(normalizePath)));
+      analysis.chdSources = analysis.chdSources.filter(source => !source.sourcePath.toLowerCase().endsWith(".iso") || !gdiTracks.has(normalizePath(source.sourcePath)));
 
       if (analysis.chdSources.length === 0 && analysis.restorableChds.length === 0) {
         app.notify("info", t("shell.noChdCompatible"));

@@ -53,10 +53,31 @@ const ARCHIVE_EXTENSIONS: &[&str] = &[".zip", ".7z", ".rar"];
 const CD_SOURCE_EXTENSIONS: &[&str] = &[".cue", ".gdi", ".toc"];
 const DVD_SOURCE_EXTENSIONS: &[&str] = &[".iso"];
 const PAIRABLE_BIN_EXTENSIONS: &[&str] = &[".bin"];
+const DISC_TRACK_EXTENSIONS: &[&str] = &[".bin", ".raw"];
 
 fn path_identity(path: &Path) -> String {
     let value = path.to_string_lossy();
     if cfg!(windows) && !value.starts_with("remote://") { value.to_lowercase() } else { value.into_owned() }
+}
+
+fn track_identity(path: &Path) -> String {
+    if path.to_string_lossy().starts_with("remote://") { return path_identity(path); }
+    path_identity(&fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
+fn remote_track_reference(parent: &str, name: &str) -> Option<String> {
+    let rest = parent.strip_prefix("remote://")?;
+    let (session, dir) = rest.split_once('/').unwrap_or((rest, ""));
+    let mut components: Vec<&str> = dir.split('/').filter(|part| !part.is_empty()).collect();
+    let normalized = name.replace('\\', "/");
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => {},
+            ".." => { components.pop()?; },
+            part => components.push(part),
+        }
+    }
+    Some(format!("remote://{session}/{}", components.join("/")))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1344,7 +1365,7 @@ pub fn scan_selection(
     let mut has_files = false;
     let mut chd_sources = Vec::new();
     let mut restorable_chds = Vec::new();
-    let mut orphan_bins: Vec<String> = Vec::new();
+    let mut track_candidates: Vec<String> = Vec::new();
     let mut unique_extensions = BTreeSet::new();
     let mut seen_sources = BTreeSet::new();
     let mut seen_restorable = BTreeSet::new();
@@ -1363,7 +1384,7 @@ pub fn scan_selection(
                 || ARCHIVE_EXTENSIONS.contains(&ext.as_str())
                 || CD_SOURCE_EXTENSIONS.contains(&ext.as_str())
                 || DVD_SOURCE_EXTENSIONS.contains(&ext.as_str())
-                || PAIRABLE_BIN_EXTENSIONS.contains(&ext.as_str());
+                || DISC_TRACK_EXTENSIONS.contains(&ext.as_str());
 
             if !is_known_file {
                 // No recognised file extension — treat as a remote directory.
@@ -1379,6 +1400,7 @@ pub fn scan_selection(
                             .and_then(OsStr::to_str)
                             .map(|e| format!(".{}", e.to_ascii_lowercase()))
                             .unwrap_or_default();
+                        if DISC_TRACK_EXTENSIONS.contains(&fext.as_str()) { track_candidates.push(file_path.clone()); }
                         if ARCHIVE_EXTENSIONS.contains(&fext.as_str()) {
                             archives.push(file_path);
                         } else if fext == ".chd" {
@@ -1402,6 +1424,7 @@ pub fn scan_selection(
             }
 
             has_files = true;
+            if DISC_TRACK_EXTENSIONS.contains(&ext.as_str()) { track_candidates.push(path_str.to_string()); }
             if ARCHIVE_EXTENSIONS.contains(&ext.as_str()) {
                 archives.push(path_str.to_string());
             }
@@ -1435,6 +1458,9 @@ pub fn scan_selection(
                 .filter_map(|entry| entry.ok())
             {
                 let candidate = item.path().to_path_buf();
+                if candidate.is_file() && candidate.extension().and_then(OsStr::to_str).is_some_and(|ext| ext.eq_ignore_ascii_case("bin") || ext.eq_ignore_ascii_case("raw")) {
+                    track_candidates.push(candidate.to_string_lossy().to_string());
+                }
                 if is_chd_file(&candidate) {
                     let key = path_identity(&candidate);
                     if seen_restorable.insert(key) {
@@ -1450,26 +1476,16 @@ pub fn scan_selection(
                             chd_sources.push(source);
                         }
                     }
-                    None => {
-                        // No source found — check if this is an orphan .bin (no matching .cue)
-                        let ext = candidate
-                            .extension()
-                            .and_then(OsStr::to_str)
-                            .map(|e| format!(".{}", e.to_ascii_lowercase()))
-                            .unwrap_or_default();
-                        if PAIRABLE_BIN_EXTENSIONS.contains(&ext.as_str()) {
-                            let bin_str = candidate.to_string_lossy().to_string();
-                            if !orphan_bins.contains(&bin_str) {
-                                orphan_bins.push(bin_str);
-                            }
-                        }
-                    }
+                    None => {}
                 }
             }
             continue;
         }
 
         has_files = true;
+        if path.extension().and_then(OsStr::to_str).is_some_and(|ext| ext.eq_ignore_ascii_case("bin") || ext.eq_ignore_ascii_case("raw")) {
+            track_candidates.push(path.to_string_lossy().to_string());
+        }
         if is_archive(path) {
             archives.push(path.to_string_lossy().to_string());
         }
@@ -1488,21 +1504,65 @@ pub fn scan_selection(
                     chd_sources.push(source);
                 }
             }
-            None => {
-                let ext = path
-                    .extension()
-                    .and_then(OsStr::to_str)
-                    .map(|e| format!(".{}", e.to_ascii_lowercase()))
-                    .unwrap_or_default();
-                if PAIRABLE_BIN_EXTENSIONS.contains(&ext.as_str()) {
-                    let bin_str = path.to_string_lossy().to_string();
-                    if !orphan_bins.contains(&bin_str) {
-                        orphan_bins.push(bin_str);
+            None => {}
+        }
+    }
+
+    // Resolve after the complete scan, so selection order and repeated folders do not matter.
+    let mut associated = BTreeSet::new();
+    let mut gdi_tracks = BTreeSet::new();
+    let mut unknown_remote_dirs = BTreeSet::new();
+    let mut unknown_remote_gdi_dirs = BTreeSet::new();
+    for source in &mut chd_sources {
+        if source.source_path.starts_with("remote://") {
+            let ext = source.source_path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            if ext != "cue" && ext != "gdi" { continue; }
+            let parent = source.source_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+            let content = remote_manager.as_ref().and_then(|manager| manager.read_disc_descriptor(&source.source_path).ok());
+            if let Some(content) = content {
+                let names = if ext == "cue" { cue_reference_names(&content) } else { gdi_reference_names(&content) };
+                for name in names {
+                    if let Some(reference) = remote_track_reference(parent, &name) {
+                        if ext == "gdi" { gdi_tracks.insert(reference.clone()); }
+                        associated.insert(reference.clone());
+                        if !source.required_paths.contains(&reference) { source.required_paths.push(reference); }
                     }
                 }
+            } else {
+                unknown_remote_dirs.insert(parent.to_string());
+                if ext == "gdi" { unknown_remote_gdi_dirs.insert(parent.to_string()); }
+            }
+        } else {
+            associated.extend(source.required_paths.iter().map(|p| track_identity(Path::new(p))));
+            if source.source_path.to_ascii_lowercase().ends_with(".gdi") {
+                gdi_tracks.extend(source.required_paths.iter().map(|p| track_identity(Path::new(p))));
             }
         }
     }
+    // Do not guess whether a remote ISO belongs to an unreadable GDI: doing so
+    // could silently create an unrelated DVD CHD or suppress a real source.
+    if remote_manager.is_some() && chd_sources.iter().any(|source| {
+        source.source_path.starts_with("remote://")
+            && source.source_path.to_ascii_lowercase().ends_with(".iso")
+            && source.source_path.rsplit_once('/').is_some_and(|(parent, _)| unknown_remote_gdi_dirs.contains(parent))
+    }) {
+        return Err(anyhow!("No se pudo leer un GDI remoto para distinguir sus pistas ISO. Comprueba la conexion y vuelve a intentarlo, o selecciona solo el GDI."));
+    }
+    chd_sources.retain(|source| {
+        !source.source_path.to_ascii_lowercase().ends_with(".iso")
+            || !gdi_tracks.contains(&track_identity(Path::new(&source.source_path)))
+    });
+    unique_extensions = chd_sources.iter().flat_map(|source| source.display_extensions.iter().cloned()).collect();
+    let mut seen_tracks = BTreeSet::new();
+    let orphan_bins = track_candidates.into_iter().filter(|track| {
+        let key = track_identity(Path::new(track));
+        if !seen_tracks.insert(key.clone()) || associated.contains(&key) { return false; }
+        if track.starts_with("remote://") {
+            let parent = track.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+            if unknown_remote_dirs.contains(parent) { return false; }
+        }
+        true
+    }).collect();
 
     let unique_extensions = unique_extensions.into_iter().collect::<Vec<_>>();
     let chd_menu_label = if chd_sources.is_empty() {
@@ -1625,20 +1685,11 @@ pub fn convert_to_chd(
         };
 
         // Re-detect from the local copy to get proper required_paths (CUE → BIN list).
-        let local_source = detect_chd_source(&effective_source_path)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| ChdSourceDto {
-                source_path: effective_source_path.to_string_lossy().to_string(),
-                container_dir: effective_source_path
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                command: source.command.clone(),
-                display_extensions: source.display_extensions.clone(),
-                required_paths: vec![effective_source_path.to_string_lossy().to_string()],
-                missing_files: vec![],
-            });
+        let local_source = detect_chd_source(&effective_source_path)?
+            .ok_or_else(|| anyhow!("No se pudo analizar la imagen de origen: {}", effective_source_path.display()))?;
+        if !local_source.missing_files.is_empty() {
+            return Err(anyhow!("Faltan ficheros requeridos por '{}': {}", source.source_path, local_source.missing_files.join(", ")));
+        }
         let remote_originals = if source_is_remote && options.delete_originals {
             remote_original_paths(&source.container_dir, &effective_source_path, &local_source.required_paths)?
         } else { Vec::new() };
@@ -4027,7 +4078,7 @@ fn detect_chd_source(path: &Path) -> Result<Option<ChdSourceDto>> {
 
     if PAIRABLE_BIN_EXTENSIONS.contains(&extension.as_str()) {
         let cue_candidate = path.with_extension("cue");
-        if cue_candidate.exists() {
+        if cue_candidate.exists() && parse_cue_references(&cue_candidate)?.iter().any(|reference| track_identity(reference) == track_identity(path)) {
             let required_paths = parse_cue_references(&cue_candidate)?;
             let missing_files = check_required_paths(&required_paths);
             return Ok(Some(ChdSourceDto {
@@ -4078,6 +4129,14 @@ fn parse_cue_references(path: &Path) -> Result<Vec<PathBuf>> {
     let content = fs::read(path)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
+    for name in cue_reference_names(&content) {
+        references.push(path.parent().unwrap_or(path).join(name));
+    }
+    Ok(dedupe_paths(references))
+}
+
+fn cue_reference_names(content: &str) -> Vec<String> {
+    let mut references = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
         if !trimmed.to_ascii_uppercase().starts_with("FILE ") {
@@ -4098,23 +4157,35 @@ fn parse_cue_references(path: &Path) -> Result<Vec<PathBuf>> {
         };
         if let Some(name) = filename {
             if !name.is_empty() {
-                references.push(path.parent().unwrap_or(path).join(name));
+                references.push(name.to_string());
             }
         }
     }
-    Ok(dedupe_paths(references))
+    references
 }
 
 fn parse_gdi_references(path: &Path) -> Result<Vec<PathBuf>> {
     let mut references = vec![path.to_path_buf()];
-    let content = fs::read_to_string(path).unwrap_or_default();
-    for line in content.lines().skip(1) {
-        let parts = line.split_whitespace().collect::<Vec<_>>();
-        if parts.len() >= 5 {
-            references.push(path.parent().unwrap_or(path).join(parts[4]));
-        }
+    let content = String::from_utf8_lossy(&fs::read(path)?).into_owned();
+    for name in gdi_reference_names(&content) {
+        references.push(path.parent().unwrap_or(path).join(name));
     }
     Ok(dedupe_paths(references))
+}
+
+fn gdi_reference_names(content: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    for line in content.lines().skip(1) {
+        let mut remainder = line.trim();
+        for _ in 0..4 {
+            let Some(end) = remainder.find(char::is_whitespace) else { remainder = ""; break; };
+            remainder = remainder[end..].trim_start();
+        }
+        let Some(end) = remainder.rfind(char::is_whitespace) else { continue; };
+        let name = remainder[..end].trim().trim_matches('"');
+        if !name.is_empty() { references.push(name.to_string()); }
+    }
+    references
 }
 
 fn find_cue_for_bin(bin_path: &Path) -> Result<Option<PathBuf>> {
@@ -4132,7 +4203,7 @@ fn find_cue_for_bin(bin_path: &Path) -> Result<Option<PathBuf>> {
             .unwrap_or(false)
         {
             let references = parse_cue_references(&path)?;
-            if references.iter().any(|item| same_path(item, bin_path)) {
+            if references.iter().any(|item| track_identity(item) == track_identity(bin_path)) {
                 return Ok(Some(path));
             }
         }
@@ -5370,6 +5441,89 @@ fn compress_via_rar(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_gdi_and_cue_tracks_are_not_reported_as_orphans() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let gdi = root.join("game.gdi");
+        let cue = root.join("other.cue");
+        let bin = root.join("track 01.bin");
+        let raw = root.join("track02.raw");
+        let cue_bin = root.join("other.bin");
+        let orphan_bin = root.join("loose.bin");
+        let orphan_raw = root.join("loose.raw");
+        fs::write(&gdi, "2\n1 0 4 2352 \"track 01.bin\" 0\n2 45000 0 2352 track02.raw 0\n").unwrap();
+        fs::write(&cue, "FILE \"other.bin\" BINARY\n").unwrap();
+        for track in [&bin, &raw, &cue_bin, &orphan_bin, &orphan_raw] { fs::write(track, b"track").unwrap(); }
+        for selection in [vec![bin.clone(), raw.clone(), cue_bin.clone(), orphan_bin.clone(), orphan_raw.clone(), gdi.clone(), cue.clone()], vec![root.to_path_buf(), gdi.clone(), bin.clone()]] {
+            let analysis = super::scan_selection(&selection, usize::MAX, None).unwrap();
+            assert_eq!(analysis.chd_sources.len(), 2);
+            assert!(analysis.chd_sources.iter().find(|s| s.source_path.ends_with("game.gdi")).unwrap().missing_files.is_empty());
+            let orphans: Vec<_> = analysis.orphan_bins.iter().map(|s| std::path::Path::new(s).file_name().unwrap().to_string_lossy().to_string()).collect();
+            assert_eq!(orphans.len(), 2);
+            assert!(orphans.contains(&"loose.bin".to_string()));
+            assert!(orphans.contains(&"loose.raw".to_string()));
+        }
+    }
+
+    #[test]
+    fn gdi_track_names_support_quotes_and_spaces() {
+        let names = super::gdi_reference_names("2\n1 0 4 2352 \"Track 01.bin\" 0\n2 45000 0 2352 Track 02.raw 0\n");
+        assert_eq!(names, vec!["Track 01.bin", "Track 02.raw"]);
+    }
+
+    #[test]
+    fn remote_track_references_stay_in_the_same_session() {
+        assert_eq!(super::remote_track_reference("remote://nas/games/disc", "./tracks\\Track 01.bin").as_deref(), Some("remote://nas/games/disc/tracks/Track 01.bin"));
+        assert_eq!(super::remote_track_reference("remote://nas/games/disc", "../track.raw").as_deref(), Some("remote://nas/games/track.raw"));
+        assert_eq!(super::remote_track_reference("remote://nas", "../track.raw"), None);
+    }
+
+    #[test]
+    fn matching_track_name_in_another_folder_is_not_associated() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let gdi = first.join("game.gdi");
+        let referenced = first.join("track01.bin");
+        let unreferenced = second.join("track01.bin");
+        fs::write(&gdi, "1\n1 0 4 2352 track01.bin 0\n").unwrap();
+        fs::write(&referenced, b"a").unwrap();
+        fs::write(&unreferenced, b"b").unwrap();
+        let analysis = super::scan_selection(&[gdi, referenced, unreferenced.clone()], usize::MAX, None).unwrap();
+        assert_eq!(analysis.orphan_bins, vec![unreferenced.to_string_lossy().to_string()]);
+    }
+
+    #[test]
+    fn gdi_iso_tracks_are_not_separate_sources_but_unrelated_isos_remain() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let gdi = root.join("game.gdi");
+        let iso1 = root.join("track 01.iso");
+        let raw = root.join("track02.raw");
+        let iso3 = root.join("track03.iso");
+        let independent = root.join("other.iso");
+        fs::write(&gdi, "3\n1 0 4 2048 \"track 01.iso\" 0\n2 20 0 2352 track02.raw 0\n3 45000 4 2048 track03.iso 0\n").unwrap();
+        for path in [&iso1, &raw, &iso3, &independent] { fs::write(path, b"track").unwrap(); }
+        for selection in [vec![iso1.clone(), raw.clone(), independent.clone(), iso3.clone(), gdi.clone()], vec![root.to_path_buf()]] {
+            let result = super::scan_selection(&selection, usize::MAX, None).unwrap();
+            assert_eq!(result.chd_sources.len(), 2);
+            let gdi_source = result.chd_sources.iter().find(|s| s.source_path.ends_with("game.gdi")).unwrap();
+            assert_eq!(gdi_source.command, "createcd");
+            assert_eq!(gdi_source.required_paths.len(), 4);
+            assert!(gdi_source.missing_files.is_empty());
+            assert!(result.chd_sources.iter().any(|s| s.source_path.ends_with("other.iso") && s.command == "createdvd"));
+        }
+        let just_gdi = super::scan_selection(&[gdi], usize::MAX, None).unwrap();
+        assert_eq!(just_gdi.chd_sources.len(), 1);
+        assert_eq!(just_gdi.chd_sources[0].required_paths.len(), 4);
+    }
+
     #[test]
     fn local_transfer_preserves_existing_destination_when_source_is_missing() {
         let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();

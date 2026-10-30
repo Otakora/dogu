@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.6-beta.3
+
+### English
+
+- Dreamcast GDI conversion now recognizes referenced ISO tracks and avoids converting them as separate discs.
+- Improved identification of BIN and RAW tracks referenced by GDI or CUE files, including remote sources.
+
+### Español
+
+- La conversión de GDI de Dreamcast reconoce las pistas ISO referenciadas y evita convertirlas como discos independientes.
+- Mejor identificación de pistas BIN y RAW referenciadas por archivos GDI o CUE, también en ubicaciones remotas.
+
 ## 0.2.6-beta.2
 
 ### English

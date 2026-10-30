@@ -1591,6 +1591,21 @@ impl RemoteManager {
         Ok(target)
     }
 
+    /// Read a small disc descriptor without creating or overwriting a local staging file.
+    pub fn read_disc_descriptor(&self, path: &str) -> Result<String> {
+        let (session_id, logical_path) = parse_remote_virtual_path(path)
+            .ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
+        let mut session = self.get_session_mut(&session_id)?;
+        let provider_path = session.resolve_provider_path(&logical_path);
+        let file = session.fs.stat(Path::new(&provider_path)).map_err(|e| anyhow!(e.to_string()))?;
+        if file.is_dir() || file.metadata().size > 1024 * 1024 {
+            return Err(anyhow!("Descriptor remoto demasiado grande o invalido: {path}"));
+        }
+        let bytes = read_remote_bytes(&mut *session.fs, Path::new(&provider_path))?;
+        if bytes.len() > 1024 * 1024 { return Err(anyhow!("Descriptor remoto demasiado grande: {path}")); }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     fn delete_one(&self, app: &AppHandle, job_id: &str, path: &str, depth: usize) -> Result<()> {
         let indent = "  ".repeat(depth);
         ops::emit_log(app, job_id, format!("{indent}{path}"))?;

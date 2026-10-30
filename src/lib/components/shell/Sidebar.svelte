@@ -12,6 +12,7 @@
   import { openTerminalAt } from "../../utils/terminal.js";
   import { connectSavedProfile } from "../../utils/connections.js";
 
+  let { customTitlebar = false, width = 220 }: { customTitlebar?: boolean; width?: number } = $props();
   let appVersion = $state("");
   onMount(() => { void getVersion().then(version => { appVersion = version; }).catch(() => {}); });
 
@@ -365,6 +366,7 @@
 
 <aside
   class="sidebar"
+  style:width="{width}px"
   aria-label={t("sidebar.locations")}
   onwheel={(e) => {
     if (!e.ctrlKey) return;
@@ -374,6 +376,9 @@
     app.setTreeZoom(next);
   }}
 >
+  {#if customTitlebar}
+    <div class="sb-titlebar" data-tauri-drag-region><span data-tauri-drag-region>Dogu</span></div>
+  {/if}
   <div class="sb-body scrollbar-thin">
 
     <!-- ══════════════════════════════════════════════════════ -->
@@ -681,7 +686,6 @@
   .sidebar {
     display: flex;
     flex-direction: column;
-    width: var(--sidebar-width, 220px);
     height: 100%;
     background: var(--surface-alt);
     border-right: 1px solid var(--line);
@@ -694,6 +698,7 @@
     overflow-y: auto;
     padding: 4px 4px 12px;
   }
+  .sb-titlebar { height: 34px; flex: none; display: flex; align-items: center; padding: 0 12px; color: var(--text-muted); font-size: 12px; font-weight: 650; border-bottom: 1px solid var(--line); user-select: none; }
 
   .sb-footer { flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 8px;
     border-top: 1px solid var(--line); background: var(--surface); }

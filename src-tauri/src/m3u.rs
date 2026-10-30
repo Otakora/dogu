@@ -14,7 +14,7 @@ use crate::models::{
 };
 
 // Extensions that are valid M3U entries (directly listed)
-const ELIGIBLE_EXT: &[&str] = &["cue", "chd", "gdi", "iso", "img"];
+const ELIGIBLE_EXT: &[&str] = &["cue", "chd", "gdi", "iso", "img", "zip", "7z"];
 
 // ------------------------------------------------------------------
 // Disc pattern detection
@@ -31,19 +31,23 @@ fn detect_disc(stem: &str) -> Option<DiscInfo> {
         vec![
             // (Disc N) / (Disc N of M) — No-Intro / Redump standard
             (
-                Regex::new(r"(?i)\s*\(Dis[ck]\s+(\d+)(?:\s+of\s+\d+)?\)").unwrap(),
+                Regex::new(r"(?i)\s*\(Dis[ck]o?\s+(\d+)(?:\s+of\s+\d+)?\)").unwrap(),
                 false,
             ),
             // (CD N) / (CD-N)
-            (Regex::new(r"(?i)\s*\(CD[- ]?(\d+)\)").unwrap(), false),
+            (Regex::new(r"(?i)\s*[\(\[]CD\s*-?\s*(\d+)\s*[\)\]]").unwrap(), false),
             // (Side X) — letter
             (Regex::new(r"(?i)\s*\(Side\s+([A-Za-z])\)").unwrap(), true),
             // - Disc N / - Disk N (hyphen, outside parens)
-            (Regex::new(r"(?i)\s*[-–]\s*Dis[ck]\s+(\d+)").unwrap(), false),
+            (Regex::new(r"(?i)\s*[-–]\s*Dis[ck]o?\s+(\d+)").unwrap(), false),
             // - CD N
-            (Regex::new(r"(?i)\s*[-–]\s*CD\s*(\d+)").unwrap(), false),
+            (Regex::new(r"(?i)\s*[-–]\s*CD\s*-?\s*(\d+)\b").unwrap(), false),
+            // CD1 / CD 1, outside brackets and without a preceding hyphen.
+            (Regex::new(r"(?i)\s+CD\s*-?\s*(\d+)\b").unwrap(), false),
+            // Disc / Disk / Disco followed by a number without parentheses.
+            (Regex::new(r"(?i)\s+Dis[ck]o?\s+(\d+)").unwrap(), false),
             // DiscN / DiskN (no parens, least priority)
-            (Regex::new(r"(?i)\s+Dis[ck](\d+)").unwrap(), false),
+            (Regex::new(r"(?i)\s+Dis[ck]o?(\d+)").unwrap(), false),
         ]
     });
 
@@ -98,6 +102,12 @@ fn normalize_sep(s: &str) -> String {
 pub fn scan_local(dirs: &[PathBuf], recursive: bool) -> Vec<RawFile> {
     let mut results = Vec::new();
     for dir in dirs {
+        if dir.is_file() {
+            if let Some(file) = raw_file_from_remote_path(&normalize_sep(&dir.to_string_lossy())) {
+                results.push(file);
+            }
+            continue;
+        }
         let walker = if recursive {
             WalkDir::new(dir).min_depth(1)
         } else {
@@ -327,6 +337,56 @@ pub fn raw_file_from_remote_path(virtual_path: &str) -> Option<RawFile> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spanish_disco_and_english_disc_are_grouped_consistently() {
+        for name in ["Juego (Disco 2)", "Juego - Disco 2", "Juego Disco 2", "Juego (Disc 2)", "Juego (Disk 2)"] {
+            let result = detect_disc(name).unwrap();
+            assert_eq!(result.sort_key, 2, "{name}");
+            assert_eq!(result.base_name, "Juego", "{name}");
+        }
+    }
+
+    #[test]
+    fn cd_variants_identify_the_number_and_preserve_the_game_name() {
+        for name in ["Juego CD1", "Juego CD 1", "Juego CD-1", "Juego (CD1)",
+                     "Juego (CD 1)", "Juego [CD1]", "Juego [CD 1]", "Juego - CD1"] {
+            let result = detect_disc(name).unwrap_or_else(|| panic!("not detected: {name}"));
+            assert_eq!(result.sort_key, 1, "{name}");
+            assert_eq!(result.base_name, "Juego", "{name}");
+        }
+        assert!(detect_disc("Juego CD Edition").is_none());
+    }
+
+    #[test]
+    fn scan_selected_files_does_not_include_unselected_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = dir.path().join("Juego (Disco 1).chd");
+        let other = dir.path().join("Juego (Disco 2).chd");
+        std::fs::write(&chosen, b"one").unwrap();
+        std::fs::write(&other, b"two").unwrap();
+        let result = scan_local(&[chosen], false);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].stem, "Juego (Disco 1)");
+    }
+
+    #[test]
+    fn compressed_discs_are_recognized_in_selected_files_and_directory_scans() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip = dir.path().join("Juego (Disc 1).ZIP");
+        let seven_zip = dir.path().join("Juego (Disc 2).7z");
+        std::fs::write(&zip, b"example").unwrap();
+        std::fs::write(&seven_zip, b"example").unwrap();
+        assert_eq!(scan_local(&[zip.clone(), seven_zip.clone()], false).len(), 2);
+        assert_eq!(scan_local(&[dir.path().to_path_buf()], false).len(), 2);
+        assert!(raw_file_from_remote_path("remote://session/Juego (Disc 1).zip").is_some());
+        assert!(raw_file_from_remote_path("remote://session/Juego (Disc 2).7z").is_some());
+    }
+}
+
 // ------------------------------------------------------------------
 // M3U content generation
 // ------------------------------------------------------------------
@@ -382,7 +442,7 @@ pub fn generate_all_local(
             Err(e) if e.to_string() == "exists" => skipped.push(group.output_path.clone()),
             Err(e) => failed.push(M3uFailureDto {
                 path: group.output_path.clone(),
-                error: e.to_string(),
+                error: crate::ops::format_operation_error(&e),
             }),
         }
     }

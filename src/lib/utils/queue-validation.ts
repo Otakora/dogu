@@ -1,6 +1,6 @@
 import type { QueuedOp } from "../types/index.js";
 
-export type RequiredOutput = { requested: string; expected: string };
+export type RequiredOutput = { requested: string; expected: string; allowExisting?: boolean };
 
 /** Do not let a dependent step consume a stale or guessed output path. */
 export async function executeWithOutputChecks(
@@ -12,11 +12,11 @@ export async function executeWithOutputChecks(
 ): Promise<boolean> {
   if (op.fixedOutputs && !op.overwrite) {
     for (const output of outputs) {
-      if (await exists(output.expected)) throw new Error(messages.uncertain(output.expected));
+      if (!output.allowExisting && await exists(output.expected)) throw new Error(messages.uncertain(output.expected));
     }
   } else if (op.renameOnConflict && !op.overwrite) {
     for (const output of outputs) {
-      if (await exists(output.requested)) throw new Error(messages.uncertain(output.requested));
+      if (!output.allowExisting && await exists(output.requested)) throw new Error(messages.uncertain(output.requested));
     }
   }
   if (!await execute()) return false;

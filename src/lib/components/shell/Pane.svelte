@@ -9,6 +9,8 @@
 
   type Props = {
     paneIdx: number;
+    titlebar?: boolean;
+    windowControls?: boolean;
     onDelete: (paths: string[]) => void;
     onCopy: (paths: string[]) => void;
     onCut: (paths: string[]) => void;
@@ -21,13 +23,14 @@
     onCompress: (paths: string[]) => void;
     onChd: (paths: string[]) => void;
     onDiscImage: (mode: DiscImageMode, paths: string[]) => void;
-    onM3u: (paths: string[]) => void;
+    onM3u: (paths: string[], currentOnly?: boolean, allowSingle?: boolean) => void;
     onProperties: (paths: string[]) => void;
     onOpenWith: (path: string) => void;
   };
 
   let {
     paneIdx,
+    titlebar = false, windowControls = false,
     onDelete, onCopy, onCut, onPaste,
     onDropItems,
     onExtractHere, onExtractToFolder, onExtractTo,
@@ -66,7 +69,7 @@
   onmousedown={() => app.focusPane(paneIdx)}
   onfocusin={() => app.focusPane(paneIdx)}
 >
-  <TabBar />
+  <TabBar {titlebar} {windowControls} />
 
   <Toolbar
     onRefresh={() => refresh()}

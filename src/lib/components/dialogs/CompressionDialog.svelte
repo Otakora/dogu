@@ -18,7 +18,7 @@
     sources: string[];
     capabilities: CompressionCapabilitiesDto;
     onclose: () => void;
-    onCompress: (sources: string[], opts: CompressionOptionsPayload) => void;
+    onCompress: (sources: string[], opts: CompressionOptionsPayload) => boolean;
   };
 
   let { sources, capabilities, onclose, onCompress }: Props = $props();
@@ -119,8 +119,7 @@
       remoteDestination: remoteDest,
       remoteTransfer: isRemoteDest ? { onError } : null,
     };
-    onCompress(sources, opts);
-    onclose();
+    if (onCompress(sources, opts)) onclose();
   }
 
   const compressLabel = $derived(

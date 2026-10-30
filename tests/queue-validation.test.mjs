@@ -41,3 +41,12 @@ test("a fixed CHD refuses a destination created externally before execution", as
   await assert.rejects(executeWithOutputChecks(fixed, [{ requested: "/file.chd", expected: "/file (1).chd" }], async () => true, msg, async () => { executed = true; return true; }), /uncertain/);
   assert.equal(executed, false);
 });
+
+test("a shared destination may already exist but must exist after extraction", async () => {
+  const fixed = { fixedOutputs: [{ path: "/games/Game" }], overwrite: false };
+  const folder = [{ requested: "/games/Game", expected: "/games/Game", allowExisting: true }];
+  let executed = false;
+  assert.equal(await executeWithOutputChecks(fixed, folder, async () => true, msg, async () => { executed = true; return true; }), true);
+  assert.equal(executed, true);
+  await assert.rejects(executeWithOutputChecks(fixed, folder, async () => false, msg, async () => true), /missing/);
+});

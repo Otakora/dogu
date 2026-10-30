@@ -1,7 +1,7 @@
 {
   "name": "dogu",
   "private": true,
-  "version": "0.2.6-beta.1",
+  "version": "0.2.6-beta.2",
   "description": "A practical desktop file workbench for local files, remotes and queued operations.",
   "license": "GPL-2.0-or-later",
   "homepage": "https://github.com/Otakora/dogu",
@@ -20,7 +20,7 @@
     "dev": "node ./node_modules/vite/bin/vite.js --host 127.0.0.1 --port 1420",
     "build": "node ./node_modules/typescript/bin/tsc && node ./node_modules/vite/bin/vite.js build",
     "check": "node ./node_modules/svelte-check/bin/svelte-check --tsconfig ./tsconfig.json",
-    "test:queue": "node --test tests/queue-planning.test.mjs tests/queue-runner.test.mjs tests/queue-validation.test.mjs",
+    "test:queue": "node --test tests/queue-planning.test.mjs tests/queue-runner.test.mjs tests/queue-validation.test.mjs tests/windows-paths.test.mjs",
     "tauri:dev": "node ./scripts/tauri-dev.mjs",
     "tauri:build": "node ./node_modules/@tauri-apps/cli/tauri.js build",
     "updater:generate-dev-key": "node ./scripts/generate-updater-dev-key.mjs"

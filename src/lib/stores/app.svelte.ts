@@ -32,6 +32,7 @@ import { collectAccentIssues, isAccentUnsafeKind } from "../utils/ascii.js";
 import { translations } from "../i18n/translations.js";
 import { runQueue, restoreUnfinished, canRetryFailedJob } from "../utils/queue-runner.js";
 import { executeWithOutputChecks } from "../utils/queue-validation.js";
+import { isLongPathError, firstLongWindowsPath } from "../utils/windows-paths.js";
 
 // Per-tab vertical scroll memory, keyed by `${tabId}::${normalizedPath}`. Kept
 // outside reactive state (a plain Map) so frequent scroll writes cause no churn.
@@ -158,7 +159,7 @@ export type PaneView = {
   setLoading(v: boolean): void;
   // Rename
   readonly renaming: RenameState | null;
-  startRename(path: string, value: string): void;
+  startRename(path: string, value: string, immediate?: boolean): void;
   cancelRename(): void;
 };
 
@@ -220,6 +221,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   locale: "en",
   fontScale: 1,
   compactUi: false,
+  animationsEnabled: true,
   defaultViewMode: "list",
   defaultContentZoom: 1,
   defaultTreeZoom: 1,
@@ -806,9 +808,9 @@ function createAppState() {
 
       // Rename
       get renaming() { return t()?.renaming ?? null; },
-      startRename(path: string, value: string) {
+      startRename(path: string, value: string, immediate = false) {
         const tab = t();
-        if (tab) tab.renaming = { path, value };
+        if (tab) tab.renaming = { path, value, immediate };
       },
       cancelRename() {
         const tab = t();
@@ -818,6 +820,7 @@ function createAppState() {
   }
 
   function pushNotification(kind: NotificationKind, text: string) {
+    if (kind === "error" && isLongPathError(text)) text = translations[settings.locale]["pathTooLong.execution"].replace("{error}", text.replace("[PATH_TOO_LONG] ", ""));
     const n = makeNotification(kind, text);
     notifications = [n, ...notifications].slice(0, 8);
     if (kind !== "error" && kind !== "warn") {
@@ -1218,7 +1221,8 @@ function createAppState() {
       const idx = jobs.findIndex(j => j.id === jobId);
       if (idx === -1) return;
       const job = jobs[idx];
-      const resultMessage = message
+      const detail = isLongPathError(message) ? translations[settings.locale]["pathTooLong.execution"].replace("{error}", message.replace("[PATH_TOO_LONG] ", "")) : message;
+      const resultMessage = detail
         || (success ? (job.statusMessageOnSuccess ?? "") : (job.statusMessageOnFailure ?? ""));
       if (!success && resultMessage.startsWith("[REQUIRES_REVIEW]") && job.retryQueuedOp) {
         job.retryQueuedOp.requiresReview = resultMessage.replace("[REQUIRES_REVIEW] ", "");
@@ -1443,6 +1447,9 @@ function createAppState() {
     async executeQueue(mode: QueueExecutionMode) {
       const ops = opQueue.map((op, index) => ({ ...op, originalStep: op.originalStep ?? index + 1 }));
       if (ops.length === 0 || queueRunning || failedQueueRetryRunning || ops.some(op => op.requiresReview)) return;
+      const planned = resolveQueueOutputs(ops, queueKnownPaths);
+      const longPath = firstLongWindowsPath(ops.flatMap(op => [...op.sources, ...op.destinations, ...(planned.get(op.id) ?? op.produces).map(g => g.path)]));
+      if (longPath) { pushNotification("error", translations[settings.locale]["pathTooLong.preflight"].replace("{path}", longPath)); return; }
       const effectiveMode: QueueExecutionMode = mode === "parallel" ? "smart" : mode;
       const maxConcurrent = clampQueueMaxConcurrent(settings.queueMaxConcurrent);
       const knownPaths = [...queueKnownPaths];
@@ -1540,11 +1547,7 @@ function createAppState() {
     // ── Notifications ─────────────────────────────────────────
     get notifications() { return notifications; },
     notify(kind: NotificationKind, text: string) {
-      const n = makeNotification(kind, text);
-      notifications = [n, ...notifications].slice(0, 8);
-      if (kind !== "error" && kind !== "warn") {
-        setTimeout(() => { notifications = notifications.filter(x => x.id !== n.id); }, 4000);
-      }
+      pushNotification(kind, text);
     },
     dismissNotification(id: string) {
       notifications = notifications.filter(x => x.id !== id);

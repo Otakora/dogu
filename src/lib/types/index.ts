@@ -170,9 +170,10 @@ export type SummaryOptionsPayload = {
 export type ExtractionOptionsPayload = {
   plannedFolderName?: string | null;
   plannedEntries?: { from: string; to: string; isDir: boolean }[] | null;
+  sharedFolderName?: string | null;
   individualFolders: boolean;
   splitEntries: boolean;
-  destinationMode: 'same' | 'custom';
+  destinationMode: 'same' | 'parent' | 'custom';
   destinationPath: string | null;
   deleteArchives: boolean;
   overwrite: boolean;
@@ -389,6 +390,7 @@ export type AppSettings = {
   locale: Locale;
   fontScale: number;
   compactUi: boolean;
+  animationsEnabled: boolean;
   defaultViewMode: ViewMode;
   defaultContentZoom: number;
   defaultTreeZoom: number;
@@ -449,6 +451,7 @@ export type ProgressState = {
 };
 
 export type RenameState = {
+  immediate?: boolean;
   path: string;
   value: string;
 };
@@ -562,6 +565,8 @@ export type GhostEntry = {
   format: string;
   /** True when the exact name/format/type isn't guaranteed until the op runs. */
   approximate: boolean;
+  /** A reusable destination directory, which may already exist or be shared by several operations. */
+  sharedDirectory?: boolean;
   /** Id of the queued op that will produce this entry. */
   producedByOpId: string;
 };

@@ -98,6 +98,19 @@
           </div>
 
           <div class="setting-row">
+            <div class="setting-name-block">
+              <span class="setting-name">{t("settingsDialog.animations")}</span>
+              <span class="setting-hint">{t("settingsDialog.animationsHint")}</span>
+            </div>
+            <label class="setting-switch">
+              <input class="setting-switch-input" type="checkbox" checked={app.settings.animationsEnabled}
+                onchange={(e) => app.updateSettings({ animationsEnabled: (e.target as HTMLInputElement).checked })}
+                aria-label={t("settingsDialog.animations")} />
+              <span class="setting-switch-track" aria-hidden="true"><span class="setting-switch-thumb"></span></span>
+            </label>
+          </div>
+
+          <div class="setting-row">
             <span class="setting-name">{t("settingsDialog.fontScale")}</span>
             <div class="setting-row-right">
               <input

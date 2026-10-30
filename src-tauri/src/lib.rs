@@ -26,6 +26,14 @@ pub fn run() {
         .manage(updates::PendingUpdate::new())
         .setup(|app| {
             let _ = app.handle();
+            // Keep native decorations on Linux until window-manager behaviour
+            // can be validated across X11 and Wayland.
+            #[cfg(target_os = "windows")]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = window.set_decorations(false) {
+                    eprintln!("Could not enable the custom window frame: {error}");
+                }
+            }
             let remote_state = remote::RemoteState::new(&app.handle())?;
             app.manage(remote_state);
             // Clean up temp dirs left by any previous session that crashed or was force-killed.
@@ -36,6 +44,7 @@ pub fn run() {
             commands::list_children,
             commands::inspect_path,
             commands::queue_path_exists,
+            commands::preview_transfer_paths,
             commands::search_entries,
             commands::summarize_paths,
             commands::create_folder,

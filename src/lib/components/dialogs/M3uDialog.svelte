@@ -13,6 +13,7 @@
   import DestinationField from "./DestinationField.svelte";
   import { t } from "../../i18n/index.js";
   import { app } from "../../stores/app.svelte.js";
+  import { firstLongWindowsPath, isLongPathError } from "../../utils/windows-paths.js";
 
   let customDestLabel = $state<string | null>(null);
 
@@ -20,6 +21,8 @@
     dirs: string[];
     /** The folder currently open in the app — used for the "currentDir" output option. */
     currentDir?: string;
+    currentOnly?: boolean;
+    allowSingle?: boolean;
     onclose: () => void;
     /**
      * Called instead of running immediately when queue mode is on. Receives the
@@ -30,15 +33,15 @@
       groups: Array<{ outputPath: string; baseName: string; absoluteEntries: string[] }>,
       useRelativePaths: boolean,
       overwrite: boolean,
-    ) => void;
+    ) => boolean;
   };
 
-  let { dirs, currentDir = "", onclose, onEnqueue }: Props = $props();
+  let { dirs, currentDir = "", currentOnly = false, allowSingle = false, onclose, onEnqueue }: Props = $props();
 
   // ── Options ───────────────────────────────────────────────
   let opts = $state<M3uScanOptions>({
-    multiDiscOnly: true,
-    recursive: true,
+    multiDiscOnly: untrack(() => !allowSingle),
+    recursive: untrack(() => !currentOnly),
     // Default to currentDir when we know where we are; scanRoot otherwise.
     outputLocation: untrack(() => currentDir ? "currentDir" : "scanRoot"),
     customOutputPath: untrack(() => currentDir || null),
@@ -99,13 +102,15 @@
   async function generate() {
     const toGenerate = groups.filter((g) => selectedIds.has(g.id));
     if (toGenerate.length === 0) return;
+    const longPath = firstLongWindowsPath(toGenerate.flatMap(g => [g.outputPath, ...g.entries.map(e => e.absolutePath)]));
+    if (longPath) { app.notify("error", t("pathTooLong.preflight", { path: longPath })); return; }
 
     const payload = buildPayload(toGenerate);
 
     // Queue mode: hand the op to the caller (which shows a .m3u ghost) instead
     // of generating right away.
     if (app.queueMode && onEnqueue) {
-      onEnqueue(
+      if (!onEnqueue(
         toGenerate.map((g) => ({
           outputPath: g.outputPath,
           baseName: g.baseName,
@@ -113,7 +118,7 @@
         })),
         opts.useRelativePaths,
         overwrite,
-      );
+      )) return;
       onclose();
       return;
     }
@@ -121,6 +126,7 @@
     phase = "generating";
     try {
       result = await invoke<M3uGenerateResultDto>("generate_m3u_files", { payload });
+      result = { ...result, failed: result.failed.map(f => ({ ...f, error: isLongPathError(f.error) ? t("pathTooLong.execution", { error: f.error.replace("[PATH_TOO_LONG] ", "") }) : f.error })) };
       phase = "done";
     } catch (e) {
       scanError = String(e);

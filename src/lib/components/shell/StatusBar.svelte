@@ -5,11 +5,22 @@
   const visibleJobs = $derived(app.jobs.filter(j => !j.retried));
   const job = $derived(visibleJobs.find(j => j.paused) ?? visibleJobs.find(j => j.done && !j.success) ?? visibleJobs.find(j => !j.done) ?? visibleJobs[0]);
   const running = $derived(app.jobs.filter(j => !j.done).length);
+  const queueStats = $derived(app.queueRunning ? app.queueRunStats : null);
 </script>
 
 <div class="global-status" role="toolbar" aria-label={t("status.openOperations")}>
-  <button class="activity" class:activity--error={!!job && (job.paused || (job.done && !job.success))}
-    onclick={() => app.openJobsPanel()} title={job?.resultMessage || job?.pauseError || t("status.openOperations")}>
+  <button class="activity" class:activity--error={queueStats ? queueStats.failed > 0 : !!job && (job.paused || (job.done && !job.success))}
+    onclick={() => app.toggleJobsPanel()} aria-expanded={app.jobsPanelOpen} title={app.jobsPanelOpen ? t("status.closeOperations") : queueStats ? t("queue.executionTitle") : job?.resultMessage || job?.pauseError || t("status.openOperations")}>
+    {#if queueStats}
+      <span class="activity-spinner" aria-hidden="true"></span>
+      <span class="activity-text"><strong>{t("queue.executionTitle")}</strong> · {t("queue.stats.completed", { completed: queueStats.completed, total: queueStats.total })}</span>
+      <span class="status-queue-progress" role="progressbar" aria-label={t("queue.overallProgress")} aria-valuemin="0" aria-valuemax={queueStats.total} aria-valuenow={queueStats.completed}>
+        <span style:width="{queueStats.total ? Math.round(queueStats.completed / queueStats.total * 100) : 0}%"></span>
+      </span>
+      {#if queueStats.running}<span class="activity-extra">{t("queue.stats.running", { count: queueStats.running })}</span>{/if}
+      {#if queueStats.failed}<span class="activity-extra status-failed">{t("queue.countFailed", { count: queueStats.failed })}</span>{/if}
+      {#if queueStats.skipped}<span class="activity-extra status-failed">{t("queue.countBlocked", { count: queueStats.skipped })}</span>{/if}
+    {:else}
     {#if job && !job.done && !job.paused}<span class="activity-spinner" aria-hidden="true"></span>
     {:else if job && (job.paused || !job.success)}<span class="activity-error" aria-hidden="true">!</span>
     {:else}<span class="activity-dot" aria-hidden="true"></span>{/if}
@@ -17,6 +28,7 @@
     {#if job && !job.done && !job.paused}<span class="activity-percent">{Math.round(job.progress)}%</span>{/if}
     {#if running > 1}<span class="activity-extra">{t("status.multiple", { count: running - 1 })}</span>{/if}
     {#if app.opQueue.length}<span class="activity-extra">{app.opQueue.length}</span>{/if}
+    {/if}
   </button>
   <div class="global-controls">
     <button class="global-queue" class:global-queue--active={app.queueMode} onclick={() => app.toggleQueueMode()}
@@ -52,6 +64,9 @@
   .activity--error { color: var(--danger, #e5484d); }
   .activity-text { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .activity-percent, .activity-extra { flex-shrink: 0; font-size: 10px; }
+  .status-queue-progress { width: clamp(50px, 12vw, 180px); height: 4px; background: var(--line-strong); border-radius: 999px; overflow: hidden; flex-shrink: 1; }
+  .status-queue-progress > span { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }
+  .status-failed { color: var(--danger, #e5484d); }
   .activity-dot, .activity-error { width: 12px; text-align: center; flex-shrink: 0; }
   .activity-dot::after { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--text-subtle); }
   .activity-error { font-weight: 800; }

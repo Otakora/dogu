@@ -22,8 +22,8 @@
     analysis: SelectionAnalysisDto;
     initialMode?: Mode;
     onclose: () => void;
-    onConvert: (sources: ChdSourceDto[], opts: ChdConversionOptionsPayload) => void;
-    onRestore: (paths: string[], opts: ChdRestoreOptionsPayload) => void;
+    onConvert: (sources: ChdSourceDto[], opts: ChdConversionOptionsPayload) => boolean;
+    onRestore: (paths: string[], opts: ChdRestoreOptionsPayload) => boolean;
   };
 
   let { analysis, initialMode = "convert", onclose, onConvert, onRestore }: Props = $props();
@@ -193,7 +193,7 @@
         remoteDestination: convRemoteDest,
         remoteTransfer: isConvRemoteDest ? { onError: convOnError } : null,
       };
-      onConvert(validSources, opts);
+      if (!onConvert(validSources, opts)) return;
     } else {
       const opts: ChdRestoreOptionsPayload = {
         individualFolders: restIndividual,
@@ -213,7 +213,7 @@
         remoteDestination: restRemoteDest,
         remoteTransfer: isRestRemoteDest ? { onError: restOnError } : null,
       };
-      onRestore(analysis.restorableChds, opts);
+      if (!onRestore(analysis.restorableChds, opts)) return;
     }
     onclose();
   }

@@ -11,11 +11,13 @@
   import DestinationField from "./DestinationField.svelte";
   import { t } from "../../i18n/index.js";
   import { app } from "../../stores/app.svelte.js";
+  import { extractionDestination, stripDiscMarker } from "../../utils/extraction-ghosts.js";
+  import { basenameOf, joinPath, stemOf } from "../../utils/ghosts.js";
 
   type Props = {
     archives: string[];
     onclose: () => void;
-    onExtract: (archives: string[], opts: ExtractionOptionsPayload) => void;
+    onExtract: (archives: string[], opts: ExtractionOptionsPayload) => Promise<boolean>;
   };
 
   let { archives, onclose, onExtract }: Props = $props();
@@ -34,6 +36,19 @@
     remoteDestination: null,
     remoteTransfer: null,
   });
+
+  let createFolder = $state(false);
+  let folderSource = $state("archive");
+  let selectedArchive = $state(untrack(() => archives[0] ?? ""));
+  let customName = $state("");
+  let stripDiscSuffix = $state(false);
+  const folderName = $derived.by(() => {
+    let name = folderSource === "custom" ? customName.trim() : stemOf(basenameOf(selectedArchive));
+    if (stripDiscSuffix) name = stripDiscMarker(name);
+    return name;
+  });
+  const validFolderName = $derived(folderName.length > 0 && folderName !== "." && folderName !== ".." && !/[<>:"/\\|?*\x00-\x1f]/.test(folderName) && !/[. ]$/.test(folderName) && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(folderName));
+  const effectiveOpts = $derived({ ...opts, sharedFolderName: createFolder ? folderName : null });
 
   // Tracks the human-readable label for the current destination
   let destLabel = $state<string | null>(null);
@@ -112,7 +127,7 @@
     try {
       preview = await invoke<ExtractionPreviewRow[]>("build_extraction_preview", {
         archives,
-        options: opts,
+        options: effectiveOpts,
       });
     } catch (e) {
       preview = [];
@@ -122,9 +137,12 @@
     }
   }
 
-  function submit() {
-    onExtract(archives, opts);
-    onclose();
+  let submitting = $state(false);
+  async function submit() {
+    if (submitting) return;
+    submitting = true;
+    try { if (await onExtract(archives, effectiveOpts)) onclose(); }
+    finally { submitting = false; }
   }
 </script>
 
@@ -141,6 +159,11 @@
               onchange={() => { opts = { ...opts, destinationMode: "same", remoteDestination: null }; preflightResult = null; }}
             />
             {t("extractionDialog.sameFolderAsArchive")}
+          </label>
+          <label class="radio-label">
+            <input type="radio" checked={opts.destinationMode === "parent" && !isRemoteDest}
+              onchange={() => { opts = { ...opts, destinationMode: "parent", remoteDestination: null }; preflightResult = null; }} />
+            {t("extractionDialog.parentFolder")}
           </label>
           <label class="radio-label">
             <input
@@ -184,6 +207,38 @@
               {/each}
             {/if}
           {/if}
+        {/if}
+      </div>
+
+      <div class="ex-section">
+        <label class="checkbox-label">
+          <input type="checkbox" checked={createFolder} onchange={(event) => { createFolder = event.currentTarget.checked; if (createFolder) opts.individualFolders = false; }} />
+          {t("extractionDialog.createFolder")}
+        </label>
+        {#if createFolder}
+          <div class="folder-options">
+            <label class="radio-label">
+              <input type="radio" name="folder-source" checked={folderSource === "archive"} onchange={() => folderSource = "archive"} />
+              {t("extractionDialog.folderFromArchive")}
+            </label>
+            {#if folderSource === "archive" && archives.length > 1}
+              <select bind:value={selectedArchive} aria-label={t("extractionDialog.folderFromArchive")}>
+                {#each archives as archive}<option value={archive}>{basenameOf(archive)}</option>{/each}
+              </select>
+            {/if}
+            <label class="radio-label">
+              <input type="radio" name="folder-source" checked={folderSource === "custom"} onchange={() => folderSource = "custom"} />
+              {t("extractionDialog.folderCustom")}
+            </label>
+            {#if folderSource === "custom"}
+              <input class="folder-input" type="text" bind:value={customName} aria-label={t("extractionDialog.folderCustom")} />
+            {/if}
+            <label class="checkbox-label">
+              <input type="checkbox" bind:checked={stripDiscSuffix} />
+              {t("extractionDialog.stripDiscSuffix")}
+            </label>
+            <span class="ex-hint">{validFolderName ? t("extractionDialog.folderResult", { name: folderName }) : t("extractionDialog.invalidFolderName")}</span>
+          </div>
         {/if}
       </div>
 
@@ -239,7 +294,7 @@
                 <div class="ex-preview-archive">
                   <span class="ex-preview-src">{row.archivePath.split(/[\\/]/).pop()}</span>
                   <span class="ex-arrow">→</span>
-                  <span class="ex-preview-dst" title={row.destinationRoot}>{row.destinationRoot}</span>
+                  <span class="ex-preview-dst" title={row.archivePath.startsWith("remote://") ? (effectiveOpts.individualFolders ? joinPath(extractionDestination(row.archivePath, effectiveOpts), stemOf(basenameOf(row.archivePath))) : extractionDestination(row.archivePath, effectiveOpts)) : row.destinationRoot}>{row.archivePath.startsWith("remote://") ? (effectiveOpts.individualFolders ? joinPath(extractionDestination(row.archivePath, effectiveOpts), stemOf(basenameOf(row.archivePath))) : extractionDestination(row.archivePath, effectiveOpts)) : row.destinationRoot}</span>
                 </div>
                 {#each row.entries.slice(0, ENTRIES_PER_ARCHIVE_PREVIEW) as entry}
                   <div class="ex-preview-entry-row">
@@ -268,6 +323,8 @@
       onclick={submit}
       disabled={
         (opts.destinationMode === "custom" && !opts.destinationPath && !isRemoteDest)
+        || submitting
+        || (createFolder && !validFolderName)
         || (preflightResult != null && !preflightResult.ok)
       }
     >
@@ -324,6 +381,10 @@
     cursor: pointer;
     input { accent-color: var(--accent); }
   }
+
+  .folder-options { display: flex; flex-direction: column; gap: 7px; padding-left: 22px; }
+  .folder-options select, .folder-input { width: 100%; background: var(--surface-alt); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 6px; }
+  .folder-options .ex-hint { padding-left: 0; margin-top: 0; }
 
   .ex-preview-header {
     display: flex;

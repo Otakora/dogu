@@ -108,10 +108,12 @@ struct CachedDiskUsage {
 }
 
 #[derive(Clone)]
-struct ByteTransferProgress {
+pub(crate) struct ByteTransferProgress {
     app: AppHandle,
     job_id: String,
     total_bytes: u64,
+    base: f64,
+    span: f64,
     state: Arc<Mutex<ByteTransferProgressState>>,
 }
 
@@ -127,12 +129,21 @@ impl ByteTransferProgress {
             app: app.clone(),
             job_id: job_id.to_string(),
             total_bytes,
+            base: 0.0,
+            span: 1.0,
             state: Arc::new(Mutex::new(ByteTransferProgressState {
                 completed_bytes: 0,
                 last_emit_bytes: 0,
                 last_emit_at: None,
             })),
         }
+    }
+
+    pub(crate) fn ranged(app: &AppHandle, job_id: &str, total_bytes: u64, base: f64, span: f64) -> Self {
+        let mut progress = Self::new(app, job_id, total_bytes);
+        progress.base = base;
+        progress.span = span;
+        progress
     }
 
     fn add(&self, bytes: u64, message: &str) {
@@ -188,7 +199,7 @@ impl ByteTransferProgress {
 
     fn emit_locked(&self, state: &mut ByteTransferProgressState, message: &str, now: Instant) {
         let progress =
-            (state.completed_bytes as f64 / self.total_bytes.max(1) as f64).clamp(0.0, 1.0);
+            (self.base + self.span * state.completed_bytes as f64 / self.total_bytes.max(1) as f64).clamp(0.0, 1.0);
         let _ = ops::emit_progress(&self.app, &self.job_id, progress, message.to_string());
         state.last_emit_bytes = state.completed_bytes;
         state.last_emit_at = Some(now);
@@ -969,6 +980,10 @@ impl RemoteManager {
 
     pub fn upload_staged_no_overwrite(&self, app: &AppHandle, job_id: &str, local: &Path, remote_dest_dir: &str) -> Result<String> {
         self.upload_staged_checked(app, job_id, local, remote_dest_dir, None, false, None, None)
+    }
+
+    pub(crate) fn upload_staged_with_progress(&self, app: &AppHandle, job_id: &str, local: &Path, remote_dest_dir: &str, overwrite: bool, progress: &ByteTransferProgress) -> Result<String> {
+        self.upload_staged_checked(app, job_id, local, remote_dest_dir, None, overwrite, None, Some(progress))
     }
 
     fn upload_staged_checked(&self, app: &AppHandle, job_id: &str, local: &Path, remote_dest_dir: &str, baseline: Option<&Path>, overwrite: bool, target_name: Option<&str>, progress: Option<&ByteTransferProgress>) -> Result<String> {
@@ -2460,6 +2475,10 @@ impl RemoteManager {
         virtual_path: &str,
         local_dest_dir: &Path,
     ) -> Result<(PathBuf, u64)> {
+        self.download_file_to_dir_with_progress(virtual_path, local_dest_dir, None)
+    }
+
+    pub fn download_file_to_dir_with_progress(&self, virtual_path: &str, local_dest_dir: &Path, progress: Option<(&AppHandle, &str, f64, f64)>) -> Result<(PathBuf, u64)> {
         let (session_id, logical_path) = parse_remote_virtual_path(virtual_path)
             .ok_or_else(|| anyhow!("Ruta remota invalida: {virtual_path}"))?;
         let filename = logical_leaf_name(&logical_path);
@@ -2474,6 +2493,8 @@ impl RemoteManager {
 
         let mut session = self.get_session_mut(&session_id)?;
         let provider_path = session.resolve_provider_path(&logical_path);
+        let size = session.fs.stat(Path::new(&provider_path)).ok().map(|file| file.metadata().size).unwrap_or(0);
+        let progress = progress.map(|(app, job_id, base, span)| ByteTransferProgress::ranged(app, job_id, size, base, span));
         let mut stream = session.fs
             .open(Path::new(&provider_path))
             .map_err(|e| anyhow!(
@@ -2487,7 +2508,8 @@ impl RemoteManager {
                 e
             )
         })?;
-        let bytes_written = std::io::copy(&mut stream, &mut file)
+        let mut reader = ProgressReader::new(&mut stream, progress, format!("Descargando {filename}"));
+        let bytes_written = std::io::copy(&mut reader, &mut file)
             .map_err(|e| anyhow!("Error al transferir datos de '{}': {}", virtual_path, e))?;
         session.fs.on_read(stream).map_err(|e| {
             anyhow!(

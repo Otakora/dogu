@@ -38,8 +38,22 @@ vm.runInNewContext(compile(readFileSync(new URL("../src/lib/utils/queue-story.ts
 });
 const runnerExports = {};
 vm.runInNewContext(compile(readFileSync(new URL("../src/lib/utils/queue-runner.ts", import.meta.url), "utf8")), { exports: runnerExports });
+const selectionExports = {};
+vm.runInNewContext(compile(readFileSync(new URL("../src/lib/utils/selection.ts", import.meta.url), "utf8")), { exports: selectionExports });
 const ghost = (path, isDir = false) => ({ path, isDir, name: path.split("/").pop(), parentDir: "/", format: "", approximate: false, producedByOpId: "" });
 const op = (id, data = {}) => ({ id, sources: [], destinations: [], deletes: [], produces: [], dependsOn: [], overwrite: false, renameOnConflict: false, ...data });
+
+test("range selection includes visible ghosts in either direction", () => {
+  const paths = ["real", "ghost-a", "ghost-b", "real-b"];
+  assert.deepEqual(Array.from(selectionExports.visibleRange(paths, "ghost-b", "real")), paths.slice(0, 3));
+  assert.deepEqual(Array.from(selectionExports.visibleRange(paths, "real", "ghost-b")), paths.slice(0, 3));
+});
+
+test("control area selection adds to the original selection without accumulating old areas", () => {
+  const base = new Set(["real", "ghost"]);
+  assert.deepEqual(Array.from(selectionExports.mergeAreaSelection(base, ["ghost", "new"])), ["real", "ghost", "new"]);
+  assert.deepEqual(Array.from(selectionExports.mergeAreaSelection(base, ["other"])), ["real", "ghost", "other"]);
+});
 
 test("the queue story distinguishes an old file from its renamed successor", () => {
   const path = "remote://session-1/psx/Tekken.chd";
@@ -353,4 +367,43 @@ test("disc and CHD predictions honor explicit remote destinations", () => {
   }
   const chd = api.predictChdConvert(["remote://nas/dir/game.cue"], { ...opts, customName: null, nameAsContainer: false, depositToParent: false }, "op");
   assert.equal(chd[0].path, "remote://other/target/game.chd");
+});
+
+
+test("shared extraction folders use the selected base and preserve individual folders", () => {
+  const options = { destinationMode: "parent", destinationPath: null, sharedFolderName: "Game", individualFolders: true };
+  assert.equal(extractionExports.extractionDestination("C:\\roms\\set\\Game (Disc 1).zip", options), "C:\\roms\\Game");
+  assert.equal(extractionExports.extractionDestination("remote://session/roms/set/Game.zip", options), "remote://session/roms/Game");
+  assert.deepEqual(Array.from(extractionExports.extractionGhosts("remote://session/roms/set/Game.zip", options, "op"), g => g.path), ["remote://session/roms/Game", "remote://session/roms/Game/Game"]);
+  assert.equal(extractionExports.extractionDestination("/roms/set/Game.zip", { ...options, destinationMode: "custom", destinationPath: "/output" }), "/output/Game");
+});
+
+test("shared extraction folders remain visible and keep their names across local and remote batches", () => {
+  for (const [archive, base, rowRoot] of [
+    ["C:/roms/Disc 1.zip", "C:/roms/Game", "C:/roms/Game"],
+    ["remote://nas/roms/Disc 1.zip", "remote://nas/roms/Game", "C:/temp/Game"],
+  ]) {
+    const options = { destinationMode: "same", destinationPath: null, sharedFolderName: "Game", individualFolders: false };
+    const row = { destinationRoot: rowRoot, entries: [
+      { name: "disc.cue", isDir: false, destinationPath: `${rowRoot}/disc.cue` },
+      { name: "track.bin", isDir: false, destinationPath: `${rowRoot}/data/track.bin` },
+    ] };
+    const first = op("first", { kind: "extract", destinations: [base], produces: extractionExports.extractionGhosts(archive, options, "first", row), renameOnConflict: true });
+    const second = op("second", { kind: "extract", destinations: [base], produces: extractionExports.extractionGhosts(archive, options, "second", { ...row, entries: [{ name: "other.cue", isDir: false, destinationPath: `${rowRoot}/other.cue` }] }), renameOnConflict: true });
+    const resolved = planner.resolveQueueOutputs([first, second], [base]);
+    assert.deepEqual(Array.from(resolved.get("first"), g => g.path), [base, `${base}/disc.cue`, `${base}/data/track.bin`]);
+    assert.deepEqual(Array.from(resolved.get("second"), g => g.path), [base, `${base}/other.cue`]);
+    assert.equal(planner.detectConflicts([first, second], [base]).length, 0);
+    const consumer = op("consumer", { sources: [base] });
+    assert.deepEqual(Array.from(planner.linkDependencies(consumer, [first, second])), ["first", "second"]);
+    assert.equal(planner.requiredOutputs([first, { ...consumer, dependsOn: ["first"] }]).get("first")[0].allowExisting, true);
+  }
+});
+
+test("disc markers are removed only from the end of a folder name", () => {
+  for (const marker of ["(Disc 1)", "(CD1)", "(Disk 1)", "(CD 1)", "[disc 2]"]) {
+    assert.equal(extractionExports.stripDiscMarker(`Game (Europe) ${marker}`), "Game (Europe)");
+  }
+  assert.equal(extractionExports.stripDiscMarker("Game (Disc 1) (Europe)"), "Game (Disc 1) (Europe)");
+  assert.equal(extractionExports.stripDiscMarker("Game (CD soundtrack)"), "Game (CD soundtrack)");
 });

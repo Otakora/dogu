@@ -179,6 +179,8 @@ pub struct ExtractionOptionsPayload {
     pub planned_folder_name: Option<String>,
     #[serde(default)]
     pub planned_entries: Option<Vec<PlannedExtractionEntry>>,
+    #[serde(default)]
+    pub shared_folder_name: Option<String>,
     pub individual_folders: bool,
     pub split_entries: bool,
     pub destination_mode: String,

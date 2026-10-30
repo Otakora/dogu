@@ -114,7 +114,7 @@ export function resolveQueueOutputs(ops: QueuedOp[], knownPaths: string[] = []):
       const mapping = directoryMappings.filter(dir => normalizePath(g.path).startsWith(normalizePath(dir.original) + "/"))
         .sort((a, b) => b.original.length - a.original.length)[0];
       let path = fixed?.path ?? (mapping ? mapping.actual + g.path.slice(mapping.original.length) : g.path);
-      if (!fixed && taken.has(normalizePath(path)) && !op.overwrite && op.renameOnConflict) {
+      if (!fixed && !g.sharedDirectory && taken.has(normalizePath(path)) && !op.overwrite && op.renameOnConflict) {
         path = uniqueDisplayPath(path, taken);
       }
       if (g.isDir && normalizePath(path) !== normalizePath(g.path)) directoryMappings.push({ original: g.path, actual: path });
@@ -153,8 +153,8 @@ export function detectConflicts(ops: QueuedOp[], knownPaths: string[] = []): Que
       // Reserve the requested names, not only their predicted renamed names:
       // the backend chooses unique names at execution time and concurrent
       // existence checks are not atomic.
-      for (const pa of a.produces.map(g => g.path)) {
-        for (const pb of b.produces.map(g => g.path)) {
+      for (const pa of a.produces.filter(g => !g.sharedDirectory).map(g => g.path)) {
+        for (const pb of b.produces.filter(g => !g.sharedDirectory).map(g => g.path)) {
           const sameName = normalizePath(pa) === normalizePath(pb);
           // Only reserve names that the other operation can actually choose.
           // Sharing a folder does not make unrelated filenames collide.
@@ -165,8 +165,8 @@ export function detectConflicts(ops: QueuedOp[], knownPaths: string[] = []): Que
       }
       // No preview means extraction outputs are unknown. Be conservative when
       // another operation writes into that same tree, regardless of renaming.
-      const unknownA = a.kind === "extract" && a.produces.length === 0;
-      const unknownB = b.kind === "extract" && b.produces.length === 0;
+      const unknownA = a.kind === "extract" && !a.produces.some(g => !g.sharedDirectory);
+      const unknownB = b.kind === "extract" && !b.produces.some(g => !g.sharedDirectory);
       if (unknownA || unknownB) {
         const pathsA = unknownA ? a.destinations : a.produces.map(g => g.path);
         const pathsB = unknownB ? b.destinations : b.produces.map(g => g.path);
@@ -370,12 +370,12 @@ export function buildQueuePlan(ops: QueuedOp[], conflicts: QueueConflict[], maxC
 
 
 /** Paths a producer must create for the inputs of its queued consumers. */
-export function requiredOutputs(ops: QueuedOp[], knownPaths: string[] = []): Map<string, Array<{ requested: string; expected: string }>> {
+export function requiredOutputs(ops: QueuedOp[], knownPaths: string[] = []): Map<string, Array<{ requested: string; expected: string; allowExisting?: boolean }>> {
   const resolved = resolveQueueOutputs(ops, knownPaths);
-  const result = new Map<string, Array<{ requested: string; expected: string }>>();
+  const result = new Map<string, Array<{ requested: string; expected: string; allowExisting?: boolean }>>();
   for (const producer of ops) {
     if (producer.fixedOutputs?.length) {
-      result.set(producer.id, producer.fixedOutputs.flatMap((output, index) => output.approximate ? [] : [{ requested: producer.produces[index].path, expected: output.path }]));
+      result.set(producer.id, producer.fixedOutputs.flatMap((output, index) => output.approximate ? [] : [{ requested: producer.produces[index].path, expected: output.path, ...(output.sharedDirectory ? { allowExisting: true } : {}) }]));
     }
   }
   for (const consumer of ops) {
@@ -394,7 +394,7 @@ export function requiredOutputs(ops: QueuedOp[], knownPaths: string[] = []): Map
         if (!used) continue;
         const entries = result.get(depId) ?? [];
         if (!entries.some(entry => normalizePath(entry.expected) === outputKey)) {
-          entries.push({ requested: producer.produces[index].path, expected: output.path });
+          entries.push({ requested: producer.produces[index].path, expected: output.path, ...(output.sharedDirectory ? { allowExisting: true } : {}) });
           result.set(depId, entries);
         }
       }

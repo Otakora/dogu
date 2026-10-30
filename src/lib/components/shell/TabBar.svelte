@@ -5,6 +5,9 @@
   import { t } from "../../i18n/index.js";
   import ContextMenu from "../ui/ContextMenu.svelte";
   import type { MenuItem } from "../ui/ContextMenu.svelte";
+  import WindowControls from "./WindowControls.svelte";
+
+  let { titlebar = false, windowControls = false }: { titlebar?: boolean; windowControls?: boolean } = $props();
 
   const pane = getContext<PaneView>("pane");
 
@@ -267,7 +270,11 @@
         <path d="M7 1.5V12.5M1.5 7H12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       </svg>
     </button>
+    {#if titlebar}
+      <div class="tab-drag-space" data-tauri-drag-region aria-hidden="true"></div>
+    {/if}
   </div>
+  {#if windowControls}<WindowControls />{/if}
 </div>
 
 {#if contextMenu}
@@ -313,6 +320,7 @@
 
     &::-webkit-scrollbar { display: none; }
   }
+  .tab-drag-space { min-width: 35px; flex: 1 0 35px; }
 
   .drop-indicator {
     flex-shrink: 0;

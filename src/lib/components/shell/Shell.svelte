@@ -1,6 +1,7 @@
 <script lang="ts">
   import { runTransferBatch } from "../../utils/transfer-batch.js";
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { listen } from "@tauri-apps/api/event";
   import { onMount, onDestroy } from "svelte";
   import { app } from "../../stores/app.svelte.js";
@@ -45,6 +46,8 @@
   } from "../../utils/ghosts.js";
   import { extractionDestination, extractionGhosts } from "../../utils/extraction-ghosts.js";
   import { predictedCueTracks, predictsEmptyGhostContainer } from "../../utils/chd-ghosts.js";
+  import { firstLongWindowsPath } from "../../utils/windows-paths.js";
+  import { resolveQueueOutputs } from "../../utils/queue-plan.js";
 
   import Sidebar from "./Sidebar.svelte";
   import Pane from "./Pane.svelte";
@@ -53,6 +56,7 @@
   import { openTerminalAt } from "../../utils/terminal.js";
   import JobsPanel from "../dialogs/JobsPanel.svelte";
   import StatusBar from "./StatusBar.svelte";
+  import WindowResizeHandles from "./WindowResizeHandles.svelte";
   import ConfirmDialog from "../dialogs/ConfirmDialog.svelte";
   import SettingsDialog from "../dialogs/SettingsDialog.svelte";
   import UpdateDialog from "../dialogs/UpdateDialog.svelte";
@@ -85,24 +89,48 @@
 
   // ── Sidebar resize ────────────────────────────────────────
   let sidebarWidth = $state(220);
+  let customTitlebar = $state(false);
+  let resizeCursor = $state<"col" | "row" | null>(null);
+  $effect(() => {
+    document.documentElement.classList.toggle("dogu-no-motion", !app.settings.animationsEnabled);
+  });
 
   function startSidebarResize(e: MouseEvent) {
     e.preventDefault();
+    resizeCursor = "col";
     const startX = e.clientX;
     const startW = sidebarWidth;
+    // Mouse coordinates are measured after CSS zoom, while sidebarWidth is not.
+    // Measure the actual scale so the divider stays under the pointer at any
+    // application font size, just as the percentage-based pane divider does.
+    const shell = (e.currentTarget as HTMLElement).parentElement;
+    const scale = shell && shell.offsetWidth > 0
+      ? shell.getBoundingClientRect().width / shell.offsetWidth
+      : 1;
+    let nextWidth = startW;
+    let frame = 0;
 
     function onMove(ev: MouseEvent) {
-      sidebarWidth = Math.max(140, Math.min(500, startW + (ev.clientX - startX)));
+      nextWidth = Math.max(140, Math.min(500, startW + (ev.clientX - startX) / (scale || 1)));
+      if (!frame) frame = requestAnimationFrame(() => {
+        sidebarWidth = nextWidth;
+        frame = 0;
+      });
     }
 
     function onUp() {
+      if (frame) cancelAnimationFrame(frame);
+      sidebarWidth = nextWidth;
+      resizeCursor = null;
       localStorage.setItem("dogu-sidebar-width", String(sidebarWidth));
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
     }
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onUp);
   }
 
   function resizeSidebarWithKeyboard(e: KeyboardEvent) {
@@ -133,21 +161,33 @@
     e.preventDefault();
     const orientation = app.splitOrientation;
     const stacked = orientation === "stacked";
+    resizeCursor = stacked ? "row" : "col";
     const start = stacked ? e.clientY : e.clientX;
     const startPct = splitPercent;
     const rect = paneAreaEl?.getBoundingClientRect();
     const size = Math.max(1, stacked ? (rect?.height ?? 800) : (rect?.width ?? 800));
+    let nextPercent = startPct;
+    let frame = 0;
     function onMove(ev: MouseEvent) {
       const current = stacked ? ev.clientY : ev.clientX;
-      setSplitPercent(startPct + (current - start) / size * 100, orientation);
+      nextPercent = startPct + (current - start) / size * 100;
+      if (!frame) frame = requestAnimationFrame(() => {
+        setSplitPercent(nextPercent, orientation);
+        frame = 0;
+      });
     }
     function onUp() {
+      if (frame) cancelAnimationFrame(frame);
+      setSplitPercent(nextPercent, orientation);
+      resizeCursor = null;
       persistSplitPercent(orientation);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
     }
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onUp);
   }
 
   function resizePaneWithKeyboard(e: KeyboardEvent) {
@@ -169,6 +209,8 @@
   let discImageState = $state<{ mode: DiscImageMode; sources: string[] } | null>(null);
   let toolScreenOpen = $state(false);
   let m3uDirs = $state<string[] | null>(null);
+  let m3uCurrentOnly = $state(false);
+  let m3uAllowSingle = $state(false);
 
   // ── Job / queue ID counters ───────────────────────────────
   let _jobSeq = 0;
@@ -188,7 +230,17 @@
     return { ...op, batchId, batchTitle, batchIndex: index, batchTotal: total };
   }
 
+  function checkOperationPaths(ops: QueuedOp[]): boolean {
+    const known = app.panes.flatMap(pane => pane.tabs.flatMap(tab => tab.entries.filter(entry => !entry.isGhost).map(entry => entry.path)));
+    const resolved = resolveQueueOutputs([...app.opQueue, ...ops], known);
+    const path = firstLongWindowsPath(ops.flatMap(op => [...op.sources, ...op.destinations, ...(resolved.get(op.id) ?? op.produces).map(g => g.path)]));
+    if (!path) return true;
+    app.notify("error", t("pathTooLong.preflight", { path }));
+    return false;
+  }
+
   function enqueueOrRun(op: QueuedOp) {
+    if (!checkOperationPaths([op])) return;
     if (app.queueMode) {
       app.addToQueue(op);
       app.notify("info", t("queue.operationQueued"));
@@ -199,6 +251,7 @@
 
   function enqueueOps(ops: QueuedOp[]) {
     if (ops.length === 0) return;
+    if (!checkOperationPaths(ops)) return;
     for (const op of ops) app.addToQueue(op);
     app.notify("info", ops.length === 1
       ? t("queue.operationQueued")
@@ -209,6 +262,7 @@
   const unlisten: Array<() => void> = [];
 
   onMount(async () => {
+    try { customTitlebar = !(await getCurrentWindow().isDecorated()); } catch { customTitlebar = false; }
     const stored = localStorage.getItem("dogu-sidebar-width");
     if (stored && Number.isFinite(Number(stored))) sidebarWidth = Math.max(140, Math.min(500, Number(stored)));
 
@@ -356,13 +410,25 @@
   }
 
   // ── Rename commit ─────────────────────────────────────────
-  function handleRenameCommitRaw(e: Event) {
-    const { path, newName } = (e as CustomEvent<{ path: string; newName: string }>).detail;
+  async function handleRenameCommitRaw(e: Event) {
+    const { path, newName, immediate } = (e as CustomEvent<{ path: string; newName: string; immediate?: boolean }>).detail;
     const name = newName.trim();
-    app.cancelRename();
     if (!name || name === "." || name === ".." || /[\\/\x00]/.test(name)) { app.notify("error", t("shell.invalidRename")); return; }
-    if (name === basenameOf(path)) return;
-    if (!app.queueMode && !isQueueBackedPath(path)) {
+    if (name === basenameOf(path)) { app.cancelRename(); return; }
+    const tooLong = firstLongWindowsPath([joinPath(dirnameOf(path), name)]);
+    if (tooLong) { app.notify("error", t("pathTooLong.preflight", { path: tooLong })); return; }
+    if (/^(?:[a-z]:[\\/]|\\\\)/i.test(path)) {
+      try {
+        const target = joinPath(dirnameOf(path), name);
+        const projected = isQueueBackedPath(path)
+          ? app.queueGhosts.filter(g => normalizePath(g.path).startsWith(normalizePath(path) + "/")).map(g => joinPath(target, g.path.slice(path.length).replace(/^[/\\]+/, "")))
+          : await invoke<string[]>("preview_transfer_paths", { sources: [path], destination: dirnameOf(path), targetName: name });
+        const descendant = firstLongWindowsPath(projected);
+        if (descendant) { app.notify("error", t("pathTooLong.preflight", { path: descendant })); return; }
+      } catch (error) { app.notify("error", String(error)); return; }
+    }
+    app.cancelRename();
+    if ((immediate || !app.queueMode) && !isQueueBackedPath(path)) {
       invoke("rename_path", { path, newName: name })
         .then(() => focusedPane()?.refresh())
         .catch(err => app.notify("error", t("shell.renameFailed", { error: String(err) })));
@@ -371,9 +437,18 @@
     void enqueueRename(path, name);
   }
 
+  const pendingRenames = new Set<string>();
   async function enqueueRename(path: string, newName: string) {
+    const sourceKey = normalizePath(path);
+    if (pendingRenames.has(sourceKey)) return;
+    pendingRenames.add(sourceKey);
     const target = joinPath(dirnameOf(path), newName);
     try {
+      if (!isQueueBackedPath(path) && !await invoke<boolean>("queue_path_exists", { path })) {
+        refreshVisibleLocations([dirnameOf(path)]);
+        app.notify("info", t("shell.renameSourceChanged"));
+        return;
+      }
       let occupied = await invoke<boolean>("queue_path_exists", { path: target });
       const targetKey = normalizePath(target);
       for (const previous of app.opQueue) {
@@ -408,11 +483,14 @@
       app.addToQueue(op);
       app.notify("info", t("queue.operationQueued"));
     } catch (error) { app.notify("error", t("shell.renameFailed", { error: String(error) })); }
+    finally { pendingRenames.delete(sourceKey); }
   }
 
   // ── Delete ────────────────────────────────────────────────
   function handleDelete(paths: string[]) {
     if (paths.length === 0) return;
+    const longPath = firstLongWindowsPath(paths);
+    if (longPath) { app.notify("error", t("pathTooLong.preflight", { path: longPath })); return; }
 
     if (app.queueMode) {
       const op = buildDeleteOp(paths);
@@ -523,6 +601,36 @@
 
   async function prepareTransfer(items: FileTransferItem[], dest: string, operation: FileTransferOperation, onStart?: () => void) {
     if (isNoOpFileTransfer(items, dest, operation) || isRecursiveFileTransfer(items, dest)) return;
+    const preliminary = items.map(item => buildTransferOp([item], dest, operation, false));
+    if (!checkOperationPaths(preliminary)) return;
+    if (/^(?:[a-z]:[\\/]|\\\\)/i.test(dest)) {
+      try {
+        const realSources = items.filter(item => !isQueueBackedPath(item.path)).map(item => item.path);
+        const projected = await invoke<string[]>("preview_transfer_paths", { sources: realSources, destination: dest });
+        const ghostSources = items.filter(item => isQueueBackedPath(item.path));
+        for (const source of ghostSources) {
+          const root = normalizePath(source.path);
+          for (const ghost of app.queueGhosts) {
+            const path = normalizePath(ghost.path);
+            if (path.startsWith(root + "/")) projected.push(joinPath(joinPath(dest, basenameOf(source.path)), ghost.path.slice(source.path.length).replace(/^[/\\]+/, "")));
+          }
+        }
+        const longPath = firstLongWindowsPath(projected);
+        if (longPath) { app.notify("error", t("pathTooLong.preflight", { path: longPath })); return; }
+        // Local transfers stage contents under a temporary sibling before publishing.
+        for (const item of items) {
+          const target = joinPath(dest, basenameOf(item.path));
+          const key = normalizePath(target);
+          for (const path of projected) {
+            const pathKey = normalizePath(path);
+            if (pathKey !== key && !pathKey.startsWith(key + "/")) continue;
+            const relative = path.slice(target.length).replace(/^[/\\]+/, "");
+            const staged = joinPath(joinPath(joinPath(dest, ".dogu-transfer-XXXXXX"), "payload"), relative);
+            if (firstLongWindowsPath([staged])) { app.notify("error", t("pathTooLong.preflight", { path })); return; }
+          }
+        }
+      } catch (error) { app.notify("error", String(error)); return; }
+    }
     const start = (overwrite: boolean) => {
       onStart?.();
       const batchId = newBatchId();
@@ -668,9 +776,9 @@
         if (retryQueuedOp?.fixedExtractionEntries && retryQueuedOp.fixedOutputs && archives.length === 1) {
           const base = destinations[0].replace(/\\/g, "/").replace(/\/+$/, "");
           const relative = (path: string) => path.replace(/\\/g, "/").slice(base.length).replace(/^\/+/, "");
-          effective = { ...effective, plannedEntries: retryQueuedOp.produces.map((output, index) => ({
+          effective = { ...effective, plannedEntries: retryQueuedOp.produces.flatMap((output, index) => output.sharedDirectory ? [] : [{
             from: relative(output.path), to: relative(retryQueuedOp.fixedOutputs![index].path), isDir: output.isDir,
-          })), renameOnConflict: false };
+          }]), renameOnConflict: false };
         }
         return executeExtraction(archives, effective, jobId, retryQueuedOp);
       },
@@ -690,12 +798,6 @@
    */
   async function enqueueExtract(archives: string[], opts: ExtractionOptionsPayload) {
     opts = { ...opts, renameOnConflict: app.settings.renameOnConflict };
-    if (!app.queueMode) {
-      const op = buildExtractOp(archives, opts);
-      void op.execute(undefined, op);
-      return;
-    }
-
     const batchId = archives.length > 1 ? newBatchId() : null;
     const batchTitle = archives.length > 1
       ? t("queue.batch.extract", { count: archives.length })
@@ -715,13 +817,30 @@
         });
         if (rows[0]) {
           op.produces = extractionGhosts(archive, opts, op.id, rows[0]);
-          if (!opts.individualFolders && op.produces.length > 0) op.fixedExtractionEntries = true;
+          if (!opts.individualFolders && op.produces.some(output => !output.sharedDirectory)) op.fixedExtractionEntries = true;
         }
       } catch (e) {
         app.notify("warn", t("queue.extractGhostPreviewFailed", { error: `${basenameOf(archive)}: ${String(e)}` }));
       }
     }
-    enqueueOps(ops);
+    for (const op of ops) {
+      const target = opts.individualFolders ? joinPath(op.destinations[0], stemOf(basenameOf(op.sources[0]))) : op.destinations[0];
+      const root = normalizePath(target);
+      for (const ghost of op.produces) {
+        const key = normalizePath(ghost.path);
+        if (key !== root && !key.startsWith(root + "/")) continue;
+        const relative = ghost.path.slice(target.length).replace(/^[/\\]+/, "");
+        const staged = joinPath(joinPath(target, "dogu-extract-XXXXXX"), relative);
+        if (firstLongWindowsPath([staged])) { app.notify("error", t("pathTooLong.preflight", { path: ghost.path })); return false; }
+      }
+    }
+    if (!checkOperationPaths(ops)) return false;
+    if (app.queueMode) enqueueOps(ops);
+    else {
+      const op = buildExtractOp(archives, opts);
+      void op.execute(undefined, op);
+    }
+    return true;
   }
 
   async function executeExtraction(archives: string[], opts: ExtractionOptionsPayload, providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
@@ -742,9 +861,11 @@
   }
 
   // ── M3U ───────────────────────────────────────────────────
-  export function openM3uDialog(paths: string[]) {
+  export function openM3uDialog(paths: string[], currentOnly = false, allowSingle = false) {
     const dirs = paths.filter((p) => p !== "");
     if (dirs.length === 0) return;
+    m3uCurrentOnly = currentOnly;
+    m3uAllowSingle = allowSingle;
     m3uDirs = dirs;
   }
 
@@ -1399,9 +1520,13 @@
 <svelte:window onkeydown={handleAppKey} />
 <svelte:document oncontextmenu={(e) => e.preventDefault()} />
 
-<div class="shell" style="--sidebar-width: {sidebarWidth}px">
+{#if customTitlebar}<WindowResizeHandles />{/if}
+<div class="shell">
+  {#if resizeCursor}
+    <div class="resize-shield" class:resize-shield--row={resizeCursor === "row"} aria-hidden="true"></div>
+  {/if}
   <!-- ── Sidebar ── -->
-  <Sidebar />
+  <Sidebar {customTitlebar} width={sidebarWidth} />
 
   <!-- ── Sidebar resize handle ── -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
@@ -1424,6 +1549,8 @@
         <Pane
           bind:this={pane0}
           paneIdx={0}
+          titlebar={customTitlebar}
+          windowControls={customTitlebar && (!app.isSplit || app.splitOrientation === "stacked")}
           {...paneHandlers}
         />
       </div>
@@ -1446,6 +1573,8 @@
           <Pane
             bind:this={pane1}
             paneIdx={1}
+            titlebar={customTitlebar && app.splitOrientation !== "stacked"}
+            windowControls={customTitlebar && app.splitOrientation !== "stacked"}
             {...paneHandlers}
           />
         </div>
@@ -1482,8 +1611,7 @@
     archives={extractionState.archives}
     onclose={() => (extractionState = null)}
     onExtract={(archives, opts) => {
-      enqueueExtract(archives, opts);
-      extractionState = null;
+      return enqueueExtract(archives, opts);
     }}
   />
 {/if}
@@ -1494,8 +1622,10 @@
     capabilities={compressionCapabilities}
     onclose={() => (compressionState = null)}
     onCompress={(sources, opts) => {
-      enqueueOrRun(buildCompressOp(sources, opts));
-      compressionState = null;
+      const op = buildCompressOp(sources, opts);
+      if (!checkOperationPaths([op])) return false;
+      enqueueOrRun(op);
+      return true;
     }}
   />
 {/if}
@@ -1503,11 +1633,15 @@
 {#if m3uDirs}
   <M3uDialog
     dirs={m3uDirs}
+    currentOnly={m3uCurrentOnly}
+    allowSingle={m3uAllowSingle}
     currentDir={app.currentPath ?? ""}
     onclose={() => (m3uDirs = null)}
     onEnqueue={(groups, useRelativePaths, overwrite) => {
-      enqueueOrRun(buildM3uOp(groups, useRelativePaths, overwrite));
-      m3uDirs = null;
+      const op = buildM3uOp(groups, useRelativePaths, overwrite);
+      if (!checkOperationPaths([op])) return false;
+      enqueueOrRun(op);
+      return true;
     }}
   />
 {/if}
@@ -1518,20 +1652,24 @@
     initialMode={chdState.mode}
     onclose={() => (chdState = null)}
     onConvert={(sources, opts) => {
-      if (app.queueMode) enqueueOps(buildConvertChdOps(sources, opts));
+      const ops = buildConvertChdOps(sources, opts);
+      if (!checkOperationPaths(ops)) return false;
+      if (app.queueMode) enqueueOps(ops);
       else guardChdRun(sources.map((s) => s.sourcePath), (map) => {
         const op = buildConvertChdOp(sources.map((s) => remapChdSource(s, map)), opts);
         void op.execute(undefined, op);
       });
-      chdState = null;
+      return true;
     }}
     onRestore={(paths, opts) => {
-      if (app.queueMode) enqueueOps(buildRestoreChdOps(paths, opts));
+      const ops = buildRestoreChdOps(paths, opts);
+      if (!checkOperationPaths(ops)) return false;
+      if (app.queueMode) enqueueOps(ops);
       else guardChdRun(paths, (map) => {
         const op = buildRestoreChdOp(paths.map((p) => map.get(p) ?? p), opts);
         void op.execute(undefined, op);
       });
-      chdState = null;
+      return true;
     }}
   />
 {/if}
@@ -1542,7 +1680,9 @@
     sources={discImageState.sources}
     onclose={() => (discImageState = null)}
     onConfirm={(sources, opts) => {
-      if (app.queueMode) enqueueOps(buildDiscImageOps(discImageState!.mode, sources, opts));
+      const ops = buildDiscImageOps(discImageState!.mode, sources, opts);
+      if (!checkOperationPaths(ops)) return;
+      if (app.queueMode) enqueueOps(ops);
       else {
         const op = buildDiscImageOp(discImageState!.mode, sources, opts);
         void op.execute(undefined, op);
@@ -1571,16 +1711,26 @@
     cursor: col-resize;
     flex-shrink: 0;
     background: transparent;
-    margin-left: -1px;
+    margin-left: -4px;
+    margin-right: -3px;
     z-index: 20;
     transition: background 0.15s;
 
     &:hover, &:focus-visible { background: color-mix(in srgb, var(--accent) 40%, transparent); outline: none; }
     &::after { content: ""; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-      width: 2px; height: 34px; border-radius: 2px; background: var(--line-strong); }
+      width: 2px; height: 34px; border-radius: 2px; background: transparent; }
     &:hover::after, &:focus-visible::after { background: var(--accent); }
     position: relative;
   }
+
+  .resize-shield {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    cursor: col-resize;
+    user-select: none;
+  }
+  .resize-shield--row { cursor: row-resize; }
 
   .shell-main {
     flex: 1;

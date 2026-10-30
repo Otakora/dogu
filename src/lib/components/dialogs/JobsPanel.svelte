@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
+  import { slide } from "svelte/transition";
   import { invoke } from "@tauri-apps/api/core";
   import { app } from "../../stores/app.svelte.js";
   import { t, tn } from "../../i18n/index.js";
@@ -540,7 +541,8 @@
 </script>
 
 {#if app.jobsPanelOpen}
-  <div class="jobs-panel" class:open={app.jobsPanelOpen}>
+  <div class="jobs-panel" class:open={app.jobsPanelOpen}
+    transition:slide={{ duration: app.settings.animationsEnabled && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 180 : 0 }}>
 
     <!-- ── Header strip (always visible) ── -->
     <div class="jobs-header" role="toolbar">
@@ -637,28 +639,6 @@
       <div class="jobs-body" class:jobs-body--split={app.queueRunning && app.queueExecutionSteps.length > 0}>
         {#if !hasQueue && !hasJobs}
           <div class="jobs-empty">{t("jobsPanel.noJobs")}</div>
-        {/if}
-
-        {#if app.queueRunning && app.queueRunStats}
-          <div class="queue-overview" aria-label={t("queue.executionTitle")}>
-            <div class="queue-overview-label">
-              <svg class="spin" width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                <circle cx="7" cy="7" r="5.5" stroke="var(--line-strong)" stroke-width="1.5"/>
-                <path d="M7 1.5A5.5 5.5 0 0 1 12.5 7" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
-              </svg>
-              <strong>{t("queue.executionTitle")}</strong>
-              <span>{t("queue.stats.completed", { completed: app.queueRunStats.completed, total: app.queueRunStats.total })}</span>
-            </div>
-            <div class="queue-overview-progress" role="progressbar" aria-label={t("queue.overallProgress")} aria-valuemin="0" aria-valuemax={app.queueRunStats.total} aria-valuenow={app.queueRunStats.completed}>
-              <div style:width="{app.queueRunStats.total ? Math.round(app.queueRunStats.completed / app.queueRunStats.total * 100) : 0}%"></div>
-            </div>
-            <div class="queue-overview-counts">
-              {#if app.queueRunStats.running > 0}<span class="stat-running">{t("queue.stats.running", { count: app.queueRunStats.running })}</span>{/if}
-              {#if app.queueRunStats.succeeded > 0}<span class="stat-ok">✓ {t("queue.countSucceeded", { count: app.queueRunStats.succeeded })}</span>{/if}
-              {#if app.queueRunStats.failed > 0}<span class="stat-fail">✗ {t("queue.countFailed", { count: app.queueRunStats.failed })}</span>{/if}
-              {#if app.queueRunStats.skipped > 0}<span class="stat-skip">↷ {t("queue.countBlocked", { count: app.queueRunStats.skipped })}</span>{/if}
-            </div>
-          </div>
         {/if}
 
         <!-- ── QUEUE SECTION ── -->
@@ -1127,7 +1107,7 @@
             {#if app.queueRunning && selectedLiveJob?.id !== job.id}
               <div class="section-label">{t("queue.otherOperation")}</div>
             {/if}
-            <div id={`queue-job-${job.id}`} class="job-entry" class:job-entry--selected={app.queueRunning && selectedLiveJob?.id === job.id} class:done={job.done} class:failed={job.done && !job.success}>
+            <div id={`queue-job-${job.id}`} class="job-entry" class:job-entry--selected={app.queueRunning && selectedLiveJob?.id === job.id} class:job-entry--running={!job.done && !job.paused} class:done={job.done} class:failed={job.done && !job.success}>
 
               <!-- ── Title row ── -->
               <div class="job-row">
@@ -1427,13 +1407,6 @@
   }
 
   .jobs-body--split { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr); align-items: start; gap: 10px 14px; }
-  .queue-overview { grid-column: 1 / -1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 5px 8px 8px; border-bottom: 1px solid var(--line); }
-  .queue-overview-label, .queue-overview-counts { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--text-muted); white-space: nowrap; }
-  .queue-overview-label strong { color: var(--text); font-weight: 650; }
-  .queue-overview-progress { flex: 1; min-width: 60px; max-width: 280px; height: 3px; overflow: hidden; border-radius: 999px; background: var(--line-strong); }
-  .queue-overview-progress > div { height: 100%; background: color-mix(in srgb, var(--accent) 65%, var(--text-muted)); transition: width .4s ease; }
-  .queue-overview-counts { flex-wrap: wrap; }
-  @media (max-width: 850px) { .queue-overview { flex-wrap: wrap; gap: 6px 10px; } .queue-overview-progress { max-width: none; } }
   .jobs-history { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .jobs-empty { padding: 16px 8px; color: var(--text-muted); font-size: 12px; text-align: center; }
   .jobs-body--split .jobs-history { max-height: 310px; overflow-y: auto; }
@@ -1586,6 +1559,21 @@
   .live-inspector-heading strong { color: var(--text); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .live-inspector-empty { padding: 12px; color: var(--text-muted); background: var(--surface-alt); border: 1px solid var(--line); border-radius: 5px; font-size: 12px; }
   .queue-live-step--running { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .queue-live-step--running, .job-entry--running { position: relative; }
+  .queue-live-step--running::after, .job-entry--running::after {
+    content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px;
+    pointer-events: none; z-index: 1;
+    background: conic-gradient(from var(--dogu-border-angle), transparent 0deg 315deg, var(--accent) 345deg, transparent 360deg);
+    mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    animation: queue-border-travel 3s linear infinite;
+  }
+  @keyframes queue-border-travel { to { --dogu-border-angle: 360deg; } }
+  :global(.dogu-no-motion) .queue-live-step--running::after,
+  :global(.dogu-no-motion) .job-entry--running::after { display: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .queue-live-step--running::after, .job-entry--running::after { display: none; }
+  }
   .queue-live-step--failed { border-color: color-mix(in srgb, var(--error, #ef4444) 55%, var(--line)); color: var(--error, #ef4444); }
   .queue-live-step--blocked { color: #b45309; }
   .queue-live-empty { padding: 8px; color: var(--text-muted); font-size: 11px; }

@@ -534,6 +534,10 @@ fn extraction_destination_root(archive: &Path, options: &ExtractionOptionsPayloa
     } else {
         archive.parent().unwrap_or(archive).to_path_buf()
     };
+    let destination_root = if options.destination_mode == "parent" {
+        destination_root.parent().unwrap_or(&destination_root).to_path_buf()
+    } else { destination_root };
+    let destination_root = if let Some(name) = &options.shared_folder_name { destination_root.join(name) } else { destination_root };
     if options.individual_folders {
         destination_root.join(options.planned_folder_name.clone().unwrap_or_else(|| archive
                 .file_stem()
@@ -955,6 +959,9 @@ pub fn extract_archives(
     if let Some(name) = options.planned_folder_name.as_deref() {
         validated_planned_output_name(Some(name), name)?;
     }
+    if let Some(name) = options.shared_folder_name.as_deref() {
+        validated_planned_output_name(Some(name), name)?;
+    }
     let total = archives.len().max(1) as f64;
 
     for (index, archive) in archives.iter().enumerate() {
@@ -969,10 +976,11 @@ pub fn extract_archives(
 
         // Check the real destination, not just the share root, before a
         // potentially large download and extraction.
-        let effective_remote_dest: Option<String> = if options.remote_destination.is_some() {
+        let mut effective_remote_dest: Option<String> = if options.remote_destination.is_some() {
             options.remote_destination.clone()
         } else if archive_is_remote && options.destination_mode != "custom" {
-            remote_parent_of(archive)
+            let parent = remote_parent_of(archive);
+            if options.destination_mode == "parent" { parent.as_deref().and_then(|p| remote_parent_of(Path::new(p))).or(parent) } else { parent }
         } else {
             None
         };
@@ -980,6 +988,27 @@ pub fn extract_archives(
             let rm = remote_manager.as_ref().ok_or_else(|| anyhow!("Se necesita el gestor remoto para comprobar el destino"))?;
             emit_log(app, job_id, format!("Comprobando escritura en {destination}..."))?;
             rm.check_remote_staging_writable(destination)?;
+        }
+
+        if let (Some(parent), Some(name)) = (&effective_remote_dest, &options.shared_folder_name) {
+            let rm = remote_manager.as_ref().ok_or_else(|| anyhow!("Se necesita el gestor remoto para crear el destino"))?;
+            let find_folder = || -> Result<Option<String>> {
+                let entry = rm.list_children(parent)?.into_iter().find(|entry| entry.name == *name);
+                match entry {
+                    Some(entry) if entry.is_dir => Ok(Some(entry.path)),
+                    Some(_) => Err(anyhow!("Ya existe un archivo con el nombre de la carpeta de destino")),
+                    None => Ok(None),
+                }
+            };
+            let folder = match find_folder()? {
+                Some(path) => path,
+                None => match rm.create_folder(parent, name) {
+                    Ok(path) => path,
+                    Err(error) => find_folder()?.ok_or(error)?,
+                },
+            };
+            rm.check_remote_staging_writable(&folder)?;
+            effective_remote_dest = Some(folder);
         }
 
         // Download remote archive to a temp dir so tools can open it as a local file.
@@ -990,8 +1019,9 @@ pub fn extract_archives(
                 .ok_or_else(|| anyhow!("Se necesita el gestor remoto para descargar el archivo"))?;
             let dl_dir = temp_download_dir(app, job_id)?;
             emit_log(app, job_id, format!("Descargando {}...", source_name))?;
+            emit_progress(app, job_id, prog_base, format!("Descargando {source_name}"))?;
             let (local, bytes) = rm
-                .download_file_to_dir(&archive.to_string_lossy(), &dl_dir)
+                .download_file_to_dir_with_progress(&archive.to_string_lossy(), &dl_dir, Some((app, job_id, prog_base, prog_span * 0.30)))
                 .map_err(|e| anyhow!("Fallo al descargar '{}': {}", source_name, e))?;
             emit_log(
                 app,
@@ -1028,24 +1058,26 @@ pub fn extract_archives(
                 &policy,
                 &source_name,
                 options.overwrite,
+                Some((prog_base + prog_span * 0.65, prog_span * 0.34)),
                 |temp_dir| {
+                    let shared_root = temp_dir.to_path_buf();
                     let extract_target = if options_c.individual_folders {
                         let stem = effective_archive_c
                             .file_stem()
                             .unwrap_or(effective_archive_c.as_os_str())
                             .to_string_lossy()
                             .to_string();
-                        let sub = temp_dir.join(options_c.planned_folder_name.as_deref().unwrap_or(&stem));
+                        let sub = shared_root.join(options_c.planned_folder_name.as_deref().unwrap_or(&stem));
                         fs::create_dir_all(&sub)?;
                         sub
                     } else {
-                        temp_dir.to_path_buf()
+                        shared_root
                     };
                     do_extract_archive(
                         app,
                         job_id,
-                        prog_base,
-                        prog_span,
+                        prog_base + if archive_is_remote { prog_span * 0.30 } else { 0.0 },
+                        prog_span * if archive_is_remote { 0.35 } else { 0.65 },
                         &effective_archive_c,
                         &extract_target,
                         &options_c,
@@ -1078,7 +1110,7 @@ pub fn extract_archives(
             let publication = (|| -> Result<()> {
                 let staging = retry_transient_stage(app, job_id, || {
                     let staging = tempfile::Builder::new().prefix("dogu-extract-").tempdir_in(&destination)?;
-                    do_extract_archive(app, job_id, prog_base, prog_span, &effective_archive, staging.path(), &options)?;
+                    do_extract_archive(app, job_id, prog_base + if archive_is_remote { prog_span * 0.30 } else { 0.0 }, prog_span * if archive_is_remote { 0.69 } else { 0.99 }, &effective_archive, staging.path(), &options)?;
                     Ok(staging)
                 })?;
                 if let Some(entries) = &options.planned_entries {
@@ -1675,6 +1707,7 @@ pub fn convert_to_chd(
                 &policy,
                 &source_name,
                 overwrite,
+                None,
                 |temp_dir| {
                     let output_path = temp_dir.join(&chd_name);
                     run_chdman_convert(
@@ -2220,6 +2253,7 @@ pub fn restore_from_chd(
                 &policy,
                 &source_name,
                 overwrite,
+                None,
                 |temp_dir| {
                     let write_dir = if let Some(ref name) = folder_name_c {
                         let d = temp_dir.join(name);
@@ -2514,6 +2548,7 @@ fn run_disc_file_op(
             &policy,
             &source_name,
             options.overwrite,
+            None,
             |temp_dir| {
                 let output = temp_dir.join(&output_name);
                 produce(&local_source, &output)?;
@@ -3537,7 +3572,11 @@ fn extract_zip(
 ) -> Result<()> {
     let file = fs::File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
-    let count = archive.len().max(1) as f64;
+    let mut total_bytes = 0u64;
+    for index in 0..archive.len() {
+        total_bytes = total_bytes.saturating_add(archive.by_index(index)?.size());
+    }
+    let mut done = 0u64;
     for index in 0..archive.len() {
         let mut item = archive.by_index(index)?;
         let mut out_path = destination.join(item.mangled_name());
@@ -3559,15 +3598,26 @@ fn extract_zip(
             fs::create_dir_all(parent)?;
         }
         let mut output = fs::File::create(&out_path)?;
-        std::io::copy(&mut item, &mut output)?;
-        let frac = (index + 1) as f64 / count;
-        let _ = emit_progress(
-            app,
-            job_id,
-            (base + span * frac).clamp(0.0, 1.0),
-            format!("{}", out_path.display()),
-        );
+        copy_with_byte_progress(&mut item, &mut output, app, job_id, base, span, total_bytes, &mut done, &format!("Extrayendo {}", out_path.display()))?;
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_with_byte_progress<R: io::Read, W: io::Write>(reader: &mut R, writer: &mut W, app: &AppHandle, job_id: &str, base: f64, span: f64, total: u64, done: &mut u64, message: &str) -> Result<()> {
+    let mut buffer = vec![0u8; 256 * 1024];
+    let mut last = std::time::Instant::now();
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 { break; }
+        writer.write_all(&buffer[..n])?;
+        *done = done.saturating_add(n as u64);
+        if last.elapsed() >= std::time::Duration::from_millis(150) {
+            let _ = emit_progress(app, job_id, (base + span * (*done as f64 / total.max(1) as f64)).clamp(0.0, 1.0), message.to_string());
+            last = std::time::Instant::now();
+        }
+    }
+    let _ = emit_progress(app, job_id, (base + span * (*done as f64 / total.max(1) as f64)).clamp(0.0, 1.0), message.to_string());
     Ok(())
 }
 
@@ -4566,6 +4616,15 @@ pub fn emit_log(app: &AppHandle, job_id: &str, line: String) -> Result<()> {
     Ok(())
 }
 
+/// Preserve the error chain: filesystem errors are often wrapped with operation context.
+pub fn format_operation_error(error: &anyhow::Error) -> String {
+    let detail = format!("{error:#}");
+    let too_long = error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| matches!(io.raw_os_error(), Some(206) | Some(111)))
+    });
+    if cfg!(windows) && too_long { format!("[PATH_TOO_LONG] {detail}") } else { detail }
+}
+
 pub fn emit_finished(app: &AppHandle, job_id: &str, success: bool, message: String) -> Result<()> {
     app.emit(
         "job-finished",
@@ -4665,6 +4724,7 @@ fn run_remote_file_cycle_with_policy<F>(
     policy: &RemoteTransferPolicy,
     source_name: &str,
     overwrite: bool,
+    progress_range: Option<(f64, f64)>,
     produce: F,
 ) -> Result<()>
 where
@@ -4694,6 +4754,13 @@ where
             )
         })?;
 
+    let upload_progress = progress_range.map(|(base, span)| {
+        let _ = emit_progress(app, job_id, base, "Subiendo archivos al destino remoto".to_string());
+        let bytes = output_files.iter().flat_map(|path| WalkDir::new(path).into_iter().filter_map(|entry| entry.ok()))
+            .filter(|entry| entry.file_type().is_file()).filter_map(|entry| entry.metadata().ok().map(|m| m.len()))
+            .fold(0u64, u64::saturating_add);
+        remote::ByteTransferProgress::ranged(app, job_id, bytes, base, span)
+    });
     for file in &output_files {
         let file_name = file
             .file_name()
@@ -4702,7 +4769,8 @@ where
 
         let _ = emit_log(app, job_id, format!("Subiendo {}...", file_name));
         'retry: loop {
-            let upload = if overwrite { remote_manager.upload_staged_to_remote(app, job_id, file, remote_dest_dir) }
+            let upload = if let Some(progress) = &upload_progress { remote_manager.upload_staged_with_progress(app, job_id, file, remote_dest_dir, overwrite, progress) }
+                else if overwrite { remote_manager.upload_staged_to_remote(app, job_id, file, remote_dest_dir) }
                 else { remote_manager.upload_staged_no_overwrite(app, job_id, file, remote_dest_dir) };
             match upload {
                 Ok(_) => {
@@ -4925,12 +4993,13 @@ pub fn compress_to_archive(
             .ok_or_else(|| anyhow!("Se necesita el gestor remoto para descargar los archivos"))?;
         let dl_dir = temp_download_dir(app, job_id)?;
         let mut local_sources = Vec::with_capacity(sources.len());
-        for src in &sources {
+        for (index, src) in sources.iter().enumerate() {
             if remote::RemoteManager::is_remote_path(&src.to_string_lossy()) {
                 let src_str = src.to_string_lossy();
                 emit_log(app, job_id, format!("[Descarga] {}", src_str))?;
+                emit_progress(app, job_id, 0.30 * index as f64 / sources.len().max(1) as f64, format!("Descargando {src_str}"))?;
                 let (local, bytes) = rm
-                    .download_file_to_dir(&src_str, &dl_dir)
+                    .download_file_to_dir_with_progress(&src_str, &dl_dir, Some((app, job_id, 0.30 * index as f64 / sources.len().max(1) as f64, 0.30 / sources.len().max(1) as f64)))
                     .map_err(|e| anyhow!("Fallo al descargar '{}': {e}", src_str))?;
                 emit_log(
                     app,
@@ -4996,13 +5065,14 @@ pub fn compress_to_archive(
             &policy,
             &archive_filename,
             options.overwrite,
+            Some((0.65, 0.34)),
             |temp_dir| {
                 let archive_path = temp_dir.join(&archive_filename_c);
                 do_compress(
                     app,
                     job_id,
-                    0.0,
-                    0.9,
+                    if any_source_is_remote { 0.30 } else { 0.0 },
+                    if any_source_is_remote { 0.35 } else { 0.65 },
                     &effective_sources_c,
                     &archive_path,
                     &options_c,
@@ -5039,7 +5109,7 @@ pub fn compress_to_archive(
         let staged_path = staging.path().join(&archive_filename);
         retry_transient_stage(app, job_id, || {
             if staged_path.exists() { fs::remove_file(&staged_path)?; }
-            do_compress(app, job_id, 0.0, 0.9, &effective_sources, &staged_path, &options)
+            do_compress(app, job_id, if any_source_is_remote { 0.30 } else { 0.0 }, if any_source_is_remote { 0.69 } else { 0.99 }, &effective_sources, &staged_path, &options)
         })?;
         commit_staged_file(&staged_path, &archive_path, options.overwrite)?;
         emit_log(
@@ -5052,7 +5122,7 @@ pub fn compress_to_archive(
     emit_progress(
         app,
         job_id,
-        0.9,
+        0.99,
         format!("Comprimiendo {}", archive_filename),
     )?;
 
@@ -5146,7 +5216,7 @@ fn do_compress(
         "rar" => {
             let rar = find_rar_binary()
                 .ok_or_else(|| anyhow!("RAR no está disponible en este sistema"))?;
-            compress_via_rar(&rar, sources, archive_path, options.compression_level)
+            compress_via_rar(app, job_id, base, span, &rar, sources, archive_path, options.compression_level)
         }
         _ => compress_to_zip(
             app,
@@ -5157,19 +5227,6 @@ fn do_compress(
             archive_path,
             options.compression_level,
         ),
-    }
-}
-
-/// Counts regular files under `path` (1 if `path` is itself a file).
-fn count_files_under(path: &Path) -> u64 {
-    if path.is_file() {
-        1
-    } else {
-        WalkDir::new(path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file())
-            .count() as u64
     }
 }
 
@@ -5194,11 +5251,10 @@ fn compress_to_zip(
         .compression_method(method)
         .compression_level(zip_level);
 
-    let total: u64 = sources
-        .iter()
-        .map(|s| count_files_under(s))
-        .sum::<u64>()
-        .max(1);
+    let total: u64 = sources.iter().flat_map(|source| WalkDir::new(source).into_iter().filter_map(|e| e.ok()))
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok().map(|m| m.len()))
+        .fold(0u64, u64::saturating_add).max(1);
     let mut done: u64 = 0;
 
     for source in sources {
@@ -5232,14 +5288,7 @@ fn add_path_to_zip<W: Write + Seek>(
             .replace('\\', "/");
         zip.start_file(&name, options)?;
         let mut f = fs::File::open(path)?;
-        io::copy(&mut f, zip)?;
-        *done += 1;
-        let _ = emit_progress(
-            app,
-            job_id,
-            (base + span * (*done as f64 / total as f64)).clamp(0.0, 1.0),
-            name,
-        );
+        copy_with_byte_progress(&mut f, zip, app, job_id, base, span, total, done, &format!("Comprimiendo {name}"))?;
     } else if path.is_dir() {
         for entry in WalkDir::new(path)
             .min_depth(0)
@@ -5260,14 +5309,7 @@ fn add_path_to_zip<W: Write + Seek>(
             } else {
                 zip.start_file(&name, options)?;
                 let mut f = fs::File::open(entry_path)?;
-                io::copy(&mut f, zip)?;
-                *done += 1;
-                let _ = emit_progress(
-                    app,
-                    job_id,
-                    (base + span * (*done as f64 / total as f64)).clamp(0.0, 1.0),
-                    name,
-                );
+                copy_with_byte_progress(&mut f, zip, app, job_id, base, span, total, done, &format!("Comprimiendo {name}"))?;
             }
         }
     }
@@ -5298,6 +5340,10 @@ fn compress_via_7z(
 }
 
 fn compress_via_rar(
+    app: &AppHandle,
+    job_id: &str,
+    base: f64,
+    span: f64,
     rar_binary: &Path,
     sources: &[PathBuf],
     archive_path: &Path,
@@ -5313,17 +5359,13 @@ fn compress_via_rar(
         _ => 5,
     };
     let mut command = Command::new(rar_binary);
-    let status = hide_console_window(&mut command)
+    command
         .arg("a")
         .arg(format!("-m{rar_level}"))
         .arg("-y")
         .arg(archive_path)
-        .args(sources)
-        .status()?;
-    if !status.success() {
-        return Err(anyhow!("rar devolvió un error al comprimir"));
-    }
-    Ok(())
+        .args(sources);
+    run_command_streaming(app, job_id, base, span, command).context("rar devolvió un error al comprimir")
 }
 
 #[cfg(test)]
@@ -5491,7 +5533,7 @@ mod tests {
     }
 
     fn extraction_options(rename: bool, overwrite: bool) -> ExtractionOptionsPayload {
-        ExtractionOptionsPayload { planned_folder_name: None, planned_entries: None, individual_folders: false, split_entries: false, destination_mode: "custom".into(), destination_path: None, delete_archives: false, overwrite, rename_on_conflict: rename, remote_destination: None, remote_transfer: None }
+        ExtractionOptionsPayload { planned_folder_name: None, planned_entries: None, shared_folder_name: None, individual_folders: false, split_entries: false, destination_mode: "custom".into(), destination_path: None, delete_archives: false, overwrite, rename_on_conflict: rename, remote_destination: None, remote_transfer: None }
     }
 
     #[test]

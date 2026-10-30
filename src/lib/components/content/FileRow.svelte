@@ -43,7 +43,7 @@
     const val = (e.currentTarget as HTMLInputElement).value.trim();
     if (!val || val === entry.name) { app.cancelRename(); return; }
     document.dispatchEvent(new CustomEvent("dogu:rename-commit", {
-      detail: { path: entry.path, newName: val }
+      detail: { path: entry.path, newName: val, immediate: app.renaming?.immediate }
     }));
   }
 
@@ -146,6 +146,10 @@
     display: flex;
     align-items: center;
     height: calc(28px * var(--content-scale, 1));
+    /* Keep the row's geometry available while the browser skips off-screen
+       contents. This avoids laying out every file on each pane resize. */
+    width: calc(var(--col-name, 280px) + var(--col-type, 80px) + var(--col-size, 90px) + var(--col-modified, 140px) + 16px);
+    content-visibility: auto;
     padding: 0 8px;
     border-radius: 4px;
     user-select: none;

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.6-beta.2
+
+### English
+
+- Added customizable extraction folders and disc suffix removal, with queue previews.
+- Added Windows path length checks and clearer errors for affected operations.
+- Improved file selection, window controls, queue display and M3U generation.
+
+### Español
+
+- Nuevas carpetas de extracción personalizables y eliminación de sufijos de disco, con fantasmas en la cola.
+- Comprobaciones de longitud de rutas en Windows y errores más claros en las operaciones afectadas.
+- Mejoras en la selección de archivos, controles de ventana, visualización de la cola y generación M3U.
+
 ## 0.2.6-beta.1
 
 ### English

@@ -13,9 +13,11 @@
   import { t, tn } from "../../i18n/index.js";
   import { openTerminalAt, openRemoteTerminalAt } from "../../utils/terminal.js";
   import { ghostToEntry, buildGhost, joinPath, normalizePath, uniqueDisplayPath, basenameOf } from "../../utils/ghosts.js";
+  import { firstLongWindowsPath } from "../../utils/windows-paths.js";
   import { queueStory } from "../../utils/queue-story.js";
   import type { FileTransferItem, FileTransferOperation } from "../../utils/transfers.js";
   import { canDropFileItemsToPath, inferFileTransferOperation, isNoOpFileTransfer } from "../../utils/transfers.js";
+  import { visibleRange, mergeAreaSelection } from "../../utils/selection.js";
 
   const pane = getContext<PaneView>("pane");
 
@@ -32,7 +34,7 @@
     onCompress: (paths: string[]) => void;
     onChd: (paths: string[]) => void;
     onDiscImage: (mode: DiscImageMode, paths: string[]) => void;
-    onM3u: (paths: string[]) => void;
+    onM3u: (paths: string[], currentOnly?: boolean, allowSingle?: boolean) => void;
     onProperties: (paths: string[]) => void;
     onOpenWith: (path: string) => void;
   };
@@ -122,6 +124,8 @@
   let rbDiv: HTMLDivElement | null = null;
   let rbSX = 0, rbSY = 0;
   let rbActive = false;
+  let rbMoved = false;
+  let rbBaseSelection = new Set<string>();
   let consumeNextPanelClick = false;
   let pendingPrimaryClickPath = $state<string | null>(null);
   let lastMouse = { x: 0, y: 0 };
@@ -155,17 +159,19 @@
     if (!rbDiv || !contentBodyEl || !panelEl) return;
     const bodyRect  = contentBodyEl.getBoundingClientRect();
     const panelRect = panelEl.getBoundingClientRect();
-    const ex = mx - bodyRect.left + contentBodyEl.scrollLeft;
-    const ey = my - bodyRect.top  + contentBodyEl.scrollTop;
+    const scaleX = bodyRect.width / contentBodyEl.offsetWidth || 1;
+    const scaleY = bodyRect.height / contentBodyEl.offsetHeight || 1;
+    const ex = (mx - bodyRect.left) / scaleX + contentBodyEl.scrollLeft;
+    const ey = (my - bodyRect.top) / scaleY + contentBodyEl.scrollTop;
     const dw = Math.abs(ex - rbSX);
     const dh = Math.abs(ey - rbSY);
     if (dw < 3 && dh < 3) { rbDiv.style.display = "none"; return; }
-    const bLeft = bodyRect.left - panelRect.left;
-    const bTop  = bodyRect.top  - panelRect.top;
+    const bLeft = (bodyRect.left - panelRect.left) / scaleX;
+    const bTop  = (bodyRect.top - panelRect.top) / scaleY;
     const startPX = rbSX - contentBodyEl.scrollLeft + bLeft;
     const startPY = rbSY - contentBodyEl.scrollTop  + bTop;
-    const endPX   = mx - panelRect.left;
-    const endPY   = my - panelRect.top;
+    const endPX   = (mx - panelRect.left) / scaleX;
+    const endPY   = (my - panelRect.top) / scaleY;
     rbDiv.style.display = "block";
     rbDiv.style.left   = `${Math.min(startPX, endPX)}px`;
     rbDiv.style.top    = `${Math.min(startPY, endPY)}px`;
@@ -176,8 +182,10 @@
   function updateRubberBandSelection(mx: number, my: number) {
     if (!contentBodyEl) return;
     const bodyRect = contentBodyEl.getBoundingClientRect();
-    const ex = mx - bodyRect.left + contentBodyEl.scrollLeft;
-    const ey = my - bodyRect.top  + contentBodyEl.scrollTop;
+    const scaleX = bodyRect.width / contentBodyEl.offsetWidth || 1;
+    const scaleY = bodyRect.height / contentBodyEl.offsetHeight || 1;
+    const ex = (mx - bodyRect.left) / scaleX + contentBodyEl.scrollLeft;
+    const ey = (my - bodyRect.top) / scaleY + contentBodyEl.scrollTop;
     const selL = Math.min(rbSX, ex);
     const selT = Math.min(rbSY, ey);
     const selR = Math.max(rbSX, ex);
@@ -185,14 +193,14 @@
     const selected: string[] = [];
     contentBodyEl.querySelectorAll<HTMLElement>("[data-path]").forEach((row) => {
       const r  = row.getBoundingClientRect();
-      const rL = r.left - bodyRect.left + contentBodyEl!.scrollLeft;
-      const rT = r.top  - bodyRect.top  + contentBodyEl!.scrollTop;
-      if (selL < rL + r.width && selR > rL && selT < rT + r.height && selB > rT) {
+      const rL = (r.left - bodyRect.left) / scaleX + contentBodyEl!.scrollLeft;
+      const rT = (r.top - bodyRect.top) / scaleY + contentBodyEl!.scrollTop;
+      if (selL < rL + r.width / scaleX && selR > rL && selT < rT + r.height / scaleY && selB > rT) {
         const p = row.getAttribute("data-path");
         if (p) selected.push(p);
       }
     });
-    pane.setSelection(selected);
+    pane.setSelection(mergeAreaSelection(rbBaseSelection, selected));
   }
 
   function handleBodyMousedown(e: MouseEvent) {
@@ -203,19 +211,23 @@
     // Only begin selection inside its client area, excluding both scrollbars
     // (and borders), including a scrollbar placed on the left in RTL layouts.
     const bodyRect = contentBodyEl.getBoundingClientRect();
-    const clientLeft = bodyRect.left + contentBodyEl.clientLeft;
-    const clientTop = bodyRect.top + contentBodyEl.clientTop;
-    if (e.clientX < clientLeft || e.clientX >= clientLeft + contentBodyEl.clientWidth
-      || e.clientY < clientTop || e.clientY >= clientTop + contentBodyEl.clientHeight) return;
+    const scaleX = bodyRect.width / contentBodyEl.offsetWidth || 1;
+    const scaleY = bodyRect.height / contentBodyEl.offsetHeight || 1;
+    const clientLeft = bodyRect.left + contentBodyEl.clientLeft * scaleX;
+    const clientTop = bodyRect.top + contentBodyEl.clientTop * scaleY;
+    if (e.clientX < clientLeft || e.clientX >= clientLeft + contentBodyEl.clientWidth * scaleX
+      || e.clientY < clientTop || e.clientY >= clientTop + contentBodyEl.clientHeight * scaleY) return;
     pendingPrimaryClickPath = null;
     fileDragGesture = null;
     ensureRubberBand();
-    rbSX = e.clientX - bodyRect.left + contentBodyEl.scrollLeft;
-    rbSY = e.clientY - bodyRect.top  + contentBodyEl.scrollTop;
+    rbSX = (e.clientX - bodyRect.left) / scaleX + contentBodyEl.scrollLeft;
+    rbSY = (e.clientY - bodyRect.top) / scaleY + contentBodyEl.scrollTop;
     rbActive = true;
+    rbMoved = false;
+    rbBaseSelection = e.ctrlKey || e.metaKey ? new Set(pane.selectedPaths) : new Set();
     lastMouse = { x: e.clientX, y: e.clientY };
     if (rbDiv) rbDiv.style.display = "none";
-    pane.clearSelection();
+    if (!e.ctrlKey && !e.metaKey) pane.clearSelection();
     window.addEventListener("mousemove", onDragMove);
     window.addEventListener("mouseup", onDragEnd);
     autoScrollRaf = requestAnimationFrame(autoScrollTick);
@@ -223,6 +235,8 @@
 
   function onDragMove(e: MouseEvent) {
     if (!rbActive) return;
+    if (!rbMoved && Math.abs(e.clientX - lastMouse.x) < 3 && Math.abs(e.clientY - lastMouse.y) < 3) return;
+    rbMoved = true;
     lastMouse = { x: e.clientX, y: e.clientY };
     setRubberBandRect(e.clientX, e.clientY);
     updateRubberBandSelection(e.clientX, e.clientY);
@@ -230,6 +244,7 @@
 
   function autoScrollTick() {
     if (!rbActive || !contentBodyEl) return;
+    if (!rbMoved) { autoScrollRaf = requestAnimationFrame(autoScrollTick); return; }
     const bodyRect = contentBodyEl.getBoundingClientRect();
     const ZONE = 40, SPEED = 10;
     if (lastMouse.y < bodyRect.top + ZONE && contentBodyEl.scrollTop > 0) {
@@ -322,6 +337,7 @@
           const existing = existingByKey.get(gkey);
           if (existing?.isGhost && existing.ghostOpId === g.producedByOpId) continue;
           const collides = taken.has(gkey);
+          if (collides && g.sharedDirectory) continue;
           const deletedEarlier = collides && app.opQueue.slice(0, opIndex).some(previous => deletionCoversPath(previous.deletes, g.path));
           if (deletedEarlier) { recreated.add(gkey); continue; }
           if (collides && op.overwrite) { replaced.add(gkey); continue; }
@@ -768,7 +784,7 @@
     let hasNonCopyMoveDirProducer = false;
 
     for (const op of app.opQueue) {
-      for (const g of op.produces) {
+      for (const g of app.resolvedOutputsFor(op.id)) {
         const gKey = normalizePath(g.path);
         if (g.isDir && gKey === dirKey && op.kind !== "copy" && op.kind !== "move") {
           hasNonCopyMoveDirProducer = true;
@@ -846,17 +862,21 @@
   export async function createFolder() {
     if (!pane.currentPath) return;
     const name = findUniqueName(t("contentPanel.newFolderName"));
+    const longPath = firstLongWindowsPath([joinPath(pane.currentPath, name)]);
+    if (longPath) { app.notify("error", t("pathTooLong.preflight", { path: longPath })); return; }
     try {
       await invoke("create_folder", { parent: pane.currentPath, name });
       await loadPath(pane.currentPath);
       const entry = pane.entries.find(e => e.name === name);
-      if (entry) { pane.setSelection([entry.path]); pane.startRename(entry.path, entry.name); }
+      if (entry) { pane.setSelection([entry.path]); pane.startRename(entry.path, entry.name, true); }
     } catch (e) { app.notify("error", t("contentPanel.couldNotCreateFolder", { error: String(e) })); }
   }
 
   export async function createFile() {
     if (!pane.currentPath) return;
     const name = findUniqueName(t("contentPanel.newFileName"));
+    const longPath = firstLongWindowsPath([joinPath(pane.currentPath, name)]);
+    if (longPath) { app.notify("error", t("pathTooLong.preflight", { path: longPath })); return; }
     try {
       await invoke("create_file", { parent: pane.currentPath, name });
       await loadPath(pane.currentPath);
@@ -877,7 +897,7 @@
     if (!pane.renaming) return;
     const val = (e.currentTarget as HTMLInputElement).value.trim();
     if (!val || val === entry.name) { pane.cancelRename(); return; }
-    document.dispatchEvent(new CustomEvent("dogu:rename-commit", { detail: { path: entry.path, newName: val } }));
+    document.dispatchEvent(new CustomEvent("dogu:rename-commit", { detail: { path: entry.path, newName: val, immediate: pane.renaming.immediate } }));
   }
 
   // ── Selection handling ────────────────────────────────────
@@ -898,7 +918,7 @@
 
     if (e.shiftKey && lastClickedPath) {
       pendingPrimaryClickPath = null;
-      pane.rangeSelect(lastClickedPath, entry.path);
+      selectDisplayedRange(lastClickedPath, entry.path);
     } else if (e.ctrlKey || e.metaKey) {
       pendingPrimaryClickPath = null;
       pane.toggleSelection(entry.path);
@@ -934,6 +954,11 @@
     if (lastClickedPath !== entry.path) {
       lastClickedPath = entry.path;
     }
+  }
+
+  function selectDisplayedRange(from: string, to: string) {
+    const selected = visibleRange(displayed.map(entry => entry.path), from, to);
+    if (selected.length) pane.setSelection(selected);
   }
 
   function handleActivate(entry: EntryDto) {
@@ -997,7 +1022,7 @@
         : Math.max(idx - 1, 0);
       if (newIdx >= 0) {
         if (e.shiftKey) {
-          pane.rangeSelect(lastClickedPath ?? paths[0], paths[newIdx]);
+          selectDisplayedRange(lastClickedPath ?? paths[0], paths[newIdx]);
         } else {
           pane.setSelection([paths[newIdx]]);
           lastClickedPath = paths[newIdx];
@@ -1249,14 +1274,18 @@
       }
     }
 
-    if (hasM3uDirs && !selHasGhost) {
+    const m3uInputs = sel.filter(p => {
+      const item = entryOf(p);
+      return item && (item.isDir || /\.(cue|chd|gdi|iso|img|zip|7z)$/i.test(item.name));
+    });
+    if (m3uInputs.length > 0 && !selHasGhost) {
       const m3uIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
       items.push({ kind: "separator" });
       items.push({
         kind: "action",
         label: t("m3u.menuItem"),
         icon: m3uIcon,
-        onclick: () => onM3u(sel.filter(p => !!entryOf(p)?.isDir)),
+        onclick: () => onM3u(m3uInputs, !hasM3uDirs, !hasM3uDirs),
       });
     }
 
@@ -1284,7 +1313,7 @@
     if ((e.target as HTMLElement).closest("[data-path]")) return;
     if (consumeNextPanelClick) { consumeNextPanelClick = false; return; }
     pendingPrimaryClickPath = null;
-    pane.clearSelection();
+    if (!e.ctrlKey && !e.metaKey) pane.clearSelection();
     contextMenu = null;
   }
 
@@ -1295,6 +1324,10 @@
     if (app.clipboard) items.push({ kind: "action", label: t("menu.paste"), icon: pasteIcon, onclick: () => onPaste() });
     items.push({ kind: "action", label: t("menu.newFolder"), icon: newFolderIcon, onclick: () => createFolder() });
     items.push({ kind: "action", label: t("menu.newFile"), icon: newFileIcon, onclick: () => createFile() });
+    const visibleM3uFiles = displayed.filter(entry => !entry.isGhost && !entry.isDir && /\.(cue|chd|gdi|iso|img|zip|7z)$/i.test(entry.name)).map(entry => entry.path);
+    if (visibleM3uFiles.length) {
+      items.push({ kind: "action", label: t("m3u.menuItem"), onclick: () => onM3u(visibleM3uFiles, true) });
+    }
     items.push({ kind: "action", label: t("menu.refresh"), shortcut: "F5", icon: refreshIcon, onclick: () => refresh() });
     if (pane.currentPath && !pane.currentPath.startsWith("remote://")) {
       items.push({ kind: "separator" });
@@ -1410,6 +1443,7 @@
     onmousedown={handleBodyMousedown}
     onscroll={saveScrollPosition}
     role="presentation"
+    aria-busy={pane.isLoading}
   >
     <!-- ── Column headers (list view only). Lives inside the same horizontal
          scroll plane as rows, so labels stay aligned with their columns. ── -->
@@ -1443,7 +1477,7 @@
       </div>
     {/if}
 
-    {#if pane.isLoading}
+    {#if pane.isLoading && !(pane.currentPath && pane.activeTab?.loadedPath === pane.currentPath && !pane.isSearching && pane.entries.length > 0)}
       <div class="content-state">
         <span class="loading-spinner"></span>
         <span>{t("contentPanel.loading")}</span>
@@ -1467,7 +1501,7 @@
 
     {:else}
       {#if pane.viewMode === "list"}
-        <div class="file-list" role="rowgroup">
+        <div class="file-list" class:listing-refreshing={pane.isLoading} role="rowgroup">
           {#each displayed as entry (entry.path)}
             <FileRow
               {entry}
@@ -1486,7 +1520,7 @@
         </div>
 
       {:else}
-        <div class="file-grid" role="rowgroup">
+        <div class="file-grid" class:listing-refreshing={pane.isLoading} role="rowgroup">
           {#each displayed as entry (entry.path)}
             <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <div
@@ -1678,6 +1712,10 @@
     position: relative;
     user-select: none;
   }
+
+  .file-list, .file-grid { animation: listing-enter .16s ease-out; transition: opacity .16s ease; }
+  .listing-refreshing { opacity: .72; pointer-events: none; }
+  @keyframes listing-enter { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
 
   .content-body--drop-target {
     background: color-mix(in srgb, var(--accent) 4%, transparent);

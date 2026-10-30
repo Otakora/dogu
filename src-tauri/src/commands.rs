@@ -29,6 +29,41 @@ fn parse_paths(paths: Vec<String>) -> Vec<PathBuf> {
     paths.into_iter().map(PathBuf::from).collect()
 }
 
+/// Project the descendants of a copied folder onto a local destination.
+#[tauri::command]
+pub async fn preview_transfer_paths(
+    remote_state: State<'_, remote::RemoteState>,
+    sources: Vec<String>,
+    destination: String,
+    target_name: Option<String>,
+) -> Result<Vec<String>, String> {
+    let manager = remote_state.inner.clone();
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<Vec<String>> {
+        let mut paths = Vec::new();
+        for source in sources {
+            let trimmed = source.trim_end_matches(['/', '\\']);
+            let name = target_name.as_deref().unwrap_or_else(|| trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed));
+            let target = PathBuf::from(&destination).join(name);
+            paths.push(target.to_string_lossy().to_string());
+            if remote::RemoteManager::is_remote_path(&source) {
+                if manager.inspect_path(&source)?.is_dir {
+                    for child in manager.scan_files_recursive(&source)? {
+                        if let Some(relative) = child.strip_prefix(trimmed).and_then(|p| p.strip_prefix('/')) {
+                            paths.push(target.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR)).to_string_lossy().to_string());
+                        }
+                    }
+                }
+            } else if PathBuf::from(&source).is_dir() {
+                for entry in walkdir::WalkDir::new(&source).follow_links(false).min_depth(1) {
+                    let entry = entry?;
+                    paths.push(target.join(entry.path().strip_prefix(&source)?).to_string_lossy().to_string());
+                }
+            }
+        }
+        Ok(paths)
+    }).await.map_err(|e| e.to_string())?.map_err(|e| ops::format_operation_error(&e))
+}
+
 #[tauri::command]
 pub async fn list_children(
     remote_state: State<'_, remote::RemoteState>,
@@ -398,7 +433,7 @@ pub fn start_delete_paths(
         };
         let message = match &result {
             Ok(_) => "Operacion completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -463,7 +498,7 @@ pub fn start_copy_or_move_paths(
         };
         let message = match &result {
             Ok(_) => "Operacion completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -497,7 +532,7 @@ pub fn start_extract_archives(
             Err(error) => {
                 // Emit error as a log line so it appears in the progress panel.
                 let _ = ops::emit_log(&app_handle, &job_id, format!("[ERROR] {}", error));
-                error.to_string()
+                ops::format_operation_error(error)
             }
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
@@ -529,7 +564,7 @@ pub fn start_convert_to_chd(
         );
         let message = match &result {
             Ok(_) => "Conversion CHD completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -560,7 +595,7 @@ pub fn start_restore_from_chd(
         );
         let message = match &result {
             Ok(_) => "Recuperacion desde CHD completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -591,7 +626,7 @@ pub fn start_convert_to_cso(
         );
         let message = match &result {
             Ok(_) => "Conversion CSO completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -622,7 +657,7 @@ pub fn start_restore_from_cso(
         );
         let message = match &result {
             Ok(_) => "Restauracion CSO completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -673,7 +708,7 @@ pub fn start_convert_to_rvz(
         );
         let message = match &result {
             Ok(_) => "Conversion RVZ completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -704,7 +739,7 @@ pub fn start_restore_from_rvz(
         );
         let message = match &result {
             Ok(_) => "Restauracion RVZ completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -735,7 +770,7 @@ pub fn start_pack_to_xiso(
         );
         let message = match &result {
             Ok(_) => "Conversion XISO completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -766,7 +801,7 @@ pub fn start_unpack_xiso(
         );
         let message = match &result {
             Ok(_) => "Extraccion XISO completada.".to_string(),
-            Err(error) => error.to_string(),
+            Err(error) => ops::format_operation_error(error),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });
@@ -927,6 +962,11 @@ pub async fn scan_for_m3u_groups(
         return tauri::async_runtime::spawn_blocking(move || {
             let mut raw_files = Vec::new();
             for dir in &dirs {
+                let entry = rm.inspect_path(dir).map_err(|e| e.to_string())?;
+                if !entry.is_dir {
+                    if let Some(file) = m3u::raw_file_from_remote_path(dir) { raw_files.push(file); }
+                    continue;
+                }
                 let virtual_paths = if recursive {
                     rm.scan_files_recursive(dir).map_err(|e| e.to_string())?
                 } else {
@@ -1001,7 +1041,7 @@ pub async fn generate_m3u_files(
                     Ok(_) => created.push(out.clone()),
                     Err(e) => failed.push(crate::models::M3uFailureDto {
                         path: out.clone(),
-                        error: e.to_string(),
+                        error: ops::format_operation_error(&e),
                     }),
                 }
             }
@@ -1161,7 +1201,7 @@ pub fn start_compress(
         );
         let message = match &result {
             Ok(_) => "Compresión completada.".to_string(),
-            Err(e) => e.to_string(),
+            Err(e) => ops::format_operation_error(e),
         };
         let _ = ops::emit_finished(&app_handle, &job_id, result.is_ok(), message);
     });

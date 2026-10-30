@@ -3,7 +3,8 @@
   import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
   import type { ActiveConnectionDto, EntryDto, KnownFoldersDto, VolumeDto } from "../../types/index.js";
   import { app } from "../../stores/app.svelte.js";
-  import { basenameOf, dirnameOf, normalizePath } from "../../utils/ghosts.js";
+  import { basenameOf, dirnameOf, normalizePath, joinPath } from "../../utils/ghosts.js";
+  import { firstLongWindowsPath } from "../../utils/windows-paths.js";
   import Modal from "../ui/Modal.svelte";
   import Button from "../ui/Button.svelte";
   import { t } from "../../i18n/index.js";
@@ -200,6 +201,8 @@
     if (!creatingFolder) return;
     const name = newFolderName.trim();
     if (!currentPath || !name) { creatingFolder = false; return; }
+    const longPath = firstLongWindowsPath([joinPath(currentPath, name)]);
+    if (longPath) { app.notify("error", t("pathTooLong.preflight", { path: longPath })); return; }
     busy = true;
     try {
       await invoke<string>("create_folder", { parent: currentPath, name });
@@ -226,8 +229,15 @@
     if (renamingPath !== dir.path) return;
     const newName = renameValue.trim();
     if (!newName || newName === dir.name) { renamingPath = null; return; }
+    const longPath = firstLongWindowsPath([joinPath(dirnameOf(dir.path), newName)]);
+    if (longPath) { app.notify("error", t("pathTooLong.preflight", { path: longPath })); return; }
     busy = true;
     try {
+      if (/^(?:[a-z]:[\\/]|\\\\)/i.test(dir.path)) {
+        const paths = await invoke<string[]>("preview_transfer_paths", { sources: [dir.path], destination: dirnameOf(dir.path), targetName: newName });
+        const descendant = firstLongWindowsPath(paths);
+        if (descendant) { app.notify("error", t("pathTooLong.preflight", { path: descendant })); return; }
+      }
       await invoke<string>("rename_path", { path: dir.path, newName });
       renamingPath = null;
       await reloadChildren();

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.6-beta.4
+
+### English
+
+- Calculate MD5, SHA-1, SHA-256, SHA-512, CRC32 and BLAKE3 from the file menu or properties, including remote files.
+- Improved individual and multiple-file properties, optional automatic hashes and safeguards for files involved in queued work.
+- Fixed accidental modal closure when selecting text and added hash menu icons.
+- Checkpoint before implementing the documented multipurpose smart queue design.
+
+### Español
+
+- Cálculo de MD5, SHA-1, SHA-256, SHA-512, CRC32 y BLAKE3 desde el menú de archivos o propiedades, también en remotos.
+- Propiedades individuales y múltiples mejoradas, hashes automáticos opcionales y protección de archivos involucrados en la cola.
+- Corregido el cierre accidental de modales al seleccionar texto y añadidos iconos al menú de hashes.
+- Checkpoint previo a la implementación del diseño documentado de cola inteligente multipropósito.
+
 ## 0.2.6-beta.3
 
 ### English

@@ -47,6 +47,7 @@
   import { extractionDestination, extractionGhosts } from "../../utils/extraction-ghosts.js";
   import { predictedCueTracks, predictsEmptyGhostContainer } from "../../utils/chd-ghosts.js";
   import { firstLongWindowsPath } from "../../utils/windows-paths.js";
+  import { hashBlockedPaths } from "../../utils/hash-locks.js";
   import { resolveQueueOutputs } from "../../utils/queue-plan.js";
 
   import Sidebar from "./Sidebar.svelte";
@@ -59,6 +60,8 @@
   import WindowResizeHandles from "./WindowResizeHandles.svelte";
   import ConfirmDialog from "../dialogs/ConfirmDialog.svelte";
   import SettingsDialog from "../dialogs/SettingsDialog.svelte";
+  import HashDialog from "../dialogs/HashDialog.svelte";
+  import type { HashResult } from "../dialogs/HashPanel.svelte";
   import UpdateDialog from "../dialogs/UpdateDialog.svelte";
   import PropertiesDialog from "../dialogs/PropertiesDialog.svelte";
   import ExtractionDialog from "../dialogs/ExtractionDialog.svelte";
@@ -202,6 +205,8 @@
 
   // ── Dialog state ─────────────────────────────────────────
   let propertiesState = $state<{ paths: string[] } | null>(null);
+  type HashDialogState = { paths: string[]; algorithms: string[]; autoStart: boolean; results?: HashResult[] };
+  let hashState = $state<HashDialogState | null>(null);
   let extractionState = $state<{ archives: string[] } | null>(null);
   let compressionState = $state<{ sources: string[] } | null>(null);
   let compressionCapabilities = $state<CompressionCapabilitiesDto>({ canCompressZip: true, canCompress7z: true, canCompressRar: false });
@@ -561,10 +566,11 @@
 
   async function executeDelete(paths: string[], providedJobId?: string, retryQueuedOp?: QueuedOp | null): Promise<boolean> {
     const jobId = providedJobId ?? newJobId();
+    const trackedOp = retryQueuedOp ?? { id: newQueueId(), title: t("shell.deleting"), kind: "delete" as const, sources: [], destinations: [], deletes: paths, produces: [], dependsOn: [], overwrite: false, renameOnConflict: false, execute: (id?: string, op?: QueuedOp | null) => executeDelete(paths, id, op) };
     app.startJob(jobId, t("shell.deleting"), {
       statusMessageOnSuccess: t("shell.deleted"),
       statusMessageOnFailure: t("shell.deleteFailed"),
-      retryQueuedOp,
+      retryQueuedOp: trackedOp,
     });
     const done = app.waitForJob(jobId);
     try {
@@ -1507,6 +1513,15 @@
     propertiesState = { paths };
   }
 
+  function handleHash(paths: string[], algorithms: string[] | null) {
+    if (paths.some(isGhostPath) || hashBlockedPaths(paths, app.hashBusyOperations).length) { app.notify("error", t("hash.blocked")); return; }
+    hashState = { paths, algorithms: algorithms ?? ["SHA-256"], autoStart: algorithms !== null };
+  }
+
+  function closeHash() {
+    hashState = null;
+  }
+
   // ── Open with ─────────────────────────────────────────────
   function handleOpenWith(path: string) {
     invoke("open_with_dialog", { path }).catch(e => app.notify("error", String(e)));
@@ -1528,6 +1543,7 @@
     onDiscImage: openDiscImageDialog,
     onM3u: openM3uDialog,
     onProperties: handleProperties,
+    onHash: handleHash,
     onOpenWith: handleOpenWith,
   };
 </script>
@@ -1619,6 +1635,12 @@
 
 {#if propertiesState}
   <PropertiesDialog paths={propertiesState.paths} onclose={() => (propertiesState = null)} />
+{/if}
+
+{#if hashState}
+  {#key hashState}
+    <HashDialog paths={hashState.paths} algorithms={hashState.algorithms} autoStart={hashState.autoStart} results={hashState.results} onclose={closeHash} />
+  {/key}
 {/if}
 
 {#if extractionState}

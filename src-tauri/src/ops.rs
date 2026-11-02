@@ -249,6 +249,7 @@ pub fn summarize_paths(
     cancel_state: Option<(&AtomicU64, u64)>,
 ) -> Result<PropertiesSummaryDto> {
     let mut lines = Vec::new();
+    let mut items = Vec::new();
     let mut total_size = 0_u64;
     let mut files = 0_usize;
     let mut directories = 0_usize;
@@ -257,12 +258,17 @@ pub fn summarize_paths(
         ensure_summary_not_cancelled(cancel_state)?;
         let metadata = fs::metadata(path)
             .with_context(|| format!("No se pudo leer metadata de {}", path.display()))?;
+        let timestamp = |time: std::io::Result<SystemTime>| time.ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+        let modified_ts = timestamp(metadata.modified());
+        let created_ts = timestamp(metadata.created());
+        let readonly = Some(metadata.permissions().readonly());
         if metadata.is_dir() {
             let (size, file_count, dir_count) =
                 compute_directory_stats(path, options.max_depth, cancel_state)?;
             total_size += size;
             files += file_count;
-            directories += dir_count;
+            directories += dir_count + 1;
+            items.push(crate::models::PropertiesItemDto { path: path.to_string_lossy().to_string(), name: path.file_name().unwrap_or_else(|| path.as_os_str()).to_string_lossy().to_string(), is_dir: true, size_label: format_size(size), size_bytes: size, modified_ts, created_ts, readonly, files: Some(file_count), directories: Some(dir_count) });
             lines.push(format!(
                 "[DIR] {} | {} | {} | {} ficheros, {} subcarpetas",
                 path.file_name()
@@ -276,6 +282,7 @@ pub fn summarize_paths(
         } else {
             files += 1;
             total_size += metadata.len();
+            items.push(crate::models::PropertiesItemDto { path: path.to_string_lossy().to_string(), name: path.file_name().unwrap_or_else(|| path.as_os_str()).to_string_lossy().to_string(), is_dir: false, size_label: format_size(metadata.len()), size_bytes: metadata.len(), modified_ts, created_ts, readonly, files: None, directories: None });
             lines.push(format!(
                 "[FILE] {} | {} | {}",
                 path.file_name()
@@ -294,6 +301,7 @@ pub fn summarize_paths(
         total_size,
         total_size_label: format_size(total_size),
         lines,
+        items,
     })
 }
 
@@ -5441,6 +5449,24 @@ fn compress_via_rar(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn properties_distinguish_files_and_selected_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("folder");
+        let file = root.path().join("game.iso");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("track.bin"), b"abc").unwrap();
+        std::fs::write(&file, b"12345").unwrap();
+        let options = crate::models::SummaryOptionsPayload { max_depth: None };
+        let one = super::summarize_paths(&[file.clone()], &options, None).unwrap();
+        assert_eq!(one.items.len(), 1);
+        assert_eq!(one.items[0].size_bytes, 5);
+        assert!(!one.items[0].is_dir);
+        assert!(one.items[0].modified_ts.is_some());
+        let many = super::summarize_paths(&[file, folder], &options, None).unwrap();
+        assert_eq!((many.count, many.files, many.directories, many.total_size), (2, 2, 1, 8));
+        assert_eq!(many.items[1].files, Some(1));
+    }
     #[test]
     fn selected_gdi_and_cue_tracks_are_not_reported_as_orphans() {
         use std::fs;

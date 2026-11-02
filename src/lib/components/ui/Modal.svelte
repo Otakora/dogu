@@ -11,8 +11,13 @@
 
   let { title, width = "480px", onclose, children, footer }: Props = $props();
 
+  let backdropPressed = false;
+  let backdropReleased = false;
+
   function handleBackdrop(e: MouseEvent) {
-    if (e.target === e.currentTarget) onclose?.();
+    if (backdropPressed && backdropReleased && e.target === e.currentTarget) onclose?.();
+    backdropPressed = false;
+    backdropReleased = false;
   }
 
   function handleKey(e: KeyboardEvent) {
@@ -26,6 +31,9 @@
 <div
   class="modal-backdrop"
   role="presentation"
+  onpointerdown={(e) => { backdropPressed = e.target === e.currentTarget; backdropReleased = false; }}
+  onpointerup={(e) => { backdropReleased = e.target === e.currentTarget; }}
+  onpointercancel={() => { backdropPressed = false; backdropReleased = false; }}
   onclick={handleBackdrop}
   onkeydown={undefined}
 >

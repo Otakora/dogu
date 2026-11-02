@@ -210,6 +210,18 @@
         <div class="setting-group">
           <div class="setting-label">{t("settingsDialog.fileOperations")}</div>
           <div class="setting-row">
+            <div class="setting-name-block"><span class="setting-name">{t("hash.propertiesAuto")}</span><span class="setting-hint">{t("hash.propertiesHint")}</span></div>
+            <input type="checkbox" class="checkbox" checked={app.settings.propertiesAutoHash} onchange={(e) => app.updateSettings({ propertiesAutoHash: e.currentTarget.checked })} aria-label={t("hash.propertiesAuto")} />
+          </div>
+          {#if app.settings.propertiesAutoHash}
+            <div class="setting-row"><span class="setting-name">{t("hash.propertiesAlgorithm")}</span>
+              <select class="select-input" value={app.settings.propertiesHashAlgorithm} onchange={(e) => app.updateSettings({ propertiesHashAlgorithm: e.currentTarget.value })} aria-label={t("hash.propertiesAlgorithm")}>
+                {#each ["MD5", "SHA-1", "SHA-256", "SHA-512", "CRC32", "BLAKE3"] as algorithm}<option value={algorithm}>{algorithm}</option>{/each}
+                <option value="all">{t("hash.all")}</option>
+              </select>
+            </div>
+          {/if}
+          <div class="setting-row">
             <span class="setting-name">{t("settingsDialog.confirmBeforeDelete")}</span>
             <input
               type="checkbox"

@@ -107,6 +107,21 @@ pub struct ConnectionOpenResultDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PropertiesItemDto {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size_label: String,
+    pub size_bytes: u64,
+    pub modified_ts: Option<i64>,
+    pub created_ts: Option<i64>,
+    pub readonly: Option<bool>,
+    pub files: Option<usize>,
+    pub directories: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PropertiesSummaryDto {
     pub count: usize,
     pub files: usize,
@@ -114,6 +129,7 @@ pub struct PropertiesSummaryDto {
     pub total_size: u64,
     pub total_size_label: String,
     pub lines: Vec<String>,
+    pub items: Vec<PropertiesItemDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

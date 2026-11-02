@@ -14,6 +14,7 @@ release operations, include a Spanish section as well.
 | [updater-signing.md](updater-signing.md) | Official updater signing keys, GitHub Secrets and rotation rules. | English first, Spanish section. |
 | [chdman.md](chdman.md) | chdman source, support and integration decisions. | English first, Spanish section. |
 | [ghost-files.md](ghost-files.md) | Queue ghost-file architecture and manual test checklist. | English technical reference. |
+| [smart-queue-design.md](smart-queue-design.md) | Proposed smart queue architecture, worker/resource policy, safety contracts and implementation gates. | English specification, Spanish product summary. |
 
 Repository-level community/legal files such as `CONTRIBUTING.md`,
 `CODE_OF_CONDUCT.md` and `SECURITY.md` may stay in English unless a Spanish copy

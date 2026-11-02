@@ -26,6 +26,11 @@ vm.runInNewContext(compile(readFileSync(new URL("../src/lib/utils/extraction-gho
   exports: extractionExports,
   require: name => { if (name === "./ghosts.js") return ghostModule.exports; throw new Error(`Unexpected import: ${name}`); },
 });
+const hashLockExports = {};
+vm.runInNewContext(compile(readFileSync(new URL("../src/lib/utils/hash-locks.ts", import.meta.url), "utf8")), {
+  exports: hashLockExports,
+  require: name => { if (name === "./ghosts.js") return ghostModule.exports; throw new Error(`Unexpected import: ${name}`); },
+});
 const chdGhostExports = {};
 vm.runInNewContext(compile(readFileSync(new URL("../src/lib/utils/chd-ghosts.ts", import.meta.url), "utf8")), {
   exports: chdGhostExports,
@@ -406,4 +411,22 @@ test("disc markers are removed only from the end of a folder name", () => {
   }
   assert.equal(extractionExports.stripDiscMarker("Game (Disc 1) (Europe)"), "Game (Disc 1) (Europe)");
   assert.equal(extractionExports.stripDiscMarker("Game (CD soundtrack)"), "Game (CD soundtrack)");
+});
+
+test("checksum protection blocks sources, descendants, outputs and unknown extractions", () => {
+  const ops = [
+    op("copy", { kind: "copy", sources: ["C:/Games/Collection"], produces: [ghost("C:/out/copy.iso")], fixedOutputs: [ghost("C:/out/copy (1).iso")] }),
+    op("delete", { kind: "delete", deletes: ["remote://nas/games/old.iso"] }),
+    op("extract", { kind: "extract", destinations: ["/output"], produces: [] }),
+  ];
+  const candidates = ["c:/games/collection/track.bin", "C:/out/copy (1).iso", "remote://nas/games/old.iso", "/output/new.iso", "/other/safe.iso"];
+  assert.deepEqual(Array.from(hashLockExports.hashBlockedPaths(candidates, ops)), candidates.slice(0, 4));
+  assert.deepEqual(Array.from(hashLockExports.hashBlockedPaths(["remote://nas/games/OLD.iso"], ops)), []);
+});
+
+test("shared extraction directories do not block unrelated files", () => {
+  const extract = op("extract", { kind: "extract", destinations: ["/games"], produces: [
+    { ...ghost("/games", true), sharedDirectory: true }, ghost("/games/new.iso"),
+  ] });
+  assert.deepEqual(Array.from(hashLockExports.hashBlockedPaths(["/games/old.iso", "/games/new.iso"], [extract])), ["/games/new.iso"]);
 });

@@ -1,4 +1,5 @@
 mod commands;
+mod hashing;
 mod m3u;
 mod models;
 mod ops;
@@ -22,6 +23,7 @@ pub fn run() {
             current_request_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
         .manage(pause::PauseRegistry::new())
+        .manage(hashing::HashRegistry::new())
         .manage(terminal::TerminalManager::new())
         .manage(updates::PendingUpdate::new())
         .setup(|app| {
@@ -47,6 +49,8 @@ pub fn run() {
             commands::preview_transfer_paths,
             commands::search_entries,
             commands::summarize_paths,
+            hashing::calculate_hashes,
+            hashing::cancel_hashes,
             commands::create_folder,
             commands::create_file,
             commands::rename_path,

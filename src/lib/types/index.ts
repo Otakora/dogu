@@ -161,6 +161,7 @@ export type PropertiesSummaryDto = {
   totalSize: number;
   totalSizeLabel: string;
   lines: string[];
+  items: { path: string; name: string; isDir: boolean; sizeLabel: string; sizeBytes: number; modifiedTs: number | null; createdTs: number | null; readonly: boolean | null; files: number | null; directories: number | null }[];
 };
 
 export type SummaryOptionsPayload = {
@@ -399,6 +400,8 @@ export type AppSettings = {
   hideDeleteProgressPopup: boolean;
   selectionWeightMaxDepth: number;
   selectionWeightCalculateAll: boolean;
+  propertiesAutoHash: boolean;
+  propertiesHashAlgorithm: string;
   contentSortKey: ContentSortKey;
   contentSortDirection: SortDirection;
   contentColumnWidths: ContentColumnWidths;

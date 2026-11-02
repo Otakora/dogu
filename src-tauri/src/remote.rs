@@ -837,6 +837,7 @@ impl RemoteManager {
         let mut directories = 0usize;
         let mut total_size = 0u64;
         let mut lines = Vec::new();
+        let mut items = Vec::new();
         for path in paths {
             let (_, logical_path) = parse_remote_virtual_path(path)
                 .ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
@@ -845,12 +846,14 @@ impl RemoteManager {
                 .fs
                 .stat(Path::new(&provider_path))
                 .map_err(|error| anyhow!(error.to_string()))?;
+            let modified_ts = item.metadata().modified.and_then(system_time_to_timestamp);
             if item.is_dir() {
                 let (dir_size, file_count, dir_count) =
                     summarize_remote_dir(&mut session, &logical_path, options.max_depth, 0)?;
                 total_size += dir_size;
                 files += file_count;
                 directories += dir_count + 1;
+                items.push(crate::models::PropertiesItemDto { path: path.clone(), name: logical_leaf_name(&logical_path), is_dir: true, size_label: ops::format_size(dir_size), size_bytes: dir_size, modified_ts, created_ts: None, readonly: None, files: Some(file_count), directories: Some(dir_count) });
                 lines.push(format!(
                     "[DIR] {} | {} | {} | {} ficheros, {} subcarpetas",
                     logical_leaf_name(&logical_path),
@@ -862,6 +865,7 @@ impl RemoteManager {
             } else {
                 total_size += item.metadata().size;
                 files += 1;
+                items.push(crate::models::PropertiesItemDto { path: path.clone(), name: logical_leaf_name(&logical_path), is_dir: false, size_label: ops::format_size(item.metadata().size), size_bytes: item.metadata().size, modified_ts, created_ts: None, readonly: None, files: None, directories: None });
                 lines.push(format!(
                     "[FILE] {} | {} | {}",
                     logical_leaf_name(&logical_path),
@@ -878,6 +882,7 @@ impl RemoteManager {
             total_size,
             total_size_label: ops::format_size(total_size),
             lines,
+            items,
         })
     }
 
@@ -1589,6 +1594,23 @@ impl RemoteManager {
         let target = target_dir.join(logical_leaf_name(&logical_path));
         fs::write(&target, buffer)?;
         Ok(target)
+    }
+
+    pub fn hash_remote_file(&self, path: &str, algorithms: &[String], cancel: &std::sync::atomic::AtomicBool, progress: &impl Fn(u64, u64)) -> Result<std::collections::BTreeMap<String, String>> {
+        let (session_id, logical_path) = parse_remote_virtual_path(path).ok_or_else(|| anyhow!("Ruta remota invalida: {path}"))?;
+        let mut session = self.get_session_mut(&session_id)?;
+        let provider_path = session.resolve_provider_path(&logical_path);
+        let before = session.fs.stat(Path::new(&provider_path)).map_err(|e| anyhow!(e.to_string()))?;
+        if before.is_dir() { return Err(anyhow!("[HASH_NOT_FILE]")); }
+        let mut stream = session.fs.open(Path::new(&provider_path)).map_err(|e| anyhow!(e.to_string()))?;
+        let mut read_bytes = 0;
+        let result = crate::hashing::hash_reader(&mut stream, algorithms, cancel, |bytes| { read_bytes = bytes; progress(bytes, before.metadata().size); });
+        let finish = session.fs.on_read(stream).map_err(|e| anyhow!(e.to_string()));
+        let hashes = result?;
+        finish?;
+        let after = session.fs.stat(Path::new(&provider_path)).map_err(|e| anyhow!(e.to_string()))?;
+        if read_bytes != before.metadata().size || before.metadata().size != after.metadata().size || before.metadata().modified != after.metadata().modified { return Err(anyhow!("[HASH_FILE_CHANGED]")); }
+        Ok(hashes)
     }
 
     /// Read a small disc descriptor without creating or overwriting a local staging file.

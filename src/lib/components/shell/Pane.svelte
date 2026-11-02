@@ -25,6 +25,7 @@
     onDiscImage: (mode: DiscImageMode, paths: string[]) => void;
     onM3u: (paths: string[], currentOnly?: boolean, allowSingle?: boolean) => void;
     onProperties: (paths: string[]) => void;
+    onHash: (paths: string[], algorithms: string[] | null) => void;
     onOpenWith: (path: string) => void;
   };
 
@@ -35,7 +36,7 @@
     onDropItems,
     onExtractHere, onExtractToFolder, onExtractTo,
     onCompressQuick, onCompress, onChd, onDiscImage, onM3u,
-    onProperties, onOpenWith,
+    onProperties, onHash, onOpenWith,
   }: Props = $props();
 
   // Set per-pane context for all children (paneIdx is stable — untrack is correct here)
@@ -100,6 +101,7 @@
       {onDiscImage}
       {onM3u}
       {onProperties}
+      {onHash}
       {onOpenWith}
     />
   </div>

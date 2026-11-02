@@ -18,6 +18,7 @@
   import type { FileTransferItem, FileTransferOperation } from "../../utils/transfers.js";
   import { canDropFileItemsToPath, inferFileTransferOperation, isNoOpFileTransfer } from "../../utils/transfers.js";
   import { visibleRange, mergeAreaSelection } from "../../utils/selection.js";
+  import { hashBlockedPaths } from "../../utils/hash-locks.js";
 
   const pane = getContext<PaneView>("pane");
 
@@ -36,10 +37,11 @@
     onDiscImage: (mode: DiscImageMode, paths: string[]) => void;
     onM3u: (paths: string[], currentOnly?: boolean, allowSingle?: boolean) => void;
     onProperties: (paths: string[]) => void;
+    onHash: (paths: string[], algorithms: string[] | null) => void;
     onOpenWith: (path: string) => void;
   };
 
-  let { onDelete, onCopy, onCut, onPaste, onDropItems, onExtractHere, onExtractToFolder, onExtractTo, onCompressQuick, onCompress, onChd, onDiscImage, onM3u, onProperties, onOpenWith }: Props = $props();
+  let { onDelete, onCopy, onCut, onPaste, onDropItems, onExtractHere, onExtractToFolder, onExtractTo, onCompressQuick, onCompress, onChd, onDiscImage, onM3u, onProperties, onHash, onOpenWith }: Props = $props();
 
   // ── Panel / body element refs ────────────────────────────
   let panelEl = $state<HTMLElement | undefined>(undefined);
@@ -1119,6 +1121,19 @@
     const splitPaneIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>`;
 
     const items: MenuItem[] = [];
+    if (allFiles) {
+      const hashAlgorithms = ["MD5", "SHA-1", "SHA-256", "SHA-512", "CRC32", "BLAKE3"];
+      const hashIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h16M4 16h16M10 3 8 21M16 3l-2 18"/></svg>`;
+      const allIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h18M3 12h18M3 17h18"/><path d="m7 5-1 14m7-14-1 14"/></svg>`;
+      const chooseIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></svg>`;
+      const hashBlocked = selHasGhost || hashBlockedPaths(sel, app.hashBusyOperations).length > 0;
+      items.push({ kind: "submenu", label: t("hash.menu"), icon: hashIcon, disabled: hashBlocked, title: hashBlocked ? t("hash.blocked") : undefined, children: [
+        ...hashAlgorithms.map(algorithm => ({ kind: "action" as const, label: algorithm, icon: hashIcon, onclick: () => onHash(sel, [algorithm]) })),
+        { kind: "separator" as const },
+        { kind: "action" as const, label: t("hash.all"), icon: allIcon, onclick: () => onHash(sel, hashAlgorithms) },
+        { kind: "action" as const, label: t("hash.choose"), icon: chooseIcon, onclick: () => onHash(sel, null) },
+      ] });
+    }
     if (!selHasGhost) {
       items.push({ kind: "action", label: isMulti ? t("menu.openCount", { count: sel.length }) : t("menu.open"), icon: openIcon, onclick: () => sel.forEach(p => invoke("open_path", { path: p })) });
     }

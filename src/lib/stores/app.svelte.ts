@@ -230,6 +230,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   hideDeleteProgressPopup: false,
   selectionWeightMaxDepth: 5,
   selectionWeightCalculateAll: false,
+  propertiesAutoHash: false,
+  propertiesHashAlgorithm: "SHA-256",
   contentSortKey: "name",
   contentSortDirection: "asc",
   contentColumnWidths: DEFAULT_COLUMN_WIDTHS,
@@ -268,6 +270,8 @@ function loadSettings(): AppSettings {
       renameOnConflict: parsed.defaultOverwriteOnConflict !== true,
       queueMaxConcurrent: clampQueueMaxConcurrent(parsed.queueMaxConcurrent),
       showQueueRelationMap: parsed.showQueueRelationMap !== false,
+      propertiesAutoHash: parsed.propertiesAutoHash === true,
+      propertiesHashAlgorithm: ["MD5", "SHA-1", "SHA-256", "SHA-512", "CRC32", "BLAKE3", "all"].includes(String(parsed.propertiesHashAlgorithm)) ? String(parsed.propertiesHashAlgorithm) : "SHA-256",
       updateChannel: parsed.updateChannel === "beta" ? "beta" : "stable",
       autoCheckUpdates: parsed.autoCheckUpdates !== false,
     } as AppSettings;
@@ -1342,6 +1346,12 @@ function createAppState() {
     get queueRunStats()  { return queueRunStats; },
     get queueExecutionSteps() { return queueExecutionSteps; },
     get queueStepErrors() { return queueStepErrors; },
+    get hashBusyOperations(): QueuedOp[] {
+      const pending = opQueue.map(op => ({ ...op, produces: resolvedOutputs.get(op.id) ?? op.produces }));
+      const running = queueRunning ? queueExecutionSteps.filter(step => step.state === "pending" || step.state === "running").map(step => step.op) : [];
+      const jobsRunning = jobs.filter(job => !job.done && job.retryQueuedOp).map(job => job.retryQueuedOp!);
+      return [...pending, ...running, ...jobsRunning];
+    },
     dismissQueueRunStats() { if (!queueRunning) queueRunStats = null; },
     get queueHasDependencies() { return queueHasDependencies; },
     get queueAccentBlocked() { return queueAccentBlocked; },
@@ -1463,6 +1473,7 @@ function createAppState() {
       // Refuse to run while any op is blocked by accented file names (integrity guard).
       if (ops.some((o) => isAccentUnsafeKind(o.kind) && collectAccentIssues(o.sources).length > 0)) return;
 
+      queueExecutionSteps = ops.map(op => ({ op, state: "pending" as const }));
       opQueue = [];
       queueRunning = true;
       queueStepErrors = {};

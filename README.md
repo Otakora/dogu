@@ -113,6 +113,8 @@ The queue currently supports:
 
 Queue tools include retry for one failed job, retry for all failed jobs, configurable concurrency, dependency-aware ordering and recoverable pauses for some errors.
 
+File context menus can calculate MD5, SHA-1, SHA-256, SHA-512, CRC32 and BLAKE3 for local or remote files. Results can be copied or compared with an expected value. Checksums run immediately and are unavailable for files involved in pending or running operations. Properties can optionally calculate a selected algorithm automatically; this reads every selected file in full and can take time on large files or remote connections. MD5, SHA-1 and CRC32 are useful for matching published checksums but are not recommended to establish authenticity; compare stronger hashes against a trusted source.
+
 The queue panel also includes a relation map for dependencies, safe ordering and conflicts. Items that will disappear because of a queued move, cleanup or deletion are shown with a strikethrough preview.
 
 ### Ghost files, without the mystery 👻
@@ -374,6 +376,8 @@ La cola soporta actualmente:
 - Generar playlists M3U.
 
 La cola incluye reintento de una tarea fallida, reintento de todas las fallidas, concurrencia configurable, ordenación por dependencias y pausas recuperables para algunos errores.
+
+Desde el menú contextual de archivos locales o remotos se pueden calcular MD5, SHA-1, SHA-256, SHA-512, CRC32 y BLAKE3, copiar los resultados y compararlos con un valor esperado. Las sumas se calculan inmediatamente y no están disponibles para archivos involucrados en operaciones pendientes o en curso. En configuración se puede activar su cálculo automático en propiedades y elegir el algoritmo; se lee cada archivo seleccionado completo y puede tardar con archivos grandes o conexiones remotas. MD5, SHA-1 y CRC32 sirven para comparar sumas publicadas, pero no se recomiendan para establecer autenticidad; compara hashes más robustos con una fuente fiable.
 
 El panel de cola también incluye un mapa de relaciones para dependencias, orden seguro y conflictos. Los elementos que desaparecerán por un movimiento, limpieza o borrado en cola se muestran tachados como vista previa.
 

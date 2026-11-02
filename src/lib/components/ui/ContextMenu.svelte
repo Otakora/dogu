@@ -4,7 +4,7 @@
   export type MenuItem =
     | { kind: "action"; label: string; icon?: string; shortcut?: string; disabled?: boolean; danger?: boolean; onclick: () => void }
     | { kind: "separator" }
-    | { kind: "submenu"; label: string; icon?: string; children: MenuItem[] };
+    | { kind: "submenu"; label: string; icon?: string; disabled?: boolean; title?: string; children: MenuItem[] };
 
   type Props = {
     x: number;
@@ -72,7 +72,7 @@
       </button>
     {:else if item.kind === "submenu"}
       <div class="ctx-submenu">
-        <button class="ctx-item ctx-item--submenu" role="menuitem" aria-haspopup="menu">
+        <button class="ctx-item ctx-item--submenu" role="menuitem" aria-haspopup="menu" disabled={item.disabled} title={item.title}>
           {#if item.icon}
             <span class="ctx-icon" aria-hidden="true">{@html item.icon}</span>
           {:else}
@@ -81,9 +81,9 @@
           <span class="ctx-label">{item.label}</span>
           <span class="ctx-chevron">&gt;</span>
         </button>
-        <div class="ctx-menu ctx-menu--nested" role="menu">
+        {#if !item.disabled}<div class="ctx-menu ctx-menu--nested" role="menu">
           {@render menuItems(item.children)}
-        </div>
+        </div>{/if}
       </div>
     {/if}
   {/each}
